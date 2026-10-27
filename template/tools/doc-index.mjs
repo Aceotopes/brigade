@@ -81,7 +81,7 @@ function devlogArchive({ target, dir }) {
   return out.join("\n");
 }
 
-/** Each module's gotcha files, and under each file one line per ticket's block. */
+/** Each gotcha file, at any depth, and under each file one line per ticket's block. */
 function gotchas({ target, dir }) {
   const out = [];
   for (const file of markdownFiles(dir).filter((f) => posix.basename(f) !== "README.md")) {

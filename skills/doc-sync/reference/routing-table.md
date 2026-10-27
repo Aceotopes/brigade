@@ -24,7 +24,7 @@ the finish ticket, whatever a row below says.
 | `CONTEXT.md` | A domain term appears or its definition sharpens (`mattpocock-skills:domain-modeling`'s format: one term, one word, rejects under `_Avoid_`). The why goes in an ADR. |
 | `CLAUDE.md` | A rule, the stack, the working agreement, or a gotcha that bites every session changes. Never status. |
 | `docs/agents/*.md` | The process, the ticket shape, the issue tracker, the labels or the domain-doc layout changes; keep `CLAUDE.md`'s "Agent skills" block in step. |
-| `docs/agents/gotchas/module-N/<phase>.md` | A ticket adds, changes or retires a trap (`SKILL.md` §1). A rule that bites every session goes in `CLAUDE.md` instead. |
+| `docs/agents/gotchas/<phase>.md` (doc-config's `GOTCHAS_FILE`) | A ticket adds, changes or retires a trap (`SKILL.md` §1). A rule that bites every session goes in `CLAUDE.md` instead. |
 | `docs/handbook/<phase>.md` | Phase end: two to four chapters from the phase's implementation logs, each with its `**Basis:**` line (ticket, devlog, ADR) under its heading. |
 | `docs/adr/NNNN-*.md` | A decision passes all three ADR tests. **`ls docs/adr/` before picking the number**: a numbering collision has happened once. Never rewrite one; supersede or amend it in its header. |
 | `docs/history/devlog.md` | Every commit (`SKILL.md` §3). Rotated at phase end by `node tools/doc-rotate.mjs`. |

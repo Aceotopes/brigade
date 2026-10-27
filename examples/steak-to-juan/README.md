@@ -21,6 +21,13 @@ example of a real project's config. Nothing here is copied into a new project.
   export const PATH_ROOTS = ["design", "docs", "src", "prisma", "scripts", "test", "sync", "tools", ".github", ".claude"];
   export const PATH_EXTENSIONS = ["md", "html", "tsx", "ts", "mjs", "sql", "yml", "json", "sh", "css"];
   ```
+
+  And a third, since 0.2.1: Brigade's gotchas files are flat by default, and Steak To Juan keeps
+  one folder per module, so the current module's folder is named (changed when a module starts):
+
+  ```js
+  export const GOTCHAS_FILE = "docs/agents/gotchas/module-6/{phase}.md";
+  ```
 - **`.claude/hooks/spec-issues.json` moves to `.claude/spec-issues.json`**, where Brigade's hook
   reads it.
 - **The phase runner's env names change** (`STJ_PHASE_*` → `PHASE_RUN_*`, step 1), so the hooks and

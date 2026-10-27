@@ -4,8 +4,9 @@ kind: generated
 ---
 # Gotchas
 
-One file per phase, `module-N/<phase>.md`, from `docs/_templates/gotchas-phase.md`: only the traps
-the code, the ADRs and the roadmap don't make plain. The index below is generated.
+One file per phase, `<phase>.md` (or where `tools/doc-config.mjs`'s `GOTCHAS_FILE` puts it), from
+`docs/_templates/gotchas-phase.md`: only the traps the code, the ADRs and the roadmap don't make
+plain. The index below is generated.
 
 <!-- generated:start gotchas -->
 <!-- generated:end gotchas -->

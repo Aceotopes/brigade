@@ -26,7 +26,9 @@ export function write(rel, text) {
 }
 
 export function git(args, input) {
-  return execFileSync("git", args, { cwd: ROOT, encoding: "utf8", maxBuffer: 64 * 1024 * 1024, input }).replace(/\r\n/g, "\n");
+  // stderr is kept, not printed: a caller that expects a failure (a doc not yet in HEAD) catches it.
+  const stdio = ["pipe", "pipe", "pipe"];
+  return execFileSync("git", args, { cwd: ROOT, encoding: "utf8", maxBuffer: 64 * 1024 * 1024, input, stdio }).replace(/\r\n/g, "\n");
 }
 
 export const KINDS = ["living", "log", "record", "generated"];

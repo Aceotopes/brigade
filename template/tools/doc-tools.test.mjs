@@ -258,6 +258,14 @@ test("a new doc anywhere in docs/ needs a header", () => {
   assert.match(node("doc-check.mjs").stderr, /docs\/notes\.md: has no header/);
 });
 
+test("a new doc not yet in HEAD passes quietly: git's own complaint is not printed", () => {
+  const { dir, node } = repo();
+  writeFileSync(join(dir, "docs", "notes.md"), "---\njob: Notes.\nkind: living\nmax-lines: 20\n---\n# Notes\n");
+  const check = node("doc-check.mjs");
+  assert.equal(check.status, 0, check.stderr);
+  assert.doesNotMatch(check.stderr, /fatal:/);
+});
+
 test("adopting accepts today's header-less docs; the list only shrinks, and never inside a phase run", () => {
   const { dir, node } = repo();
   writeFileSync(join(dir, "docs", "old-notes.md"), "# Notes from before the workflow\n");

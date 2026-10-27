@@ -60,7 +60,7 @@ test("Steak To Juan's example holds exactly what run.mjs hardcoded", () => {
 test("Steak To Juan's prompt, rendered from the example, still says everything its old prompt did", () => {
   const stj = parseRunConfig(STJ);
   const prose = readFileSync(join(PLUGIN, "examples", "steak-to-juan", "phase-run-prompt.md"), "utf8");
-  const values = { N: 7, TITLE: "t", BRANCH: "phase-6h", PHASE: "6h", SPEC: "#5", BASE: "abc", FRONTEND: "yes", GATE: "lint", OUTPUT: "x", ROUND: 1, ROUNDS: 3 };
+  const values = { N: 7, TITLE: "t", BRANCH: "phase-6h", PHASE: "6h", GOTCHAS_FILE: "docs/agents/gotchas/module-6/6h.md", SPEC: "#5", BASE: "abc", FRONTEND: "yes", GATE: "lint", OUTPUT: "x", ROUND: 1, ROUNDS: 3 };
   Object.assign(values, promptValues(stj, prose, values));
   const [ticket, fix] = ["ticket-prompt.md", "fix-prompt.md"].map((name) => render(readFileSync(join(PLUGIN, "template", "tools", "phase-run", name), "utf8"), values));
   for (const text of [ticket, fix]) assert.doesNotMatch(text, /\{\{\w+\}\}/);
@@ -83,6 +83,7 @@ test("Steak To Juan's prompt, rendered from the example, still says everything i
     "at least 2 screenshots saved to `.impeccable/review-7/`",
     "The runner also runs `next build` on any change under `src/`.",
     "Start one `impeccable-finish-reviewer` agent.",
+    "`docs/agents/gotchas/module-6/6h.md` (made from",
   ]) {
     assert.ok(ticket.includes(phrase), `the ticket prompt says: ${phrase}`);
   }

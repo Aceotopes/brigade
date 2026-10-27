@@ -8,7 +8,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { BROWSER_CHECK, fill, loadRunConfig, parseRunConfig, qaUrl, sessionEnv, targetFingerprint, targetUrl } from "./config.mjs";
-import { QUIET_MS, SETTLE_MS, applyMigrations, loadResults, outsideAreas, projectGates, promptValues, pullRequestBody, recordResult, render, report, runSession, screenshotsSince, sessionSettings, turnOver } from "./run.mjs";
+import { QUIET_MS, SETTLE_MS, applyMigrations, gotchasFile, holdReason, loadResults, outsideAreas, projectGates, promptValues, pullRequestBody, recordResult, render, report, runSession, screenshotsSince, sessionSettings, turnOver } from "./run.mjs";
 
 const options = { minutes: 120, waitHours: 6, print: true, spec: 179 };
 const call = (claude, extra = {}) => ({ options, prompt: "Build it.", sessionId: "s-1", resume: false, claude, online: async () => true, sleep: async () => {}, ...extra });
@@ -80,6 +80,25 @@ test("a night that died before its report is carried into the next report", () =
   const text = report(run, options, []);
   assert.match(text, /stopped before writing its report/i);
   assert.match(text, /#166: Lapsed requests move to Answered\./);
+});
+
+test("the report points at the pull request only when there is one", () => {
+  const run = tempRun();
+  assert.match(report(run, options, []), /Nothing was pushed, so there is no pull request yet\./);
+  assert.doesNotMatch(report(run, options, []), /CI runs on the pull request/);
+  run.pullRequest = "https://github.com/owner/repo/pull/4";
+  assert.match(report(run, options, []), /CI runs on the pull request \(https:\/\/github\.com\/owner\/repo\/pull\/4\)/);
+});
+
+test("a finish ticket without run-ready is held as the finish ticket, not sent to /ticket-check", () => {
+  const build = { number: 2, state: "closed", labels: ["run-ready"], blockers: [] };
+  const finish = { number: 3, state: "open", labels: [], blockers: [{ number: 2, state: "closed" }] };
+  const stray = { number: 4, state: "open", labels: [], blockers: [] };
+  const byNumber = new Map([build, finish, stray].map((t) => [t.number, t]));
+  assert.match(holdReason(stray, byNumber), /run \/ticket-check first/);
+  assert.match(holdReason(finish, new Map([build, finish].map((t) => [t.number, t]))), /the finish ticket: built attended/);
+  // Blocked by only some of the others: not the finish ticket.
+  assert.match(holdReason(finish, byNumber), /run \/ticket-check first/);
 });
 
 test("the report shows what a session found in other tickets' code and what it handed forward", () => {
@@ -381,7 +400,12 @@ test("a session's settings hold the run's rules, the project's rows and the deni
 });
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const ticketValues = { N: 7, TITLE: "t", BRANCH: "phase-2", PHASE: "2", SPEC: "#5", BASE: "abc", FRONTEND: "no" };
+const ticketValues = { N: 7, TITLE: "t", BRANCH: "phase-2", PHASE: "2", GOTCHAS_FILE: gotchasFile("phase-2"), SPEC: "#5", BASE: "abc", FRONTEND: "no" };
+
+test("a phase's gotchas file is flat by default: one file per phase, named after the branch", () => {
+  assert.equal(gotchasFile("phase-2b"), "docs/agents/gotchas/2b.md");
+  assert.match(render(prompts()[0], ticketValues), /`docs\/agents\/gotchas\/2\.md` \(made from/);
+});
 const prompts = () => ["ticket-prompt.md", "fix-prompt.md"].map((name) => readFileSync(join(HERE, name), "utf8"));
 const fixValues = { GATE: "lint", OUTPUT: "x", ROUND: 1, ROUNDS: 3 };
 

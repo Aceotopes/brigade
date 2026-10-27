@@ -36,6 +36,7 @@ import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { BROWSER_CHECK, fill, fillEnv, loadRunConfig, qaUrl, sessionEnv as pinnedEnv, targetFingerprint, targetUrl } from "./config.mjs";
+import * as docConfig from "../doc-config.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, "..", "..");
@@ -370,12 +371,20 @@ async function loadTickets(options) {
   return wanted;
 }
 
+/** The phase's finish ticket: blocked by every other ticket of the spec, and built attended. */
+function isFinishTicket(ticket, byNumber) {
+  const others = [...byNumber.keys()].filter((number) => number !== ticket.number);
+  return others.length > 0 && others.every((number) => ticket.blockers.some((blocker) => blocker.number === number));
+}
+
 /** Why a ticket cannot start now, or null when it can. */
 function holdReason(ticket, byNumber) {
   if (isDone(ticket)) return "done";
   if (ticket.labels.includes(PARK_LABEL.question)) return `parked: waiting on your answer (${PARK_LABEL.question})`;
   if (ticket.labels.includes(PARK_LABEL.failure)) return `parked: needs a person (${PARK_LABEL.failure})`;
-  if (!ticket.labels.includes(READY_LABEL)) return `not labelled ${READY_LABEL} (run /ticket-check first)`;
+  if (!ticket.labels.includes(READY_LABEL)) {
+    return isFinishTicket(ticket, byNumber) ? "the finish ticket: built attended, not by a run" : `not labelled ${READY_LABEL} (run /ticket-check first)`;
+  }
   for (const blocker of ticket.blockers) {
     const known = byNumber.get(blocker.number);
     const done = known ? isDone(known) : blocker.state === "closed" || builtOnBranch(blocker.number);
@@ -392,6 +401,11 @@ async function preflight(options) {
   const loaded = loadRunConfig(ROOT);
   if (loaded.error) die(`Not ready to run: ${loaded.error}`);
   config = loaded.config;
+  try {
+    gotchasFile("phase-check"); // only the pattern is checked: the branch is settled further down
+  } catch (error) {
+    die(`Not ready to run: tools/doc-config.mjs GOTCHAS_FILE: ${error.message} The only placeholder is {phase}.`);
+  }
   migrationTargetUrl = targetUrl(config, lookup);
   if (config.prompt) {
     const path = join(ROOT, config.prompt);
@@ -475,6 +489,11 @@ async function preflight(options) {
 }
 
 // ------------------------------------------------------------------ session
+
+/** The phase's gotchas file: doc-config's GOTCHAS_FILE, or the flat default when the project's copy predates it. */
+function gotchasFile(branch) {
+  return fill(docConfig.GOTCHAS_FILE ?? "docs/agents/gotchas/{phase}.md", { phase: branch.replace(/^phase-/, "") });
+}
 
 function render(template, values) {
   return template.replace(/\{\{(\w+)\}\}/g, (whole, key) => (key in values ? String(values[key]) : whole));
@@ -971,7 +990,7 @@ async function runBackground({ prompt, sessionId, resume, options, settings, nam
   }
   stopBackground(id);
   // Stopped at the time cap, or by hand, a session can leave its stop check's tests (or its own) running.
-  stopStrayTests(`by #${number}'s session`);
+  stopStray(`by #${number}'s session`);
   rmSync(stopCheckMarker(number), { force: true });
 
   const turn = readTurn(sessionId, fromLine);
@@ -1521,6 +1540,7 @@ async function runTicket(ticket, options, run) {
     TITLE: ticket.title,
     BRANCH: run.branch,
     PHASE: run.branch.replace(/^phase-/, ""), // phase-6g → 6g: the phase's own doc files are named so
+    GOTCHAS_FILE: gotchasFile(run.branch),
     SPEC: options.spec ? `#${options.spec}` : "none (a one-off ticket)",
     BASE: base,
     FRONTEND: ticket.labels.includes("frontend") ? "yes" : "no",
@@ -1726,7 +1746,7 @@ function report(run, options, remaining, { final = true } = {}) {
   if (run.docHealth) out.push(...docHealthSection(run.docHealth));
 
   out.push("### Next", "");
-  out.push("- CI runs on the pull request; check it is green there.");
+  out.push(run.pullRequest ? `- CI runs on the pull request (${run.pullRequest}); check it is green there.` : "- Nothing was pushed, so there is no pull request yet.");
   out.push(`- To hand-test: \`git checkout ${run.branch}\`. Leave the folder alone while a run is on.`);
   out.push("- Merge with a **merge commit** when the phase is done. Never squash or rebase.");
   return `${out.join("\n")}\n`;
@@ -1842,13 +1862,16 @@ async function main() {
 
   const health = exec("node", ["tools/doc-check.mjs", "--report"]);
   run.docHealth = health.ok ? health.stdout : null;
+  // A night that pushed nothing still reports on an earlier night's pull request.
+  if (!run.pullRequest) {
+    const existing = exec("gh", ["pr", "view", branch, "--json", "url", "-q", ".url"]);
+    if (existing.ok && existing.stdout) run.pullRequest = existing.stdout;
+  }
   const text = report(run, options, remaining);
   writeFileSync(reportFile, text);
   for (const result of run.all) result.reported = true;
   saveResults(run);
-  if (run.pullRequest || exec("gh", ["pr", "view", branch, "--json", "url", "-q", ".url"]).ok) {
-    exec("gh", ["pr", "comment", branch, "--body-file", reportFile]);
-  }
+  if (run.pullRequest) exec("gh", ["pr", "comment", branch, "--body-file", reportFile]);
   log(`Run finished. Report: ${reportFile}${run.pullRequest ? ` · pull request: ${run.pullRequest}` : ""}`);
   console.log(`\n${text}`);
 }
@@ -1859,6 +1882,8 @@ export {
   SETTLE_MS,
   applyMigrations,
   fetchBlockers,
+  gotchasFile,
+  holdReason,
   loadResults,
   online,
   outsideAreas,

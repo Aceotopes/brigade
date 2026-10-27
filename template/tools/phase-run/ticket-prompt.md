@@ -25,8 +25,8 @@ left you is in the code, the gotchas file and the ADRs.
    gotcha blocks it names. If an earlier ticket's implementation log or this ticket's "Handed
    forward" says something is owed to this ticket, it is part of this ticket.
 2. What the ticket names, and only that: the gotcha blocks (`docs/agents/gotchas/README.md` indexes
-   every module's files, one per phase; read the blocks named by the ticket and any whose files you
-   will touch), the ADRs, and for a `frontend` ticket its prototype screen.
+   every phase's file; read the blocks named by the ticket and any whose files you will touch), the
+   ADRs, and for a `frontend` ticket its prototype screen.
 3. The code you will change.
 
 {{PROJECT_READ}}
@@ -109,8 +109,7 @@ A backend-only ticket skips this section and says so in the implementation log.
 
 Follow the **per-ticket tier** of the `doc-sync` skill. In short: the implementation
 log in full; a devlog entry; the ticket's gotchas block in this phase's file,
-`docs/agents/gotchas/module-<N>/{{PHASE}}.md` (made from `docs/_templates/gotchas-phase.md` if it does
-not exist yet); an ADR if something hard to reverse was decided; the runbook only for a new manual
+`{{GOTCHAS_FILE}}` (made from `docs/_templates/gotchas-phase.md` if it does not exist yet); an ADR if something hard to reverse was decided; the runbook only for a new manual
 step; and the per-ticket rows the project adds in its doc-sync rows file, if it has one.
 **No index line and no roadmap line**: run `node tools/doc-index.mjs`, which writes the indexes, then
 `node tools/doc-check.mjs`. The phase-end tier (the devlog rotation, handbook, owner's guide, roadmap,

@@ -1,12 +1,12 @@
 ---
-job: Module N, phase <PHASE> (<name>): the traps a session must know before touching its files.
+job: Phase <PHASE> (<name>): the traps a session must know before touching its files.
 kind: living
 max-lines: 800
 ---
-# Module N gotchas — Phase <PHASE>: <name>
+# Gotchas — Phase <PHASE>: <name>
 
-Read only the blocks your ticket names, or whose files you will touch. Every module's files are
-listed in [the gotchas index](../README.md).
+Read only the blocks your ticket names, or whose files you will touch. Every phase's file is
+listed in the gotchas index, `docs/agents/gotchas/README.md`.
 
 ## The blocks
 

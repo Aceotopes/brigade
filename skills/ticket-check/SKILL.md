@@ -89,4 +89,7 @@ command for the night, with `--max 4` for a phase's first night.
 
 This skill changes issues, one JSON file and possibly an ADR. It writes no app code and makes no
 commit; if it wrote an ADR or changed the JSON file, say so and leave the commit to the owner's
-go-ahead.
+go-ahead. That commit needs its own devlog entry like any other (doc-check refuses one without):
+write it on top of `docs/history/devlog.md` (`## #N · chore · ticket-check for spec #<spec>`, what
+changed) and draft the message to cite it: `chore: ticket-check for spec #<spec> — addresses
+#<spec>, devlog #N`. A phase run refuses to start until it is committed.

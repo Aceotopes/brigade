@@ -16,6 +16,13 @@ export const DEVLOG = "docs/history/devlog.md";
 export const DEVLOG_ARCHIVE = "docs/history/devlog";
 /** The archive buckets so far, oldest first. doc-rotate appends to it. */
 export const PHASES = "docs/history/devlog/phases.json";
+/**
+ * A phase's gotchas file, `{phase}` its name (branch phase-2b → 2b); the phase runner tells each
+ * session this path. Flat by default. A project that groups its phases into modules names the
+ * module's folder instead, e.g. "docs/agents/gotchas/module-2/{phase}.md": the gotchas index reads
+ * every file under docs/agents/gotchas, at any depth.
+ */
+export const GOTCHAS_FILE = "docs/agents/gotchas/{phase}.md";
 
 /**
  * Files and folders whose claims are read as current: one folder per question
