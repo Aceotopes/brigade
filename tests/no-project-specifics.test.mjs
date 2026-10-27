@@ -26,6 +26,7 @@ const BANNED = [
   { term: /\bneon\b/i, why: "its database host" },
   { term: /gcash/i, why: "its payment vendor" },
   { term: /module[ -]6/i, why: "its module numbering" },
+  { term: /devlog #3[34]\d/i, why: "its devlog entry numbers" },
   { term: /3P5zZTpoYRVwN26dWXJ7Yg/, why: "its Build Roadmap Artifact" },
 ];
 

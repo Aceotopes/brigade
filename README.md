@@ -68,60 +68,21 @@ The template's tests run from `template/`: `node --test tools/doc-tools.test.mjs
    the rules every project needs; a session may not edit the config, the spec list or the prompt
    file. Steak To Juan's values, prompt prose and guide history are in `examples/steak-to-juan/`,
    and `tests/phase-run-config.test.mjs` proves its example holds what run.mjs hardcoded.
+8. ✅ **`/setup-workflow` and `/update-workflow`** (0.2.2): `scripts/setup.mjs` does the file work
+   (detect → plan → apply; update; the autoMode lines) and the skills do the talking. New, overwrite
+   (on branch `adopt-workflow`, old files archived under `docs/history/pre-workflow/`) and merge (never
+   overwrites; a doc-check `headers` baseline that only shrinks). `template/` is re-copied by update,
+   `scaffold/` is written once and only reported when it changes, config is never touched; the stamp is
+   `.claude/workflow-version.json`. Setup never commits. Trials on 2026-10-27, in
+   `D:\HGP\brigade-trials\`: an empty repo end to end (setup, a real phase run, its pull request,
+   an update, the attended finish, the merge) and block23-gym clones in overwrite and merge, run
+   again on fresh clones under 0.2.2. Their fixes are 0.2.1 and 0.2.2 in CHANGELOG.md. Not yet seen:
+   a generated `checks.yml` running on GitHub.
+   **Until step 9, install at project scope only**: a user-scope install would also run in Steak To
+   Juan, whose own hook copies would then run every check twice.
 
 ## To do, in order
 
-8. 🔨 **Built, not done: the throwaway-repo trials are next** (2026-10-27, 0.2.0).
-   `/setup-workflow` and `/update-workflow` call `scripts/setup.mjs` (detect → plan → apply; update;
-   the autoMode lines), tested in `tests/setup.test.mjs` against stand-in repos in each mode. The
-   stamp is `.claude/workflow-version.json` (version, mode, a hash per template file, so update never
-   overwrites a file the project edited). doc-check's baseline gained `headers` (`--adopt`, merge
-   mode; it only shrinks). The trials below decide what still needs a code change. The owner's
-   step-8 brief, which the build follows:
-
-   **`skills/setup-workflow`**: scaffolds a new repo — CLAUDE.md skeleton, `docs/` folders with
-   their generated-index markers, `template/` copied in, `test:docs`/`test:runner` scripts,
-   triage labels (or defer to mattpocock's `/setup-matt-pocock-skills`), and the project's
-   `Project <path> —` lines in `~/.claude/settings.json` `autoMode.environment`.
-   Two parts the first version must include:
-   - **An update mode** (`/setup-workflow --update`, or a separate `/update-workflow`): re-copies
-     `template/`'s files into a project that already has them and **never touches its config
-     files** (`doc-config.mjs`, the hook and runner config, `spec-issues.json`). A plugin update
-     reaches the skills and hooks on its own, but not the template files already copied into each
-     repo, so this is the only way they get a fix. It is safe only if a project never edits a
-     template file: every project detail lives in config (steps 3–7 exist for that).
-   - **A version stamp per project** (e.g. `.claude/workflow-version`, holding the plugin version
-     the template was copied from). The update mode reads it, reports "this project is on 0.3.0",
-     lists what changed since, and migrates the project's config when a new version changes a
-     config format.
-   - **Full support for existing projects, not just new ones** (owner's goal, 2026-10-27). Older
-     repos often have loose or no rules, so setup asks the owner, per project, which way to adopt:
-     - **Overwrite — a clean slate.** The workflow's layout and files replace what is there, for a
-       cleaner base for future work. Safeguards: refuse to start on a dirty tree; do it on its own
-       branch (e.g. `adopt-workflow`), never on `main`; move the old docs, `CLAUDE.md` and
-       `.claude/` settings into an archive folder (e.g. `docs/history/pre-workflow/`) instead of
-       deleting them, so nothing is lost and it can be read back; show the full list of moved and
-       replaced files and get a yes before writing; carry the old `CLAUDE.md`'s real rules into
-       the new one (asked one by one), not drop them.
-     - **Merge — keep what is there, with safeguards.** Never overwrite an existing file: add the
-       workflow's sections to `CLAUDE.md` and its hooks to `.claude/settings.json` beside the old
-       ones, and show each change as a diff before writing. Point `doc-config.mjs` at where the
-       docs already live rather than moving them. Write `doc-check-baseline.json` from the repo as
-       it stands, so existing docs without a header or budget are accepted on day one instead of
-       blocking the first commit; then add headers gradually, removing each baseline entry as its
-       doc is fixed.
-     Either way: detect the stack (package manager, test, lint and typecheck commands, database)
-     and propose the config from it for the owner to confirm, never guess silently; and record
-     which mode was used in the version stamp's file, so the update mode knows.
-   - **Done only after a trial on a throwaway repo.** Steps 1–8 are tested only against Steak To
-     Juan's files. Before using the plugin on a real project: an empty test repo → install the
-     plugin at project scope → `/setup-workflow` → one small spec and ticket → one phase run. Then
-     the same on a copy of an existing repo, once in each mode. Whatever needed a code change
-     (not a config change) to work is a Steak To Juan assumption still in the "generic" part: fix
-     it here.
-   - **Until step 9, install at project scope only** (as Impeccable is for HubsteriaBrew). A user-
-     scope install would also run in Steak To Juan, whose own hook copies would then run every
-     check twice.
 9. **Switch Steak To Juan onto the plugin** (after 6G merges, between phases): delete its hook and
    skill copies, install this, copy in `examples/steak-to-juan/`'s files as its README says (the
    config, the prompt prose, the history, the doc-config exports, the renamed run-state files),

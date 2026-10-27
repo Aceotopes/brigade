@@ -24,6 +24,12 @@ touches.
      by file, and do only what the owner picks.
    - `gone`: files the plugin no longer ships. Kept unless the owner says remove (`--remove`, and only
      the unedited ones go).
+   - `review`: a starting file (`scaffold/`: `CLAUDE.md`, the devlog, the status docs, the index
+     heads) whose plugin copy changed. The project owns its copy, so update never writes it. Show
+     `git diff --no-index -- <file> "${CLAUDE_PLUGIN_ROOT}/scaffold/<file>"` and point at the lines the
+     changelog names (the rest of the diff is the project's own writing); carry a change over only if
+     the owner picks it, by hand. A new starting file is added only if the owner wants it.
+   - `notes`: say each one (an older stamp cannot list earlier starting-file changes).
    - `migrations`: config format changes this update makes, one line each.
 4. On a yes: the same command with `--apply` (and `--remove` if agreed). It stages what it changed.
 5. `node "${CLAUDE_PLUGIN_ROOT}/scripts/setup.mjs" verify <dir>`. A failure is fixed, never by

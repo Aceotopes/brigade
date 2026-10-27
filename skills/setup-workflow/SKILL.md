@@ -64,7 +64,11 @@ Write the answers to `.git/brigade/answers.json`:
    `git diff --no-index -- <file> .git/brigade/preview/<file>`. For each "Left alone" conflict, say
    that the project keeps its own file and what the workflow's version would have added. In merge,
    read the "same job" list out: the project's roadmap or handoff stays where it is, and the
-   workflow's starts empty beside it; the owner moves content over when they like.
+   workflow's starts empty beside it; the owner moves content over when they like. Say two more
+   things where they apply: `.github/workflows/checks.yml` runs the stop gate's checks on GitHub
+   (the project's own from then on: edit it when the checks change), and a `CLAUDE.md` one folder
+   down (`docs/CLAUDE.md`) gets a "read it first" line in the new top-level `CLAUDE.md`, as Claude
+   reads a nested one only when it works in that folder.
 3. Ask for a yes on that exact list. Then
    `node "${CLAUDE_PLUGIN_ROOT}/scripts/setup.mjs" apply <dir> --plan .git/brigade/plan.json`.
    It refuses if the repo changed since the plan: plan again and show it again.
@@ -75,7 +79,9 @@ Write the answers to `.git/brigade/answers.json`:
 
 ## 5. Overwrite only: carry the old rules over
 
-Read `docs/history/pre-workflow/CLAUDE.md` (and `AGENTS.md`). List each real rule it holds (a "never",
+Read each file `apply` lists under `oldRules`: the project's `CLAUDE.md` and `AGENTS.md`, top-level or
+one folder down, at their archived paths (a `docs/CLAUDE.md` is at
+`docs/history/pre-workflow/docs/CLAUDE.md`). List each real rule it holds (a "never",
 an "always", a command that must be used, a fact a session must know). Ask about them a few at a
 time (AskUserQuestion, up to 4 per call: keep as is, reword, drop), and write the kept ones under
 `CLAUDE.md`'s "This project's rules", one line each. Never drop one without asking.

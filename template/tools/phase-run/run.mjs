@@ -433,6 +433,9 @@ async function preflight(options) {
   const dirty = git("status", "--porcelain");
   if (dirty) problems.push(`The working tree has uncommitted changes:\n${dirty}`);
 
+  // The tickets, the pushes and the pull request all live on GitHub.
+  const remote = exec("git", ["remote", "get-url", "origin"]).ok;
+  if (!remote) problems.push("This repo has no GitHub remote (`origin`): a run reads its tickets there and pushes to it. Push the repo to GitHub first.");
   if (!(await online())) problems.push(`No internet connection (could not reach ${NET_HOSTS.join(" and ")}).`);
   if (!exec("gh", ["auth", "status"]).ok) problems.push("GitHub CLI is not signed in (`gh auth login`).");
   if (!exec("claude", ["--version"]).ok) problems.push("`claude` is not on the PATH.");
@@ -485,7 +488,7 @@ async function preflight(options) {
     if (!options.dryRun) die(`Not ready to run:\n\n- ${problems.join("\n- ")}`);
     console.log(`\nA real run would refuse to start:\n\n- ${problems.join("\n- ")}`);
   }
-  return { branch: branch ?? "(no branch named)", current };
+  return { branch: branch ?? "(no branch named)", current, remote };
 }
 
 // ------------------------------------------------------------------ session
@@ -1756,7 +1759,12 @@ function report(run, options, remaining, { final = true } = {}) {
 
 async function main() {
   const options = parseArgs(process.argv.slice(2));
-  const { branch, current } = await preflight(options);
+  const { branch, current, remote } = await preflight(options);
+  // Only a dry run gets here without a remote, and its tickets are on GitHub.
+  if (!remote) {
+    console.log("\nNo tickets listed: they are read from GitHub, and this repo has no remote yet.\n");
+    return;
+  }
 
   const tickets = await loadTickets(options);
   const byNumber = new Map(tickets.map((t) => [t.number, t]));

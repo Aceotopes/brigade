@@ -105,7 +105,7 @@ test("merge keeps every file the project had, accepts its docs as they stand, an
   const result = apply(dir, p);
   assert.equal(result.docCheck.status, 0, result.docCheck.output);
   for (const [file, text] of Object.entries(before)) assert.equal(read(dir, file), text, file);
-  assert.match(read(dir, "CLAUDE.md"), /^---\n[\s\S]*Use pnpm\. Never push to main\.\n\n## Commands\n\n- `pnpm exec tsc --noEmit`[\s\S]*`pnpm test:docs`[\s\S]*## Working agreement/);
+  assert.match(read(dir, "CLAUDE.md"), /^---\n[\s\S]*Use pnpm\. Never push to main\.\n\n## Commands\n\n- `pnpm dev`: the dev server\n- `pnpm exec tsc --noEmit`[\s\S]*`pnpm build`: build[\s\S]*`pnpm test:docs`[\s\S]*## Working agreement/);
   const baseline = JSON.parse(read(dir, "tools/doc-check-baseline.json"));
   assert.ok(baseline.headers.includes("docs/ROADMAP.md") && baseline.headers.includes("docs/adr/ADR-001.md"));
   assert.deepEqual(baseline.missing["docs/PROJECT_OVERVIEW.md"], ["src/gone.ts"]);
@@ -115,6 +115,51 @@ test("merge keeps every file the project had, accepts its docs as they stand, an
   // A doc written after the merge still needs its header:
   write(dir, { "docs/new.md": "# New\n" });
   assert.match(node(dir, "tools/doc-check.mjs").stderr, /docs\/new\.md: has no header/);
+});
+
+test("CI runs the project's own checks: checks.yml installs the stack and runs the stop gate's checks", () => {
+  const { dir } = existing();
+  apply(dir, runPlan(dir, { mode: "merge" }));
+  const yml = read(dir, ".github/workflows/checks.yml");
+  assert.match(yml, /- uses: pnpm\/action-setup@v4\n {8}with:\n {10}version: 10\n/); // no "packageManager" pin in package.json
+  assert.match(yml, /run: pnpm install --frozen-lockfile\n/);
+  assert.match(yml, /run: pnpm exec prisma generate\n {8}env:\n {10}DATABASE_URL: /);
+  assert.match(yml, /- name: Typecheck\n {8}run: pnpm exec tsc --noEmit\n[\s\S]*- name: Tests\n {8}run: pnpm test\n/);
+  assert.ok(existsSync(join(dir, ".github/workflows/doc-check.yml")), "the docs' own workflow is still there");
+  // No package manager: no install; a command YAML would misread is quoted; a {base} check is left to the run.
+  const { dir: bare } = repo("brigade-bare-");
+  const workflow = JSON.parse(readFileSync(join(PLUGIN, "template/.claude/workflow.json"), "utf8"));
+  workflow.stopGate.checks = [{ label: "Tests", run: 'node --test "test/**/*.test.mjs"' }, { label: "Changed", run: "node --test --changed {base}" }];
+  apply(bare, runPlan(bare, { mode: "new", workflow }));
+  const plain = read(bare, ".github/workflows/checks.yml");
+  assert.doesNotMatch(plain, /Install|action-setup|\{base\}/);
+  assert.match(plain, /run: "node --test \\"test\/\*\*\/\*\.test\.mjs\\""\n/);
+  // Nothing to run: no file.
+  const { dir: none } = repo("brigade-none-");
+  apply(none, runPlan(none, { mode: "new" }));
+  assert.ok(!existsSync(join(none, ".github/workflows/checks.yml")));
+});
+
+test("a CLAUDE.md one folder down: merge points the new CLAUDE.md at it, overwrite names its archived copy", () => {
+  const nested = () => {
+    const made = existing();
+    made.git("mv", "CLAUDE.md", "docs/CLAUDE.md");
+    made.git("commit", "-q", "-m", "rules live in docs/");
+    return made;
+  };
+  const { dir } = nested();
+  assert.deepEqual(detect(dir).nestedAgentFiles, ["docs/CLAUDE.md"]);
+  const merged = apply(dir, runPlan(dir, { mode: "merge" }));
+  assert.equal(merged.docCheck.status, 0, merged.docCheck.output);
+  assert.match(read(dir, "CLAUDE.md"), /\n- \*\*Read `docs\/CLAUDE\.md` before any work\*\*/);
+  assert.equal(read(dir, "docs/CLAUDE.md"), "# Gym\n\nUse pnpm. Never push to main.\n");
+  const { dir: over } = nested();
+  const p = runPlan(over, { mode: "overwrite" });
+  assert.deepEqual(p.oldRules, [`${ARCHIVE}/docs/CLAUDE.md`]);
+  const result = apply(over, p);
+  assert.deepEqual(result.oldRules, [`${ARCHIVE}/docs/CLAUDE.md`]);
+  assert.match(read(over, result.oldRules[0]), /Never push to main/);
+  assert.doesNotMatch(read(over, "CLAUDE.md"), /Read `docs\/CLAUDE\.md`/, "its archived copy is read once, not pointed at");
 });
 
 test("the command line: plan previews the changed files, apply writes, verify passes every check", () => {
@@ -190,6 +235,9 @@ test("update replaces what the project left alone, never what it edited, never i
   writeFileSync(join(plugin, "template/docs/guides/phase-run.md"), `${read(dir, "docs/guides/phase-run.md")}\nA new line.\n`);
   writeFileSync(join(plugin, "template/tools/new-tool.mjs"), "export {};\n");
   writeFileSync(join(plugin, "template/docs/agents/workflow.md"), `${read(dir, "docs/agents/workflow.md")}\nUpstream too.\n`);
+  // A starting file changed upstream: the project owns its copy, so it is only listed.
+  const roadmap = read(dir, "docs/status/roadmap.md");
+  writeFileSync(join(plugin, "scaffold/docs/status/roadmap.md"), `${readFileSync(join(plugin, "scaffold/docs/status/roadmap.md"), "utf8")}\nA better starting line.\n`);
   // The project edited one template file and its config:
   write(dir, { "docs/agents/workflow.md": `${read(dir, "docs/agents/workflow.md")}\nMy own line.\n` });
   const config = `${read(dir, ".claude/workflow.json").trimEnd()}\n`;
@@ -199,7 +247,8 @@ test("update replaces what the project left alone, never what it edited, never i
   assert.equal(report.from, from);
   assert.equal(report.changelog[0].version, "9.0.0");
   const byPath = Object.fromEntries(report.changes.map((c) => [c.path, c.op]));
-  assert.deepEqual(byPath, { "docs/guides/phase-run.md": "replace", "docs/agents/workflow.md": "conflict", "tools/new-tool.mjs": "add" });
+  assert.deepEqual(byPath, { "docs/guides/phase-run.md": "replace", "docs/agents/workflow.md": "conflict", "tools/new-tool.mjs": "add", "docs/status/roadmap.md": "review" });
+  assert.deepEqual(report.notes, []);
   assert.equal(ran, 0, "a report alone changes nothing");
   update(dir, { plugin, migrations, apply: true, date: "2027-01-02" });
   assert.equal(ran, 1);
@@ -207,8 +256,17 @@ test("update replaces what the project left alone, never what it edited, never i
   assert.match(read(dir, "docs/agents/workflow.md"), /My own line\.\n$/);
   assert.equal(read(dir, ".claude/workflow.json"), config);
   assert.equal(JSON.parse(read(dir, STAMP)).version, "9.0.0");
+  assert.equal(read(dir, "docs/status/roadmap.md"), roadmap, "a scaffold file is never written by update");
+  assert.ok(!update(dir, { plugin }).changes.some((c) => c.op === "review"), "a reviewed scaffold change is listed once");
   update(dir, { plugin, migrations, apply: true });
   assert.equal(ran, 1, "a migration runs once");
+  // A stamp from before 0.2.2 has no scaffold hashes: it says so, and the next update records them.
+  const stamp = JSON.parse(read(dir, STAMP));
+  delete stamp.scaffold;
+  writeFileSync(join(dir, STAMP), `${JSON.stringify(stamp, null, 2)}\n`);
+  assert.match(update(dir, { plugin }).notes.join(""), /predates 0\.2\.2/);
+  update(dir, { plugin, apply: true });
+  assert.ok(JSON.parse(read(dir, STAMP)).scaffold["CLAUDE.md"]);
 });
 
 const STJ_LINES = [

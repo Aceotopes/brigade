@@ -133,8 +133,8 @@ export function citedDevlogNumbers() {
 
 /**
  * The devlog's entries in file order (newest first), each with its number and
- * whether it is still open. An entry closes when a commit cites it; an older
- * entry whose heading carries its hash (before #339) is closed too.
+ * whether it is still open. An entry closes when a commit cites it; an entry
+ * whose heading carries its hash (the older `## #N — <hash> — title` style) is closed too.
  */
 export function devlogEntries(text, cited) {
   return sections(text)

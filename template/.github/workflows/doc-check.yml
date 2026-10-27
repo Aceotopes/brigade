@@ -1,6 +1,6 @@
 name: Doc check
 
-# The docs' own checks (tools/doc-check.mjs; devlog #339–#342): every living doc
+# The docs' own checks (tools/doc-check.mjs): every living doc
 # within the budget its header declares, every path and relative link resolving,
 # every generated index current, and (on a push) the commit's devlog entry. The
 # guard hook runs the same check before a commit made in a Claude Code session;

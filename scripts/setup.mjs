@@ -32,7 +32,7 @@ export const STAMP = ".claude/workflow-version.json";
 export const ARCHIVE = "docs/history/pre-workflow";
 export const BRANCH = "adopt-workflow";
 /** The project's own settings: written once from its stack, never re-copied. */
-export const CONFIG_FILES = [".claude/workflow.json", ".claude/spec-issues.json", "tools/doc-config.mjs", "tools/doc-check-baseline.json"];
+export const CONFIG_FILES = [".claude/workflow.json", ".claude/spec-issues.json", "tools/doc-config.mjs", "tools/doc-check-baseline.json", ".github/workflows/checks.yml"];
 /** Settings keys a project-scope plugin install writes: a change to only these is not a dirty tree. */
 const INSTALL_KEYS = ["enabledPlugins", "extraKnownMarketplaces"];
 /** What the runner and /ticket-check read (tools/phase-run/run.mjs: READY_LABEL, PARK_LABEL; the browser check). */
@@ -75,6 +75,8 @@ function walk(root, rel = "", out = []) {
 
 export const templateFiles = (plugin = PLUGIN) => walk(join(plugin, "template")).filter((f) => !CONFIG_FILES.includes(f));
 export const scaffoldFiles = (plugin = PLUGIN) => walk(join(plugin, "scaffold"));
+/** A hash of each scaffold file as the plugin has it, placeholders and all. */
+const scaffoldHashes = (plugin) => Object.fromEntries(scaffoldFiles(plugin).map((path) => [path, hash(readText(join(plugin, "scaffold", path)))]));
 export const pluginVersion = (plugin = PLUGIN) => JSON.parse(readText(join(plugin, ".claude-plugin", "plugin.json"))).version;
 
 /** `{{KEY}}` filled from `values`; a key with no value is an error, so nothing ships half-filled. */
@@ -142,7 +144,8 @@ export function detect(dir) {
   const pkg = json("package.json");
   const deps = { ...(pkg?.dependencies ?? {}), ...(pkg?.devDependencies ?? {}) };
   const lockfiles = [["pnpm-lock.yaml", "pnpm"], ["yarn.lock", "yarn"], ["bun.lockb", "bun"], ["bun.lock", "bun"], ["package-lock.json", "npm"]];
-  const packageManager = lockfiles.find(([file]) => existsSync(join(dir, file)))?.[1] ?? (pkg ? "npm" : null);
+  const lockfile = lockfiles.find(([file]) => existsSync(join(dir, file)))?.[0] ?? null;
+  const packageManager = lockfiles.find(([file]) => file === lockfile)?.[1] ?? (pkg ? "npm" : null);
   const schema = existsSync(join(dir, "prisma", "schema.prisma")) ? readText(join(dir, "prisma", "schema.prisma")) : null;
   const frontend = [
     ...FRONTEND_DEPS.filter((d) => deps[d]).map((d) => `depends on ${d}`),
@@ -167,6 +170,9 @@ export function detect(dir) {
     empty: meaningful.length === 0,
     stamp: json(STAMP),
     packageManager,
+    lockfile,
+    // package.json's own "packageManager" pin: CI's pnpm setup reads it, and refuses a second version.
+    packageManagerPin: pkg?.packageManager ?? null,
     packageJson: pkg !== null,
     scripts: pkg?.scripts ?? {},
     typescript: existsSync(join(dir, "tsconfig.json")) || Boolean(deps.typescript),
@@ -174,6 +180,8 @@ export function detect(dir) {
     frontend,
     docs,
     agentFiles: ["CLAUDE.md", "AGENTS.md", "CONTEXT.md"].filter((f) => existsSync(join(dir, f))),
+    // One folder down (a docs/CLAUDE.md): a project's rules, which Claude reads only on demand.
+    nestedAgentFiles: files.filter((f) => /^[^./][^/]*\/(CLAUDE|AGENTS)\.md$/.test(f)),
     topFolders,
     brigadeEnabled: Object.entries(settings?.enabledPlugins ?? {}).some(([id, on]) => on && id.startsWith("brigade@")),
   };
@@ -226,16 +234,82 @@ export function docConfigText({ pathRoots = [], liveDocs = [] }, plugin = PLUGIN
   return text;
 }
 
-/** The commands `CLAUDE.md` lists, as markdown bullets. */
+/** The commands `CLAUDE.md` lists, as markdown bullets: the dev server, every check, then the workflow's own. */
 function commandLines(det, workflow) {
-  const lines = workflow.stopGate.checks.filter((c) => !c.run.includes("{")).map((c) => `- \`${c.run}\`: ${c.label.toLowerCase()}`);
   const pm = det.packageJson ? det.packageManager : null;
+  const lines = pm && det.scripts.dev ? [`- \`${RUN[pm]("dev")}\`: the dev server`] : [];
+  const checks = [...workflow.stopGate.checks, ...(workflow.phaseRun?.gates ?? []).filter((g) => g.run)];
+  const seen = new Set();
+  for (const check of checks) {
+    if (check.run.includes("{") || seen.has(check.run)) continue;
+    seen.add(check.run);
+    lines.push(`- \`${check.run}\`: ${check.label.toLowerCase()}`);
+  }
   lines.push(
     `- \`${pm ? RUN[pm]("test:docs") : "node --test tools/doc-tools.test.mjs"}\`: the doc tools' own tests`,
     `- \`${pm ? RUN[pm]("test:runner") : "node --test tools/phase-run/run.test.mjs"}\`: the phase runner's own tests`,
     "- `node tools/doc-check.mjs`: the docs' checks (a hook runs it before every commit)",
   );
   return lines.join("\n");
+}
+
+const INSTALL = {
+  pnpm: (det) => (det.lockfile ? "pnpm install --frozen-lockfile" : "pnpm install"),
+  npm: (det) => (det.lockfile ? "npm ci" : "npm install"),
+  yarn: (det) => (det.lockfile ? "yarn install --frozen-lockfile" : "yarn install"),
+  bun: (det) => (det.lockfile ? "bun install --frozen-lockfile" : "bun install"),
+};
+/** A YAML scalar: plain when nothing in it means something to YAML, else JSON-quoted (valid YAML). */
+const yaml = (text) => (/^[\w./-][^:#"'{}[\],&*?|<>=!%@`]*$/.test(text) && !/\s$/.test(text) ? text : JSON.stringify(text));
+
+/**
+ * `.github/workflows/checks.yml`: the stop gate's checks on every push and pull request, so a green
+ * pull request means the project's own tests ran, not only the docs'. Null when there is nothing
+ * to run. A check that needs the run's base commit ({base}) is left to the phase run.
+ */
+export function checksWorkflowText(det, workflow) {
+  const checks = workflow.stopGate.checks.filter((c) => !c.run.includes("{"));
+  if (!checks.length) return null;
+  const pm = det.packageJson ? det.packageManager : null;
+  const steps = ["      - uses: actions/checkout@v4"];
+  if (pm === "pnpm") steps.push("", "      - uses: pnpm/action-setup@v4", ...(det.packageManagerPin ? [] : ["        with:", "          version: 10"]));
+  if (pm === "bun") steps.push("", "      - uses: oven-sh/setup-bun@v2");
+  steps.push("", "      - uses: actions/setup-node@v4", "        with:", '          node-version: "22"');
+  if (pm) steps.push("", "      - name: Install", `        run: ${yaml(INSTALL[pm](det))}`);
+  if (pm && det.prisma) {
+    // The generated client is not committed; generating it reads the schema, never a database.
+    steps.push("", "      - name: Generate the Prisma client", `        run: ${yaml(`${EXEC[pm]} prisma generate`)}`, "        env:", "          DATABASE_URL: postgresql://ci:ci@localhost:5432/ci");
+  }
+  for (const check of checks) steps.push("", `      - name: ${yaml(check.label)}`, `        run: ${yaml(check.run)}`);
+  return [
+    "name: Checks",
+    "",
+    "# This project's own checks, the stop gate's in .claude/workflow.json, on every push and pull",
+    "# request: a green pull request means they passed too, not only the docs' checks (doc-check.yml).",
+    "# Written once by /setup-workflow; the project owns it and /update-workflow never touches it, so",
+    "# change it here when the checks change.",
+    "on:",
+    "  push: {}",
+    "  pull_request: {}",
+    "  workflow_dispatch: {}",
+    "",
+    "permissions:",
+    "  contents: read",
+    "",
+    "jobs:",
+    "  checks:",
+    "    runs-on: ubuntu-latest",
+    "    timeout-minutes: 15",
+    "    steps:",
+    ...steps,
+    "",
+  ].join("\n");
+}
+
+/** Where an old rules file is once setup is done: archived (overwrite, inside docs/ or at the top), or where it was. */
+function rulesFileAfter(mode, path) {
+  const archived = mode === "overwrite" && (!path.includes("/") || path.startsWith("docs/"));
+  return archived ? `${ARCHIVE}/${path}` : path;
 }
 
 // ------------------------------------------------------------------ plan
@@ -280,7 +354,20 @@ export function buildPlan(dir, det, answers, plugin = PLUGIN) {
     { path: "tools/doc-config.mjs", kind: "config", text: docConfigText(docConfig, plugin) },
     { path: "tools/doc-check-baseline.json", kind: "config", text: readText(join(plugin, "template", "tools", "doc-check-baseline.json")) },
   ];
+  const checksYml = checksWorkflowText(det, workflow);
+  if (checksYml) wanted.push({ path: ".github/workflows/checks.yml", kind: "config", text: checksYml });
   const exists = (path) => existsSync(join(dir, path));
+
+  // The project's own rules files. Overwrite archives the top-level ones and those in docs/, and the
+  // skill reads each from there (oldRules); one left in place gets a line in the new CLAUDE.md, as
+  // Claude reads a nested CLAUDE.md only when it works in that folder.
+  const rulesFiles = [...det.agentFiles.filter((f) => f !== "CONTEXT.md"), ...(det.nestedAgentFiles ?? [])];
+  const oldRules = mode === "overwrite" ? rulesFiles.map((f) => rulesFileAfter(mode, f)).filter((f) => f.startsWith(`${ARCHIVE}/`)) : [];
+  const pointers = (det.nestedAgentFiles ?? [])
+    .filter((f) => rulesFileAfter(mode, f) === f)
+    .map((f) => `- **Read \`${f}\` before any work**: the project's own context and rules, from before the workflow. Where it and this file differ, ask.`);
+  const claude = wanted.find((w) => w.path === "CLAUDE.md");
+  if (pointers.length && (!exists("CLAUDE.md") || mode === "overwrite")) claude.text = `${claude.text.replace(/\n*$/, "\n\n")}${pointers.join("\n")}\n`;
   const actions = [];
 
   // Overwrite: the old docs, agent files and any file in the way move into the archive first.
@@ -348,7 +435,7 @@ export function buildPlan(dir, det, answers, plugin = PLUGIN) {
   }
 
   const sameJob = mode === "merge" ? sameJobPairs(det.docs) : [];
-  return { mode, head: det.git.head, problems, answers: { ...answers, date }, actions, sameJob };
+  return { mode, head: det.git.head, problems, answers: { ...answers, date }, actions, sameJob, oldRules };
 }
 
 /** The workflow's CLAUDE.md sections (its commands on) after the project's own text, and a header on top if it had none. */
@@ -426,7 +513,9 @@ export function apply(dir, saved, plugin = PLUGIN) {
   // The stamp: a template file is hashed only if setup wrote it, so update never replaces one it did not.
   const files = {};
   for (const a of fresh.actions) if (a.kind === "template" && (a.op === "add" || a.op === "same")) files[a.path] = hash(readText(join(dir, a.path)));
-  const stamp = { plugin: "brigade", version: pluginVersion(plugin), mode: fresh.mode, adopted: fresh.answers.date, updated: fresh.answers.date, files };
+  // The plugin's starting copy of each scaffold file, as it was: update reports one that changes since.
+  const scaffold = scaffoldHashes(plugin);
+  const stamp = { plugin: "brigade", version: pluginVersion(plugin), mode: fresh.mode, adopted: fresh.answers.date, updated: fresh.answers.date, files, scaffold };
   write(STAMP, `${JSON.stringify(stamp, null, 2)}\n`);
 
   const present = unique(touched).filter((p) => existsSync(join(dir, p)) || git("ls-files", "--", p).trim());
@@ -439,6 +528,7 @@ export function apply(dir, saved, plugin = PLUGIN) {
     conflicts: fresh.actions.filter((a) => a.op === "conflict").map((a) => a.path),
     manual: fresh.actions.filter((a) => a.op === "manual").map((a) => `${a.path}: ${a.note}`),
     sameJob: fresh.sameJob,
+    oldRules: fresh.oldRules,
     docCheck: { status: check.status, output: `${check.stdout}${check.stderr}`.trim() },
   };
 }
@@ -468,7 +558,8 @@ export function changesSince(from, to, plugin = PLUGIN) {
  *   the project edited it            → a conflict: never overwritten
  *   new in the plugin                → added
  *   gone from the plugin             → listed; removed only with `remove`, and only if unedited
- * Config and scaffold files are never touched, except by a version's migration.
+ * Config and scaffold files are never touched, except by a version's migration. A scaffold file the
+ * plugin changed since the stamp is listed for review (op "review"), and only listed.
  */
 export function update(dir, { apply: doApply = false, remove = false, plugin = PLUGIN, migrations = MIGRATIONS, date } = {}) {
   const stampPath = join(dir, STAMP);
@@ -494,6 +585,19 @@ export function update(dir, { apply: doApply = false, remove = false, plugin = P
     const edited = hash(readText(join(dir, path))) !== stamp.files[path];
     changes.push({ op: remove && !edited ? "remove" : "gone", path, note: edited ? "edited in the project: kept" : "no longer in the plugin" });
   }
+  // Scaffold files are the project's own once written, so a change upstream is only reported, never
+  // written: the owner compares their copy with the plugin's and carries over what they want.
+  const scaffoldNow = scaffoldHashes(plugin);
+  const notes = [];
+  if (!stamp.scaffold) {
+    notes.push("This project's stamp predates 0.2.2, so changes to the plugin's starting files (scaffold/) before now are not listed; from this update on they are.");
+  } else {
+    for (const [path, now] of Object.entries(scaffoldNow)) {
+      if (stamp.scaffold[path] === now) continue;
+      const note = stamp.scaffold[path] ? "the plugin's starting copy changed; yours is the project's own: compare, carry over by hand" : "a new starting file in the plugin: add it by hand if you want it";
+      changes.push({ op: "review", path, note });
+    }
+  }
   const pending = migrations.filter((m) => compareVersions(m.version, stamp.version) > 0 && compareVersions(m.version, to) <= 0);
   const report = {
     from: stamp.version,
@@ -501,6 +605,7 @@ export function update(dir, { apply: doApply = false, remove = false, plugin = P
     changelog: changesSince(stamp.version, to, plugin),
     changes: changes.filter((c) => c.op !== "same").map(({ text, ...rest }) => rest),
     migrations: pending.map((m) => `${m.version}: ${m.describe}`),
+    notes,
   };
   if (!doApply) return report;
 
@@ -520,7 +625,7 @@ export function update(dir, { apply: doApply = false, remove = false, plugin = P
     if (c.op === "add" || c.op === "replace" || c.op === "same") files[c.path] = hash(readText(join(dir, c.path)));
     if (c.op === "remove") delete files[c.path];
   }
-  const next = { ...stamp, version: to, updated: date ?? new Date().toISOString().slice(0, 10), files };
+  const next = { ...stamp, version: to, updated: date ?? new Date().toISOString().slice(0, 10), files, scaffold: scaffoldNow };
   writeFileSync(stampPath, `${JSON.stringify(next, null, 2)}\n`);
   touched.push(STAMP);
   spawnSync("git", ["add", "-A", "--", ...unique(touched)], { cwd: dir });
@@ -578,6 +683,7 @@ function summarize(p) {
     for (const a of items) out.push(`  ${a.path}${a.to ? ` → ${a.to}` : ""}${a.note ? `  (${a.note})` : ""}`);
   }
   if (p.sameJob.length) out.push("", "Docs of yours that look like they do a job the workflow keeps elsewhere (nothing moved):", ...p.sameJob.map((s) => `  ${s.theirs}  ~  ${s.ours}`));
+  if (p.oldRules.length) out.push("", "The project's old rules, to carry into CLAUDE.md after apply (read from):", ...p.oldRules.map((f) => `  ${f}`));
   return out.join("\n");
 }
 
