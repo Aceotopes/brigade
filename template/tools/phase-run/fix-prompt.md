@@ -15,16 +15,17 @@ watching; fix it and stop again. The end of the check's output:
   `Closes #{{N}}`, no trailer, and nothing left uncommitted in the tree.
 - If the fix changes what the implementation log or the devlog entry says, correct them in the same
   amend. A real bug you found this way belongs under "Real bugs found along the way".
-- If the fix touched a file under `src/` and the ticket changes a screen, run its browser check again
-  (its committed walk under `scripts/walks/`) and save fresh screenshots: the gate counts only ones
-  newer than your last source edit.
-- A migration that an earlier commit added, or that the output says is already applied to dev Neon,
-  is never edited: add a new migration after it.
+- If the fix touched a screen's source and the ticket changes a screen, run its browser check again
+  and save fresh screenshots: the gate counts only ones newer than your last source edit.
+- A migration that an earlier commit added, or that the output says is already applied to
+  {{TARGET}}, is never edited: add a new migration after it.
+
+{{PROJECT_FIX}}
 - If the failure shows the ticket cannot be finished without the owner's decision, park it: write
   `.phase-run/verdict-{{N}}.json` with `"status": "parked"` and the question, and stop.
 - Stop every background task you started (TaskStop). Then, last, write the verdict file again,
   even if nothing in it changed (update it if your summary, assumptions or run-by-hand steps did):
   the runner reads a verdict written in this round, with the turn over, as your end.
 
-The same rules as before hold: stay on `{{BRANCH}}`, never push, QA on `stj_cast` only, temporary
+The same rules as before hold: stay on `{{BRANCH}}`, never push, QA on {{QA}} only, temporary
 files in `.phase-run/tmp/`, no redirects or `cd … &&` chains, never `git stash`.

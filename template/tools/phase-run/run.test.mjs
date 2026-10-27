@@ -1,12 +1,14 @@
 // Tests for the phase runner's own logic (#194). Plain node:test: no database, no
 // GitHub, no Claude session. Run: pnpm test:runner (node --test tools/phase-run/).
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 
-import { QUIET_MS, SETTLE_MS, loadResults, outsideAreas, pullRequestBody, recordResult, report, runSession, screenshotsSince, turnOver } from "./run.mjs";
+import { BROWSER_CHECK, fill, loadRunConfig, parseRunConfig, qaUrl, sessionEnv, targetFingerprint, targetUrl } from "./config.mjs";
+import { QUIET_MS, SETTLE_MS, applyMigrations, loadResults, outsideAreas, projectGates, promptValues, pullRequestBody, recordResult, render, report, runSession, screenshotsSince, sessionSettings, turnOver } from "./run.mjs";
 
 const options = { minutes: 120, waitHours: 6, print: true, spec: 179 };
 const call = (claude, extra = {}) => ({ options, prompt: "Build it.", sessionId: "s-1", resume: false, claude, online: async () => true, sleep: async () => {}, ...extra });
@@ -99,15 +101,19 @@ test("screenshots taken before the last source edit do not count", () => {
   utimesSync(old, new Date(1000_000), new Date(1000_000));
   utimesSync(source, new Date(2000_000), new Date(2000_000));
   utimesSync(fresh, new Date(3000_000), new Date(3000_000));
-  const since = screenshotsSince(root, 185, 0, ["src/page.tsx", "docs/history/devlog.md"]);
+  const since = screenshotsSince(root, ".impeccable/review-185", 0, ["src/page.tsx", "docs/history/devlog.md"], /^src\//);
   assert.deepEqual(since.fresh, ["1280.png"]);
   assert.equal(since.stale, 1);
 });
 
 test("the shared registries are never out of a ticket's areas, but the audit log is", () => {
   const files = ["src/components/shell/nav-config.ts", "src/components/shell/icons.tsx", "src/lib/audit-log.ts", "src/lib/notifications.ts", "scripts/walks/185-doing-a-task.mjs", "src/lib/payroll.ts"];
-  // The global audit log stays flagged unless a ticket names it (CLAUDE.md rule 6).
-  assert.deepEqual(outsideAreas(files, ["src/lib/task*.ts"]), ["src/lib/audit-log.ts", "src/lib/payroll.ts"]);
+  // A project's shared registries (phaseRun.alwaysInScope); its global audit log is left off on purpose.
+  const registries = [/^src\/components\/shell\/(nav-config\.ts|icons\.tsx)$/, /^src\/lib\/notifications\.ts$/, /^scripts\/walks\//];
+  assert.deepEqual(outsideAreas(files, ["src/lib/task*.ts"], registries), ["src/lib/audit-log.ts", "src/lib/payroll.ts"]);
+  // Without the project's list, only the workflow's own files are always in scope.
+  assert.equal(outsideAreas(files, ["src/lib/task*.ts"]).length, 6);
+  assert.deepEqual(outsideAreas(["docs/x.md", "CLAUDE.md", "src/a.ts"], ["src/a.ts"]), []);
 });
 
 test("results.json that cannot be read starts empty rather than stopping the run", () => {
@@ -190,4 +196,232 @@ test("the morning report names the docs near their budget and folds the whole ta
   assert.match(text, /<details><summary>Every doc's size against its budget<\/summary>[\s\S]*docs\/status\/roadmap\.md/);
   run.docHealth = "Doc  Lines / budget   Used\ndocs/status/roadmap.md  99 / 120  83%";
   assert.match(report(run, options, []), /Every doc is under 90% of its budget\./);
+});
+
+// ------------------------------------------------------------ the project config
+
+const runConfig = (phaseRun, extra = {}) => parseRunConfig({ version: 1, phaseRun, ...extra });
+
+test("a project with no phaseRun section, or no file at all, has no project gates", () => {
+  assert.deepEqual(runConfig(undefined).gates, []);
+  const { config, error } = loadRunConfig(mkdtempSync(join(tmpdir(), "phase-config-")));
+  assert.equal(error, null);
+  assert.deepEqual([config.gates, config.qa, config.migrations, config.prompt], [[], null, null, null]);
+});
+
+test("a mistake in the run config is named: a typo'd key, a bad pattern, a port, a missing field", () => {
+  const cases = [
+    [{ gate: [] }, /phaseRun has unknown key\(s\) gate/],
+    [{ gates: [{ label: "lint", run: "pnpm lint", wehn: "^src/" }] }, /gates\[0\] has unknown key\(s\) wehn/],
+    [{ gates: [{ label: "lint", run: "pnpm lint", when: "(" }] }, /gates\[0\]\.when is not a valid pattern/],
+    [{ gates: [{ run: "pnpm lint" }] }, /gates\[0\]\.label is missing/],
+    [{ gates: [{ builtin: "lint" }] }, /builtin must be "browser-check"/],
+    [{ gates: [{ builtin: "browser-check" }] }, /there is no phaseRun\.browserCheck section/],
+    [{ ports: [{ port: 99999, what: "x" }] }, /ports\[0\]\.port must be a port number/],
+    [{ migrations: { added: "^db/[^/]+\\.sql$", target: { name: "t", urlFrom: "X" }, apply: { run: "migrate" } } }, /added needs a group/],
+  ];
+  for (const [phaseRun, error] of cases) assert.throws(() => runConfig(phaseRun), error);
+  const broken = mkdtempSync(join(tmpdir(), "phase-config-"));
+  mkdirSync(join(broken, ".claude"));
+  writeFileSync(join(broken, ".claude", "workflow.json"), '{ "version": 1, "phaseRun": { "gates": [ ');
+  assert.match(loadRunConfig(broken).error, /^\.claude\/workflow\.json: .*JSON/);
+});
+
+test("a placeholder is allowed only where it makes sense: a gate cannot reach the migration target", () => {
+  assert.throws(() => runConfig({ gates: [{ label: "x", run: "deploy {targetUrl}" }] }), /gates\[0\]\.run uses \{targetUrl\}; allowed here: \{base\}, \{N\}, \{qaUrl\}/);
+  assert.throws(() => runConfig({ gates: [{ label: "x", run: "x", env: { DB: "{targetUrl}" } }] }), /gates\[0\]\.env\.DB uses \{targetUrl\}/);
+  assert.throws(() => runConfig({ sessionEnv: { DB: "{base}" } }), /sessionEnv\.DB uses \{base\}; allowed here: \{qaUrl\}/);
+  assert.throws(() => runConfig({ qa: { name: "q", url: "postgres://{qaUrl}" } }), /only placeholder allowed here is \{loopbackNotUsedBy:VAR\}/);
+  assert.doesNotThrow(() =>
+    runConfig({ qa: { name: "q", url: "postgres://localhost/q" }, gates: [{ label: "tests", run: "vitest run --changed {base}", env: { DB: "{qaUrl}" } }] }),
+  );
+  // A filled value never runs with a placeholder left in it.
+  assert.equal(fill("vitest run --changed {base}", { base: "abc123" }), "vitest run --changed abc123");
+  assert.throws(() => fill("deploy {targetUrl}", {}), /No value for \{targetUrl\}/);
+});
+
+test("the QA address takes the loopback name its neighbour does not use; the target takes its direct rewrites", () => {
+  const config = runConfig({
+    qa: { name: "cast", url: "postgresql://pg@{loopbackNotUsedBy:TEST_DB}:5432/cast" },
+    sessionEnv: { DATABASE_URL: "{qaUrl}", VENDOR_TOKEN: "placeholder" },
+    migrations: {
+      added: "^db/migrations/([^/]+)/up\\.sql$",
+      target: { name: "staging", urlFrom: "DATABASE_URL", direct: [["-pooler.", "."]] },
+      apply: { run: "migrate up", env: { DATABASE_URL: "{targetUrl}" } },
+    },
+  });
+  const env = (vars) => (name) => vars[name];
+  assert.equal(qaUrl(config, env({ TEST_DB: "postgresql://x@localhost/t" })), "postgresql://pg@127.0.0.1:5432/cast");
+  assert.equal(qaUrl(config, env({ TEST_DB: "postgresql://x@127.0.0.1/t" })), "postgresql://pg@localhost:5432/cast");
+  assert.equal(qaUrl(config, env({})), "postgresql://pg@127.0.0.1:5432/cast", "no neighbour: it is taken as localhost");
+  assert.deepEqual(sessionEnv(config, env({})), { DATABASE_URL: "postgresql://pg@127.0.0.1:5432/cast", VENDOR_TOKEN: "placeholder" });
+  const url = targetUrl(config, env({ DATABASE_URL: "postgresql://u:p@ep-a-pooler.eu.example.tech/db" }));
+  assert.equal(url, "postgresql://u:p@ep-a.eu.example.tech/db");
+  assert.equal(targetFingerprint(url), "ep-a.eu.example.tech", "a host, never the credentials");
+  assert.equal(targetUrl(config, env({})), null);
+});
+
+test("a field that uses {qaUrl} with no qa section is refused", () => {
+  assert.throws(() => runConfig({ gates: [{ label: "build", run: "build", env: { DB: "{qaUrl}" } }] }), /uses \{qaUrl\}, but there is no phaseRun\.qa section/);
+  // A note is prose: mentioning {qaUrl} there uses nothing.
+  assert.doesNotThrow(() => runConfig({ gates: [{ note: "points at {qaUrl} once qa is set", label: "build", run: "build" }] }));
+});
+
+// The project's gates, with a fake shell standing in: what ran, in what order, with what.
+function fakeShell(failing = []) {
+  const ran = [];
+  const run = (line, env) => {
+    ran.push({ line, env });
+    return failing.some((word) => line.includes(word)) ? { ok: false, output: `${line} broke` } : { ok: true, output: "" };
+  };
+  return { ran, run };
+}
+
+const GATES = runConfig({
+  qa: { name: "cast", url: "postgresql://pg@localhost/cast" },
+  gates: [
+    { label: "lint", run: "npm run lint" },
+    { label: "build", run: "npm run build", when: "^src/", env: { DATABASE_URL: "{qaUrl}" }, freePorts: true },
+    { label: "tests", run: "npm test -- --changed {base}", alone: true },
+  ],
+}).gates;
+
+test("the project's gates run in order, each with its env and {base} filled in", async () => {
+  const shell = fakeShell();
+  const jobs = [];
+  const failed = await projectGates(GATES, {
+    changed: ["src/a.ts"],
+    values: { base: "abc123", N: 7, qaUrl: "postgresql://pg@localhost/cast" },
+    browserCheck: () => null,
+    run: shell.run,
+    freePorts: async () => jobs.push("freed ports"),
+    stopStray: (when) => jobs.push(`stray ${when}`),
+  });
+  assert.equal(failed, null);
+  assert.deepEqual(shell.ran.map((r) => r.line), ["npm run lint", "npm run build", "npm test -- --changed abc123"]);
+  assert.deepEqual(shell.ran[1].env, { DATABASE_URL: "postgresql://pg@localhost/cast" });
+  assert.deepEqual(jobs, ["freed ports", "stray before the tests gate"]);
+});
+
+test("a gate whose files the ticket did not touch is skipped, and the first failure is returned", async () => {
+  const shell = fakeShell(["lint"]);
+  const failed = await projectGates(GATES, { changed: ["docs/x.md"], values: { base: "b" }, browserCheck: () => null, run: shell.run });
+  assert.deepEqual(failed, { gate: "lint", output: "npm run lint broke" });
+  assert.deepEqual(shell.ran.map((r) => r.line), ["npm run lint"], "nothing after the first failure runs");
+  const docsOnly = fakeShell();
+  await projectGates(GATES, { changed: ["docs/x.md"], values: { base: "b" }, browserCheck: () => null, run: docsOnly.run });
+  assert.deepEqual(docsOnly.ran.map((r) => r.line), ["npm run lint", "npm test -- --changed b"], "no src/ change: no build");
+});
+
+test("the browser-check gate runs where the config places it, and its problem is the failure", async () => {
+  const gates = runConfig({
+    gates: [{ label: "lint", run: "lint" }, { builtin: "browser-check" }, { label: "tests", run: "tests" }],
+    browserCheck: { screenFiles: "^src/", sourceFiles: "^src/", screenshots: "shots/{N}", minimum: 2, redo: "walk it" },
+  }).gates;
+  const shell = fakeShell();
+  const failed = await projectGates(gates, { changed: [], values: {}, browserCheck: () => "shots/7/ holds 0 screenshot(s)", run: shell.run });
+  assert.deepEqual(failed, { gate: "browser check", output: "shots/7/ holds 0 screenshot(s)" });
+  assert.deepEqual(shell.ran.map((r) => r.line), ["lint"]);
+});
+
+const MIGRATIONS = runConfig({
+  migrations: {
+    added: "^db/migrations/([^/]+)/up\\.sql$",
+    target: { name: "staging", urlFrom: "DATABASE_URL" },
+    apply: { run: "migrate deploy", env: { DATABASE_URL: "{targetUrl}" } },
+    rollBack: { run: "migrate resolve --rolled-back {name}", env: { DATABASE_URL: "{targetUrl}" } },
+  },
+}).migrations;
+const values = { targetUrl: "postgresql://u:p@staging.example/db", base: "abc" };
+
+test("an applied migration is recorded, with the target's address in the command's env", () => {
+  const shell = fakeShell();
+  const applied = new Set();
+  assert.deepEqual(applyMigrations(["001_a", "002_b"], applied, { migrations: MIGRATIONS, values, run: shell.run }), { ok: true });
+  assert.deepEqual([...applied], ["001_a", "002_b"]);
+  assert.deepEqual(shell.ran, [{ line: "migrate deploy", env: { DATABASE_URL: "postgresql://u:p@staging.example/db" } }]);
+});
+
+test("a failed apply keeps what went in and rolls back the rest, by the names it printed", () => {
+  const ran = [];
+  // Like Prisma: it names each migration as it starts it, and stops at the one that fails.
+  const run = (line, env) => {
+    ran.push(line);
+    return line === "migrate deploy" ? { ok: false, output: "Applying 001_a\nApplying 002_b\nError in 002_b" } : { ok: true, output: "" };
+  };
+  const applied = new Set();
+  const result = applyMigrations(["001_a", "002_b", "003_c"], applied, { migrations: MIGRATIONS, values, run });
+  assert.equal(result.ok, false);
+  assert.deepEqual([...applied], ["001_a"]);
+  assert.deepEqual(ran, ["migrate deploy", "migrate resolve --rolled-back 002_b", "migrate resolve --rolled-back 003_c"]);
+  // With no rollBack, a failure records nothing and rolls nothing back.
+  const plain = { ...MIGRATIONS, rollBack: null };
+  const untouched = new Set();
+  ran.length = 0;
+  applyMigrations(["001_a", "002_b"], untouched, { migrations: plain, values, run });
+  assert.deepEqual([[...untouched], ran], [[], ["migrate deploy"]]);
+});
+
+test("a session's settings hold the run's rules, the project's rows and the denials that guard the checks", () => {
+  const base = { permissions: { allow: ["Bash(git *)"], deny: ["Read(./.env)"] } };
+  const project = runConfig({ prompt: "docs/agents/phase-run-prompt.md", permissions: { allow: ["Bash(npm *)"], deny: ["Bash(npm publish *)"] } });
+  const env = { PHASE_RUN: "1", DATABASE_URL: "postgresql://localhost/qa" };
+  const bg = sessionSettings(base, project.permissions, { branch: "phase-2", env, background: true, prompt: project.prompt });
+  assert.deepEqual(bg.permissions.allow, ["Bash(git *)", "Bash(npm *)", "Edit", "Write"]);
+  for (const rule of ["Read(./.env)", "Bash(npm publish *)", "Edit(./tools/phase-run/**)", "Edit(./.claude/workflow.json)", "Edit(./.claude/spec-issues.json)", "Edit(./docs/agents/phase-run-prompt.md)", "Edit(./.phase-run/phase-2/**)", "AskUserQuestion"]) {
+    assert.ok(bg.permissions.deny.includes(rule), `${rule} is denied`);
+  }
+  assert.deepEqual(bg.env, env);
+  assert.equal(bg.worktree.bgIsolation, "none");
+  // A --print session gets the same rules and variables, without the background-only parts.
+  const print = sessionSettings(base, project.permissions, { branch: "phase-2", env, background: false, prompt: null });
+  assert.deepEqual(print.permissions.allow, ["Bash(git *)", "Bash(npm *)"]);
+  assert.equal(print.worktree, undefined);
+  assert.ok(!print.permissions.deny.some((rule) => rule.includes("phase-run-prompt")));
+});
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const ticketValues = { N: 7, TITLE: "t", BRANCH: "phase-2", PHASE: "2", SPEC: "#5", BASE: "abc", FRONTEND: "no" };
+const prompts = () => ["ticket-prompt.md", "fix-prompt.md"].map((name) => readFileSync(join(HERE, name), "utf8"));
+const fixValues = { GATE: "lint", OUTPUT: "x", ROUND: 1, ROUNDS: 3 };
+
+test("with a blank config, both prompts render with no marker left and say what the project lacks", () => {
+  const values = { ...ticketValues, ...fixValues, ...promptValues(runConfig(undefined), "", ticketValues) };
+  for (const text of prompts()) assert.doesNotMatch(render(text, values), /\{\{\w+\}\}/);
+  const ticket = render(prompts()[0], values);
+  assert.match(ticket, /This project names no design review: skip this section\./);
+  assert.match(ticket, /this project's runner applies none, so never apply one to a shared database/);
+  assert.match(ticket, /\*\*Never open or print `\.env`\*\*/);
+});
+
+test("the project's prose is spliced in by section, its header dropped, and an unknown section refused", () => {
+  const project = runConfig(
+    {
+      prompt: "docs/agents/phase-run-prompt.md",
+      qa: { name: "cast", url: "postgresql://localhost/cast" },
+      sessionEnv: { DATABASE_URL: "{qaUrl}" },
+      migrations: { added: "^db/([^/]+)\\.sql$", target: { name: "staging", urlFrom: "DATABASE_URL" }, apply: { run: "migrate" } },
+    },
+    { stopGate: { checks: [{ label: "Tests", run: "npm test -- --changed {base}" }] } },
+  );
+  const prose = "---\njob: x\nkind: living\n---\n# Ours\n\n## Build\n\n- Use the house linter.\n\n## Fix\n\n- Walk it again.\n";
+  const values = promptValues(project, prose, ticketValues);
+  const [ticket, fix] = prompts().map((text) => render(text, { ...ticketValues, ...fixValues, ...values }));
+  assert.match(ticket, /- Use the house linter\./);
+  assert.doesNotMatch(ticket, /job: x|# Ours/);
+  assert.match(ticket, /`npm test -- --changed abc`/);
+  assert.match(ticket, /never apply a migration to staging yourself/);
+  assert.match(ticket, /`DATABASE_URL` is already set for this run/);
+  assert.match(fix, /- Walk it again\./);
+  assert.match(fix, /already applied to\s+staging/);
+  assert.match(fix, /QA on `cast` only/);
+  assert.throws(() => promptValues(project, "## Biuld\n- x\n", ticketValues), /"## Biuld" section has no place in the prompt/);
+});
+
+test("a browserCheck with no place in the gates runs after the project's gates", () => {
+  const check = { screenFiles: "^src/", sourceFiles: "^src/", screenshots: "shots/{N}", minimum: 2, redo: "walk it" };
+  const config = runConfig({ gates: [{ label: "lint", run: "lint" }], browserCheck: check });
+  assert.deepEqual(config.gates.map((g) => g.label ?? g.builtin), ["lint", BROWSER_CHECK]);
+  const placed = runConfig({ gates: [{ builtin: "browser-check" }, { label: "lint", run: "lint" }], browserCheck: check });
+  assert.deepEqual(placed.gates.map((g) => g.label ?? g.builtin), [BROWSER_CHECK, "lint"]);
 });

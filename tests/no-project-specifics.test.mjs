@@ -3,9 +3,10 @@
 // examples/steak-to-juan/ holds the project this was lifted from.
 //
 // BANNED names one project's systems, not its domain words: its name, repo, database, vendors,
-// hosting, module numbering and published pages. PENDING is the files README step 7 (the phase
-// runner) still has to make generic; step 7 is done when the list is empty. A file leaves it the
-// moment it is clean (the second test fails until it does), so the list only shrinks.
+// hosting, module numbering and published pages. PENDING is the files a piece of work still has
+// to make generic: empty since README step 7 finished (2026-10-27). A file goes on it only while
+// it is being made generic, and leaves it the moment it is clean (the second test fails until it
+// does), so the list only shrinks.
 //
 // Run: node --test tests/*.test.mjs
 import assert from "node:assert/strict";
@@ -28,14 +29,7 @@ const BANNED = [
   { term: /3P5zZTpoYRVwN26dWXJ7Yg/, why: "its Build Roadmap Artifact" },
 ];
 
-const PENDING = [
-  "template/docs/agents/ticket-template.md",
-  "template/docs/agents/workflow.md",
-  "template/docs/guides/phase-run.md",
-  "template/tools/phase-run/fix-prompt.md",
-  "template/tools/phase-run/run.mjs",
-  "template/tools/phase-run/ticket-prompt.md",
-];
+const PENDING = [];
 
 function files(rel) {
   if (statSync(join(PLUGIN, rel)).isFile()) return [rel];
@@ -49,7 +43,7 @@ function hits(rel) {
 
 const ALL = SCANNED.flatMap(files);
 
-test("no file outside step 7's pending list names one project", () => {
+test("no file outside the pending list names one project", () => {
   assert.deepEqual(ALL.filter((rel) => !PENDING.includes(rel)).flatMap(hits), []);
 });
 

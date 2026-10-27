@@ -24,7 +24,7 @@ types the command.
 | # | Step | Who | What happens |
 |---|---|---|---|
 | 1 | **Grill** — `/grill-with-docs` | Owner + Claude, one sitting | Every question a ticket would otherwise stop on is answered now. Settled terms and decisions go into `CONTEXT.md` / `docs/adr/` as it goes. After it, only the outcome is written; the owner runs the next commands |
-| 2 | **Flow diagram + prototype** | Claude builds, owner reviews | A Mermaid flow diagram, then a clickable prototype in the app's real colours with fake data, built through Impeccable. Polish here for as long as it takes: a change costs minutes here and days later. At approval a surface brief is written per new screen family (`.impeccable/surfaces/`). A backend-only phase skips this step |
+| 2 | **Flow diagram + prototype** | Claude builds, owner reviews | A Mermaid flow diagram, then a clickable prototype in the app's real colours with fake data (through Impeccable, in a project that uses it). Polish here for as long as it takes: a change costs minutes here and days later. With Impeccable, a surface brief is written at approval per new screen family (`.impeccable/surfaces/`). A backend-only phase skips this step |
 | 3 | **Spec and tickets** — `/to-spec`, `/to-tickets` | Owner starts, Claude writes | Tickets follow [`ticket-template.md`](ticket-template.md): each stands alone, names its prototype screen, its decisions and its areas |
 | 4 | **Readiness check** — `/ticket-check <spec>` | Owner + Claude, one sitting | Claude reads the spec, every ticket and the code, and asks every open question in one batch. Answers are written into the tickets; ready ones get the `run-ready` label |
 | 5 | **The phase run** — `node tools/phase-run/run.mjs --spec <N> --branch phase-<name>` | Claude alone | Builds the `run-ready` tickets in dependency order on the phase branch, a fresh session each. Each is a Claude Code background session, so the owner can watch one (`claude agents`, `claude attach <id>`). See below |
@@ -42,23 +42,24 @@ the spec is then a durable issue, and a fresh session can run `/to-tickets` stra
 ## What the phase run does per ticket
 
 The owner's guide, with the evening and morning checklists, is
-[`../implementation-log/_phase-run-guide.md`](../guides/phase-run.md). What each
-session is told is `tools/phase-run/ticket-prompt.md`. In order:
+[`docs/guides/phase-run.md`](../guides/phase-run.md). What each session is told is
+`tools/phase-run/ticket-prompt.md`, plus the project's own prose (`phaseRun.prompt` in
+`.claude/workflow.json`). In order:
 
 1. Reads the ticket and only what it names; posts its plan as a comment on the issue.
-2. Builds test-first (the `tdd` skill). A `frontend` ticket is built through Impeccable, extending
-   the shipped system toward its prototype screen and surface brief.
-3. Browser check with headless Playwright on the local `stj_cast` database, as the QA cast.
-4. A `frontend` ticket: one prototype-match review by a fresh reviewer, one fix batch.
+2. Builds test-first (the `tdd` skill), a `frontend` ticket toward its prototype screen.
+3. Browser check in a headless browser on the QA database (`phaseRun.qa`), for a ticket with a screen.
+4. A `frontend` ticket: one design review, if the project names one, and one fix batch.
 5. The per-ticket docs (`doc-sync` §1) and **one commit** with `Closes #N`; then `code-review`
    over that commit, its fixes amended into it.
-6. The runner checks the gates itself (one commit, clean tree, typecheck, lint, `next build` when
-   `src/` changed, the browser check's screenshots when a screen changed, the full suite,
-   doc-check), then applies any new migration to dev Neon. A failure goes back to the same session,
-   up to three rounds. Passed: the branch is pushed and the draft pull request updated.
+6. The runner checks the gates itself: one commit, clean tree, the implementation log, then the
+   project's gates in order (`phaseRun.gates`: typically typecheck, lint, a build, the browser
+   check's screenshots, the full suite), then doc-check; then it applies any new migration to the
+   migration target (`phaseRun.migrations`). A failure goes back to the same session, up to three
+   rounds. Passed: the branch is pushed and the draft pull request updated.
 
 **A question mid-run: decide small ones, park big ones.** A small, easily changed choice is taken
-and listed under "Assumptions made" for the owner to confirm or reverse. A money or payroll rule,
+and listed under "Assumptions made" for the owner to confirm or reverse. A money rule,
 privacy, who may see or do something, or a hard-to-reverse schema choice parks the ticket: its
 question goes on the issue with the `needs-info` label, its dependents wait, and the run moves on.
 
@@ -75,11 +76,11 @@ are separate asks (`CLAUDE.md`, Working agreement). Include `Closes #N` in the c
 ## Design lead-time: check before a ticket with a screen
 
 A new screen family needs its flow diagram and, for a screen-heavy phase, its approved prototype
-before any ticket builds it (`CLAUDE.md`, Design lead-time; files under `design/module-N/`, see
-`design/README.md`). Check against the ticket's own acceptance criteria, not a note written before
-the ticket existed: a ticket that needs a screen nothing was designed for is a stop-and-flag
-moment, and `/ticket-check` looks for exactly that. After a build `DESIGN.md` is the record, and
-the prototype is deleted in the finish ticket.
+before any ticket builds it (where the project keeps them, `CLAUDE.md` says). Check against the
+ticket's own acceptance criteria, not a note written before the ticket existed: a ticket that needs
+a screen nothing was designed for is a stop-and-flag moment, and `/ticket-check` looks for exactly
+that. After a build the shipped screen is the record (with Impeccable, `DESIGN.md`), and the
+prototype is deleted in the finish ticket.
 
 ## `doc-sync`: runs with every change
 

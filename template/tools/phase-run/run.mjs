@@ -35,6 +35,8 @@ import { homedir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { BROWSER_CHECK, fill, fillEnv, loadRunConfig, qaUrl, sessionEnv as pinnedEnv, targetFingerprint, targetUrl } from "./config.mjs";
+
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, "..", "..");
 const STATE = join(ROOT, ".phase-run");
@@ -42,10 +44,9 @@ const WINDOWS = process.platform === "win32";
 
 const PARK_LABEL = { question: "needs-info", failure: "ready-for-human" };
 const READY_LABEL = "run-ready";
-const QA_PORT = 8400;
-const DEV_PORT = 3000;
-const CAST_DATABASE = "stj_cast"; // scripts/qa-cast.ts's DB_NAME, in the Docker test container
-const NO_LOYVERSE_TOKEN = "phase-run-sessions-get-no-loyverse-token";
+
+/** The project's commands, databases and prose: `phaseRun` in .claude/workflow.json (config.mjs). Set by preflight. */
+let config = null;
 
 // ---------------------------------------------------------------- arguments
 
@@ -124,9 +125,9 @@ function exec(command, args, extra = {}) {
   };
 }
 
-/** `pnpm` is a .cmd shim on Windows, so it goes through the shell. */
-function pnpm(commandLine, env = {}) {
-  const result = spawnSync(`pnpm ${commandLine}`, {
+/** A project command, run as written: through the shell, since `pnpm`, `npm` and the like are .cmd shims on Windows. */
+function shell(commandLine, env = {}) {
+  const result = spawnSync(commandLine, {
     cwd: ROOT,
     encoding: "utf8",
     shell: true,
@@ -170,11 +171,10 @@ function sleep(ms) {
 
 /**
  * Reads `.env` into an object of its own, never into `process.env`. A
- * session inherits the runner's environment, and on the trial run it
- * inherited the dev Neon address that way: a script it meant to point at the
- * local database read dev Neon instead (read-only, but not what "QA on
- * stj_cast only" means). The runner needs one value from the file, and takes
- * only that one.
+ * session inherits the runner's environment, and on the first trial run it
+ * inherited the migration target's address that way: a script it meant to
+ * point at the local database read the shared one instead. The runner takes
+ * only the values its config names.
  */
 function readDotEnv() {
   const values = {};
@@ -191,50 +191,30 @@ function readDotEnv() {
   return values;
 }
 
-/** The dev Neon address: what a ticket's migration is applied to, and nothing else. */
-let devNeonUrl = null;
-
-/**
- * The local QA cast database, as scripts/qa-cast.ts addresses it, but under
- * the loopback name the test database's address does NOT use. That is on
- * purpose. vitest.config.ts refuses to start when NEON_TEST_DATABASE_URL and
- * NEON_DATABASE_URL look like one database, and for a host that is not Neon
- * it compares the hostname alone (test/support/neon-url.ts). These are two
- * databases in one container, so they need two names for it. "Tidying" this
- * to the same name stops every test run inside a session.
- */
-function castDatabaseUrl() {
-  let testHost = "localhost";
-  try {
-    testHost = new URL(process.env.NEON_TEST_DATABASE_URL ?? readDotEnv().NEON_TEST_DATABASE_URL ?? "").hostname;
-  } catch {
-    testHost = "localhost";
-  }
-  const host = testHost === "127.0.0.1" ? "localhost" : "127.0.0.1";
-  return `postgresql://postgres:postgres@${host}:5432/${CAST_DATABASE}`;
+/** A variable the config names: the runner's own environment first, then `.env`. */
+function lookup(name) {
+  return process.env[name] ?? readDotEnv()[name];
 }
 
+/** The migration target's address: what a ticket's migration is applied to, and nothing else. */
+let migrationTargetUrl = null;
+
 /**
- * What every session's environment pins. `.env` holds the dev Neon address
- * and the Loyverse token, and a session can load that file without meaning
- * to: `node --env-file=.env`, prisma.config.ts, vitest.config.ts and the
- * loadDotEnv copy in each prisma/ script all read it. Every one of them
- * leaves a variable alone once it is set, so a value set here cannot be
- * replaced from the file. A script a session runs plainly reads `stj_cast`,
- * never dev Neon, and nothing it runs can reach the real point of sale.
- *
- * This stops accidents, not a session that reads `.env` on purpose. The R2
- * keys are left as they are: the QA app stores a captured photo with them.
+ * What every session's environment pins (the config's `sessionEnv`). A
+ * session can load `.env` without meaning to (`node --env-file=.env`, a
+ * tool's own config, a script's own loader), and such loaders leave a
+ * variable alone once it is set, so a value pinned here cannot be replaced
+ * from the file: a script a session runs plainly reads the QA database, never
+ * the migration target, and a live token can be pinned to a placeholder.
+ * This stops accidents, not a session that reads `.env` on purpose.
  */
 function sessionEnv() {
-  return { NEON_DATABASE_URL: castDatabaseUrl(), LOYVERSE_ACCESS_TOKEN: NO_LOYVERSE_TOKEN };
+  return pinnedEnv(config, lookup);
 }
 
-/** A Neon endpoint id, as test/support/neon-url.ts reads it. Never a credential. */
-function endpointId(url) {
-  const host = new URL(url).hostname;
-  const first = host.split(".")[0] ?? host;
-  return first.startsWith("ep-") ? first.replace(/-pooler$/, "") : host;
+/** A port the project names, freed after every ticket: a ticket's QA server must not block the next one. */
+async function freeTicketPorts() {
+  for (const { port } of config.ports.filter((p) => p.freeAfterEachTicket)) await freePort(port);
 }
 
 function listening(port) {
@@ -408,7 +388,24 @@ function holdReason(ticket, byNumber) {
 
 async function preflight(options) {
   const problems = [];
-  devNeonUrl = process.env.NEON_DATABASE_URL ?? readDotEnv().NEON_DATABASE_URL ?? null;
+  // A broken config refuses even a dry run: the hooks skip this section, so this is where a typo shows.
+  const loaded = loadRunConfig(ROOT);
+  if (loaded.error) die(`Not ready to run: ${loaded.error}`);
+  config = loaded.config;
+  migrationTargetUrl = targetUrl(config, lookup);
+  if (config.prompt) {
+    const path = join(ROOT, config.prompt);
+    if (!existsSync(path)) die(`Not ready to run: phaseRun.prompt names ${config.prompt}, which does not exist.`);
+    projectProse = readFileSync(path, "utf8");
+    try {
+      proseSections(projectProse);
+    } catch (error) {
+      die(`Not ready to run: ${config.prompt}: ${error.message}`);
+    }
+  }
+  if (config.gates.length === 0) {
+    console.log("No project gates in .claude/workflow.json (phaseRun.gates): each ticket gets the runner's own checks only.");
+  }
 
   const current = git("branch", "--show-current");
   let branch = options.branch;
@@ -432,31 +429,35 @@ async function preflight(options) {
     );
   }
 
-  const database = pnpm("test:db:up");
-  if (!database.ok) problems.push(`The Docker test database did not start. Is Docker Desktop running?\n${tail(database.output, 600)}`);
-
-  for (const port of [QA_PORT, DEV_PORT]) {
-    if (await listening(port)) problems.push(`Something is listening on :${port}. Stop it (pnpm dev, a QA cast) before a run.`);
+  for (const row of config.preflight) {
+    const result = shell(fill(row.run, { qaUrl: qaUrl(config, lookup) }));
+    if (!result.ok) problems.push(`${row.label} failed (\`${row.run}\`).${row.hint ? ` ${row.hint}` : ""}\n${tail(result.output, 600)}`);
   }
 
-  // Trust on first use: the endpoint in .env is remembered as "dev", and a
+  for (const { port, what } of config.ports) {
+    if (await listening(port)) problems.push(`Something is listening on :${port} (${what}). Stop it before a run.`);
+  }
+
+  // Trust on first use: the migration target's host is remembered, and a
   // later run refuses a different one. A run applies migrations to it.
-  const url = devNeonUrl;
-  if (!url) problems.push("NEON_DATABASE_URL is not set in .env.");
-  else {
-    const id = endpointId(url);
-    const recorded = join(STATE, "dev-endpoint");
-    if (!existsSync(recorded)) {
-      if (!options.dryRun) {
-        mkdirSync(STATE, { recursive: true });
-        writeFileSync(recorded, `${id}\n`);
+  if (config.migrations) {
+    const { name, urlFrom } = config.migrations.target;
+    if (!migrationTargetUrl) problems.push(`${urlFrom} is not set (in the environment or .env): it is the migration target, ${name}.`);
+    else {
+      const id = targetFingerprint(migrationTargetUrl);
+      const recorded = join(STATE, "migration-target");
+      if (!existsSync(recorded)) {
+        if (!options.dryRun) {
+          mkdirSync(STATE, { recursive: true });
+          writeFileSync(recorded, `${id}\n`);
+        }
+        console.log(`Recorded ${id} as ${name}. If ${urlFrom} points anywhere else, stop now and delete .phase-run/migration-target.`);
+      } else if (readFileSync(recorded, "utf8").trim() !== id) {
+        problems.push(
+          `${urlFrom} is ${id}, but runs here have used ${readFileSync(recorded, "utf8").trim()} as ${name}. ` +
+            "A run migrates that database, so it refuses a changed one. If the change is right, delete .phase-run/migration-target.",
+        );
       }
-      console.log(`Recorded ${id} as the dev Neon endpoint. If .env points anywhere else, stop now and delete .phase-run/dev-endpoint.`);
-    } else if (readFileSync(recorded, "utf8").trim() !== id) {
-      problems.push(
-        `.env's NEON_DATABASE_URL is endpoint ${id}, but runs here have used ${readFileSync(recorded, "utf8").trim()}. ` +
-          "A run migrates that database, so it refuses a changed one. If the change is right, delete .phase-run/dev-endpoint.",
-      );
     }
   }
 
@@ -477,6 +478,67 @@ async function preflight(options) {
 
 function render(template, values) {
   return template.replace(/\{\{(\w+)\}\}/g, (whole, key) => (key in values ? String(values[key]) : whole));
+}
+
+/** The sections of the project's prose (phaseRun.prompt) the prompts have room for, and their markers. */
+const PROSE_SECTIONS = { Read: "PROJECT_READ", Build: "PROJECT_BUILD", "Browser check": "PROJECT_BROWSER_CHECK", Review: "PROJECT_REVIEW", Fix: "PROJECT_FIX" };
+
+/** The project's prose, read once at preflight: its text, or "" when the project has none. */
+let projectProse = "";
+
+/**
+ * The project's prose split at its `## ` headings, its header dropped. A
+ * heading the prompts have no room for is refused, so a typo cannot drop a
+ * section without a word.
+ */
+function proseSections(text) {
+  const sections = {};
+  let current = null;
+  for (const line of text.replace(/\r\n/g, "\n").replace(/^---\n[\s\S]*?\n---\n/, "").split("\n")) {
+    const heading = line.match(/^## (.+?)\s*$/);
+    if (heading) {
+      current = heading[1];
+      if (!(current in PROSE_SECTIONS)) {
+        throw new Error(`its "## ${current}" section has no place in the prompt; the sections are ${Object.keys(PROSE_SECTIONS).join(", ")}.`);
+      }
+      sections[current] = [];
+    } else if (current) sections[current].push(line);
+  }
+  return Object.fromEntries(Object.entries(sections).map(([name, lines]) => [name, lines.join("\n").trim()]));
+}
+
+/**
+ * What the prompts say about this project: its prose, spliced in, and the
+ * lines built from its config. `ticket` is the ticket's own values ({{N}},
+ * {{BASE}}, …), which the prose may use too: each section is rendered with
+ * them before it is spliced, since the prompt is rendered only once. A
+ * section the project leaves out gets a line saying so, so the numbered
+ * sections stay in order.
+ */
+function promptValues(project, prose, ticket) {
+  const { BASE: base, N } = ticket;
+  const sections = proseSections(prose);
+  const spliced = Object.fromEntries(Object.entries(PROSE_SECTIONS).map(([name, key]) => [key, render(sections[name] ?? "", ticket)]));
+  const target = project.migrations?.target.name ?? null;
+  const pinned = Object.keys(project.sessionEnv).map((name) => `\`${name}\``);
+  const check = project.browserCheck;
+  return {
+    ...spliced,
+    PROJECT_BROWSER_CHECK: spliced.PROJECT_BROWSER_CHECK || "This project names no browser check of its own: walk each acceptance criterion in a headless browser if the ticket changes a screen.",
+    PROJECT_REVIEW: spliced.PROJECT_REVIEW || "This project names no design review: skip this section.",
+    QA: project.qa ? `\`${project.qa.name}\`` : "local data",
+    TARGET: target ?? "a shared database",
+    STOP_CHECKS: project.stopChecks.length ? project.stopChecks.map((c) => `\`${c.run.replaceAll("{base}", base)}\``).join(", ") : "nothing, as this project names no stop checks",
+    MIGRATIONS: target
+      ? `never apply a migration to ${target} yourself; the runner applies it after your checks pass`
+      : "this project's runner applies none, so never apply one to a shared database",
+    SHELL_ENV: pinned.length
+      ? `**Your shell points at local data, on purpose.** ${pinned.join(", ")} ${pinned.length === 1 ? "is" : "are"} already set for this run, and \`--env-file=.env\` or a script's own \`.env\` loader changes none of them. Work on ${project.qa ? `\`${project.qa.name}\`` : "local data"}; never point anything at ${target ?? "a shared database"}, and never open or print \`.env\`.`
+      : "**Never open or print `.env`**: it can hold live credentials.",
+    BROWSER_GATE: check
+      ? `The runner checks this itself: a ticket labelled \`frontend\`, or one that changes a screen's file, does not pass without at least ${check.minimum} screenshots saved to \`${fill(check.screenshots, { N })}/\` **after your last edit to a source file**. A fix you make after the walk (the code review's, a fix round's) means walking again.`
+      : "The runner has no screenshot gate for this project; say in the implementation log what you checked.",
+  };
 }
 
 // "You've hit your session limit · resets 3:30pm" is the wording past transcripts on this machine hold.
@@ -655,19 +717,23 @@ function stopCheckRunning(number) {
 }
 
 /**
- * A test run must not outlive the session that started it: the suite resets
- * the one test database before every file, so a second run on it fails both
- * (duplicate ids, a deadlock on TRUNCATE). Stops every vitest started from
- * this checkout, and returns how many there were.
+ * A test run must not outlive the session that started it: a suite that
+ * resets one shared test database fails when a second run is on it too
+ * (duplicate ids, a deadlock on TRUNCATE). Stops every node process from this
+ * checkout's node_modules whose command line matches the config's
+ * `strayProcess`, and returns how many there were.
  */
-function stopStrayTests(when) {
+function stopStray(when) {
+  const pattern = config?.strayProcess;
+  if (!pattern) return 0;
   let pids = [];
   if (WINDOWS) {
     const modules = `${ROOT}\\node_modules\\`.toLowerCase().replace(/'/g, "''");
+    const match = pattern.source.replace(/'/g, "''");
     const found = exec("powershell", [
       "-NoProfile",
       "-Command",
-      `Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'node.exe' -and $_.CommandLine -and $_.CommandLine.Replace('/', '\\').ToLower().Contains('${modules}') -and $_.CommandLine -match 'vitest' } | ForEach-Object { $_.ProcessId }`,
+      `Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'node.exe' -and $_.CommandLine -and $_.CommandLine.Replace('/', '\\').ToLower().Contains('${modules}') -and $_.CommandLine -match '${match}' } | ForEach-Object { $_.ProcessId }`,
     ]);
     pids = found.stdout.split("\n").map((line) => line.trim()).filter(Boolean);
     for (const pid of pids) exec("taskkill", ["/pid", pid, "/T", "/F"]);
@@ -675,41 +741,51 @@ function stopStrayTests(when) {
     const found = exec("ps", ["-eo", "pid=,args="]);
     pids = found.stdout
       .split("\n")
-      .filter((line) => line.includes(`${ROOT}/node_modules/`) && line.includes("vitest"))
+      .filter((line) => line.includes(`${ROOT}/node_modules/`) && pattern.test(line))
       .map((line) => line.trim().split(/\s+/)[0]);
     for (const pid of pids) exec("kill", ["-9", pid]);
   }
-  if (pids.length > 0) log(`Stopped a test run left going ${when}.`);
+  if (pids.length > 0) log(`Stopped a ${pattern.source} process left going ${when}.`);
   return pids.length;
 }
 
 /**
- * The settings one ticket's background session runs under: the run's own
- * allowlist (settings.json, still the one file to edit), plus what points 1
- * to 3 above call for. The denials keep a session's hands off the things
- * that check it, and off the three tools that would wait for a person or
- * move the work somewhere else.
+ * The settings one ticket's session runs under: the run's own allowlist
+ * (settings.json, the rules every project needs), the project's rows
+ * (phaseRun.permissions), and the run's variables. A background session also
+ * gets what points 1 to 3 above call for. The denials keep a session's hands
+ * off the things that check it (the runner, the project's config and the
+ * prose its prompt is built from), and off the three tools that would wait
+ * for a person or move the work somewhere else.
  */
-function writeSessionSettings(run, number, env) {
-  const base = JSON.parse(readFileSync(join(HERE, "settings.json"), "utf8"));
-  const settings = {
+function sessionSettings(base, project, { branch, env, background, prompt }) {
+  const allow = [...(base.permissions?.allow ?? []), ...project.allow];
+  return {
     ...base,
     permissions: {
       ...base.permissions,
-      allow: [...(base.permissions?.allow ?? []), "Edit", "Write"],
+      allow: background ? [...allow, "Edit", "Write"] : allow,
       deny: [
         ...(base.permissions?.deny ?? []),
-        "Edit(./.claude/hooks/**)",
+        ...project.deny,
         "Edit(./tools/phase-run/**)",
-        `Edit(./.phase-run/${run.branch}/**)`,
+        "Edit(./.claude/workflow.json)",
+        "Edit(./.claude/spec-issues.json)",
+        ...(prompt ? [`Edit(./${prompt})`] : []),
+        `Edit(./.phase-run/${branch}/**)`,
         "AskUserQuestion",
         "EnterPlanMode",
         "EnterWorktree",
       ],
     },
     env: { ...(base.env ?? {}), ...env },
-    worktree: { ...(base.worktree ?? {}), bgIsolation: "none" },
+    ...(background ? { worktree: { ...(base.worktree ?? {}), bgIsolation: "none" } } : {}),
   };
+}
+
+function writeSessionSettings(run, number, env, { background = true } = {}) {
+  const base = JSON.parse(readFileSync(join(HERE, "settings.json"), "utf8"));
+  const settings = sessionSettings(base, config.permissions, { branch: run.branch, env, background, prompt: config.prompt });
   const path = join(run.dir, `settings-${number}.json`);
   writeFileSync(path, `${JSON.stringify(settings, null, 2)}\n`);
   return path;
@@ -1014,58 +1090,72 @@ const TRAILER = /co-authored-by:|claude-session:|generated with \[?claude|🤖 g
 
 function specNumbers(options) {
   const numbers = new Set();
-  const path = join(ROOT, ".claude", "hooks", "spec-issues.json");
+  const path = join(ROOT, ".claude", "spec-issues.json");
   if (existsSync(path)) for (const n of JSON.parse(readFileSync(path, "utf8")).specs ?? []) numbers.add(String(n));
   if (options.spec) numbers.add(String(options.spec));
   return numbers;
 }
 
+/** Each migration's file, by name, as newMigrations found it: what `destructive` reads, and what a park checks is gone. */
+const migrationFiles = new Map();
+
+/** The migrations the ticket added since `base` (phaseRun.migrations.added), by name. */
 function newMigrations(base) {
-  const added = git("diff", "--name-only", "--diff-filter=A", `${base}..HEAD`, "--", "prisma/migrations");
+  if (!config.migrations) return [];
+  const added = git("diff", "--name-only", "--diff-filter=A", `${base}..HEAD`);
   const names = new Set();
   for (const file of added.split("\n").filter(Boolean)) {
-    const match = file.match(/^prisma\/migrations\/([^/]+)\/migration\.sql$/);
-    if (match) names.add(match[1]);
+    const match = file.match(config.migrations.added);
+    if (!match) continue;
+    names.add(match[1]);
+    migrationFiles.set(match[1], file);
   }
   return [...names].sort();
 }
 
-function applyToDevNeon(names, run) {
-  const direct = devNeonUrl.replace("-pooler.", ".");
-  const result = pnpm("exec prisma migrate deploy", { NEON_DATABASE_URL: direct });
+/**
+ * Applies `names` to the migration target and records in `applied` each one
+ * that went in. The shell is a parameter, so a test can stand in for it.
+ */
+function applyMigrations(names, applied, { migrations, values, run = shell }) {
+  const { apply, rollBack } = migrations;
+  const result = run(fill(apply.run, values), fillEnv(apply.env, values));
   if (result.ok) {
-    for (const name of names) run.neonApplied.add(name);
+    for (const name of names) applied.add(name);
     return { ok: true };
   }
-  // Prisma names each migration as it starts it, so every one named before
-  // the last did apply; the last is the one that failed.
+  if (!rollBack) return { ok: false, output: result.output };
+  // `rollBack` promises an `apply` that names each migration as it starts it
+  // (config.mjs), so every one named before the last did apply; the last is
+  // the one that failed.
   const started = names.filter((name) => result.output.includes(name));
-  for (const name of started.slice(0, -1)) run.neonApplied.add(name);
-  // A failed row would make every later ticket's deploy refuse, for a reason
-  // that is not theirs. Prisma refuses this for a migration that did not fail.
+  for (const name of started.slice(0, -1)) applied.add(name);
+  // A failed row would make every later ticket's apply refuse, for a reason
+  // that is not theirs.
   for (const name of names) {
-    if (!run.neonApplied.has(name)) pnpm(`exec prisma migrate resolve --rolled-back ${name}`, { NEON_DATABASE_URL: direct });
+    if (!applied.has(name)) run(fill(rollBack.run, { ...values, name }), fillEnv(rollBack.env, { ...values, name }));
   }
   return { ok: false, output: result.output };
 }
 
-// What `next build` compiles. A ticket that touches none of it skips the build.
-const BUILD_INPUT = /^(src\/|public\/|package\.json$|pnpm-lock\.yaml$|next\.config\.|tsconfig)/;
-// What a person sees. A ticket that touches any of it owes a browser check, labelled `frontend` or not.
-const SCREEN_FILE = /^src\/(components\/|app\/.*\.(tsx|css)$)/;
+/** What the report calls the migration target. */
+function targetName() {
+  return config?.migrations?.target.name ?? "the migration target";
+}
+
 const IMAGE_FILE = /\.(png|jpe?g|webp)$/i;
 
 /**
- * The browser check's screenshots for this ticket. One counts only when it was
- * saved after the ticket started AND after the last edit to any source file the
- * ticket changed. Before #194 a session walked the screens, then fixed what the
- * code review found and amended, and the screenshots from before the fixes
- * passed the gate (6C's #166–#173 and #175 all said so). Docs edits do not count.
+ * The browser check's screenshots in `rel` (a folder under `root`). One counts
+ * only when it was saved after the ticket started AND after the last edit to
+ * any source file the ticket changed (`sourceFiles`). Once, a session walked
+ * the screens, then fixed what the code review found and amended, and the
+ * screenshots from before the fixes passed the gate. Docs edits do not count.
  */
-function screenshotsSince(root, number, startedAt, changed) {
-  const dir = join(root, ".impeccable", `review-${number}`);
+function screenshotsSince(root, rel, startedAt, changed, sourceFiles) {
+  const dir = join(root, rel);
   const lastEdit = changed
-    .filter((file) => file.startsWith("src/"))
+    .filter((file) => sourceFiles.test(file))
     .map((file) => join(root, file))
     .filter((path) => existsSync(path))
     .reduce((newest, path) => Math.max(newest, statSync(path).mtimeMs), 0);
@@ -1074,6 +1164,47 @@ function screenshotsSince(root, number, startedAt, changed) {
   const shots = readdirSync(dir, { recursive: true, encoding: "utf8" }).filter((file) => IMAGE_FILE.test(file));
   const fresh = shots.filter((file) => statSync(join(dir, file)).mtimeMs >= since);
   return { fresh, stale: shots.length - fresh.length, since };
+}
+
+/**
+ * The browser check's gate (phaseRun.browserCheck), or null when it passes.
+ * The check is the session's own work, so its word is not enough: the
+ * screenshots it was told to save must be there, and be from this build.
+ */
+function browserCheckProblem(ticket, changed, startedAt) {
+  const check = config.browserCheck;
+  if (!ticket.labels.includes("frontend") && !changed.some((file) => check.screenFiles.test(file))) return null;
+  const dir = fill(check.screenshots, { N: ticket.number });
+  const shots = screenshotsSince(ROOT, dir, startedAt, changed, check.sourceFiles);
+  if (shots.fresh.length >= check.minimum) return null;
+  return (
+    `This ticket changes what a screen shows, and ${dir}/ holds ${shots.fresh.length} screenshot(s) saved after your last edit to a source file` +
+    `${shots.stale ? ` (${shots.stale} older one(s) do not count: a source file changed after them, so they show code that is no longer there)` : ""}; ` +
+    `the browser check saves at least ${check.minimum}. Do the browser check in section 5 of your first instructions again, on the code as it is now: ` +
+    `${check.redo}, into ${dir}/, then stop the server. Fix what it finds and amend the commit. The screenshots themselves are not committed.`
+  );
+}
+
+/**
+ * The project's gates (phaseRun.gates), in order: the first failure as
+ * `{ gate, output }`, or null. A gate whose `when` matches no changed file is
+ * skipped. The shell and the side jobs are parameters, so a test can stand in
+ * for them.
+ */
+async function projectGates(gates, { changed, values, browserCheck, run = shell, freePorts = freeTicketPorts, stopStray: stop = () => 0 }) {
+  for (const gate of gates) {
+    if (gate.builtin === BROWSER_CHECK) {
+      const problem = browserCheck();
+      if (problem) return { gate: "browser check", output: problem };
+      continue;
+    }
+    if (gate.when && !changed.some((file) => gate.when.test(file))) continue;
+    if (gate.freePorts) await freePorts();
+    if (gate.alone) stop(`before the ${gate.label} gate`);
+    const result = run(fill(gate.run, values), fillEnv(gate.env, values));
+    if (!result.ok) return { gate: gate.label, output: result.output };
+  }
+  return null;
 }
 
 /** Each gate is checked by this script. The first failure is returned. */
@@ -1109,60 +1240,35 @@ async function runGates(ticket, base, options, run, startedAt) {
     return fail("docs", "The commit adds no docs/history/implementation-log/NNN-*.md entry. Every ticket gets one, in full.");
   }
 
-  const typecheck = pnpm("typecheck");
-  if (!typecheck.ok) return fail("typecheck", typecheck.output);
-  const lint = pnpm("lint");
-  if (!lint.ok) return fail("lint", lint.output);
-
   const changed = git("diff", "--name-only", `${base}..HEAD`).split("\n").filter(Boolean);
-
-  // Typecheck, lint and the suite all pass on a client component that imports
-  // a file reaching Prisma; only the bundler refuses it (it has landed three
-  // times: #54, #86, #89). The build never needs a database, and is pointed at
-  // the local one so that Next reading `.env` cannot hand it dev Neon.
-  if (changed.some((file) => BUILD_INPUT.test(file))) {
-    await freePort(QA_PORT); // a QA server left running holds `.next` open on Windows
-    const build = pnpm("exec next build", { NEON_DATABASE_URL: castDatabaseUrl() });
-    if (!build.ok) return fail("build (next build)", build.output);
-  }
-
-  // The browser check is the session's own work, so its word is not enough:
-  // the screenshots it was told to save must be there, and be from this build.
-  if (ticket.labels.includes("frontend") || changed.some((file) => SCREEN_FILE.test(file))) {
-    const shots = screenshotsSince(ROOT, n, startedAt, changed);
-    if (shots.fresh.length < 2) {
-      return fail(
-        "browser check",
-        `This ticket changes what a screen shows, and .impeccable/review-${n}/ holds ${shots.fresh.length} screenshot(s) saved after your last edit to a source file` +
-          `${shots.stale ? ` (${shots.stale} older one(s) do not count: a source file changed after them, so they show code that is no longer there)` : ""}; ` +
-          "the browser check saves at least two (390 and 1280 wide). Do the browser check in section 5 of your first instructions again, on the code as it is now: " +
-          "the QA cast on stj_cast, headless Playwright, every acceptance criterion, no console error or failed request, " +
-          `screenshots at 390 and 1280 into .impeccable/review-${n}/, then stop the server. ` +
-          "Fix what it finds and amend the commit. The screenshots themselves are not committed.",
-      );
-    }
-  }
-
-  stopStrayTests(`before #${n}'s full suite`); // one suite at a time on the test database
-  const tests = pnpm("test");
-  if (!tests.ok) return fail("tests (full suite)", tests.output);
+  const failed = await projectGates(config.gates, {
+    changed,
+    values: { base, N: n, qaUrl: qaUrl(config, lookup) },
+    browserCheck: () => browserCheckProblem(ticket, changed, startedAt),
+    stopStray: (when) => stopStray(`${when} for #${n}`),
+  });
+  if (failed) return fail(failed.gate, failed.output);
 
   const docs = exec("node", ["tools/doc-check.mjs", "--head"]);
   if (!docs.ok) return fail("doc-check", `${docs.stdout}\n${docs.stderr}`);
 
-  // Last on purpose: nothing reaches dev Neon until everything else is green.
-  const migrations = newMigrations(base).filter((name) => !run.neonApplied.has(name));
+  // Last on purpose: nothing reaches the migration target until everything else is green.
+  const migrations = newMigrations(base).filter((name) => !run.migrationsApplied.has(name));
   if (migrations.length > 0) {
-    log(`#${n}: applying ${migrations.join(", ")} to dev Neon.`);
-    const applied = applyToDevNeon(migrations, run);
+    const target = targetName();
+    log(`#${n}: applying ${migrations.join(", ")} to ${target}.`);
+    const applied = applyMigrations(migrations, run.migrationsApplied, {
+      migrations: config.migrations,
+      values: { targetUrl: migrationTargetUrl, base },
+    });
     if (!applied.ok) {
-      const done = newMigrations(base).filter((name) => run.neonApplied.has(name));
+      const done = newMigrations(base).filter((name) => run.migrationsApplied.has(name));
       return fail(
-        "migration on dev Neon",
+        `migration on ${target}`,
         `${applied.output}\n\n` +
-          `The failed migration was marked rolled back on dev Neon, so a corrected one can apply. ` +
-          `Dev Neon may still hold part of its changes: make the corrected SQL safe to run against that.` +
-          (done.length ? `\nAlready applied to dev Neon, never edit: ${done.join(", ")}. Add a new migration after them instead.` : ""),
+          (config.migrations.rollBack ? `The failed migration was marked rolled back on ${target}, so a corrected one can apply. ` : "") +
+          `${target} may still hold part of its changes: make the corrected migration safe to run against that.` +
+          (done.length ? `\nAlready applied to ${target}, never edit: ${done.join(", ")}. Add a new migration after them instead.` : ""),
       );
     }
   }
@@ -1189,36 +1295,30 @@ function ticketAreas(body) {
   return areas.length ? areas : null;
 }
 
-const ALWAYS_IN_SCOPE = [
-  /^docs\//,
-  /^test\//,
-  /^CLAUDE\.md$/,
-  /^CONTEXT\.md$/,
-  /^DESIGN\.md$/,
-  /^\.impeccable\//,
-  // The shared registries nearly every ticket of a module touches (flagged in 7 of 9 tickets of
-  // 6C's 10-15 report, which taught the ⚠ line to be ignored). #194.
-  // Not audit-log.ts: a change to the global audit log (CLAUDE.md rule 6) stays flagged unless the ticket names it.
-  /^src\/components\/shell\/(nav-config\.ts|icons\.tsx)$/,
-  /^src\/lib\/notifications\.ts$/,
-  /^src\/app\/globals\.css$/,
-  // Each ticket's committed browser walk, which the finish re-runs (#194).
-  /^scripts\/walks\//,
-];
+/**
+ * Never "outside the ticket's areas": the workflow's own files. A project adds
+ * its shared registries (the ones nearly every ticket touches, which would
+ * otherwise teach the owner to ignore the ⚠ line) as phaseRun.alwaysInScope.
+ */
+const ALWAYS_IN_SCOPE = [/^docs\//, /^CLAUDE\.md$/, /^CONTEXT\.md$/];
 
-function outsideAreas(files, areas) {
+function outsideAreas(files, areas, alwaysInScope = []) {
   if (!areas) return [];
+  const inScope = [...ALWAYS_IN_SCOPE, ...alwaysInScope];
   const patterns = areas.map((area) => {
     const escaped = area.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*\*/g, "\u0000").replace(/\*/g, "[^/]*").replace(/\u0000/g, ".*");
     return new RegExp(`^${escaped}`);
   });
-  return files.filter((file) => !ALWAYS_IN_SCOPE.some((p) => p.test(file)) && !patterns.some((p) => p.test(file)));
+  return files.filter((file) => !inScope.some((p) => p.test(file)) && !patterns.some((p) => p.test(file)));
 }
 
+/** The migrations whose text matches the config's `destructive` pattern: they drop or rewrite data. */
 function destructive(names) {
+  const pattern = config.migrations?.destructive;
+  if (!pattern) return [];
   return names.filter((name) => {
-    const sql = readFileSync(join(ROOT, "prisma", "migrations", name, "migration.sql"), "utf8");
-    return /\bDROP\s+(TABLE|COLUMN|TYPE|INDEX|CONSTRAINT)\b|\bTRUNCATE\b|\bDELETE\s+FROM\b|\bALTER\s+COLUMN\b[^;]*\bTYPE\b/i.test(sql);
+    const file = migrationFiles.get(name);
+    return file && existsSync(join(ROOT, file)) && pattern.test(readFileSync(join(ROOT, file), "utf8"));
   });
 }
 
@@ -1288,6 +1388,13 @@ function ensurePullRequest(run, options) {
   return gh("pr", "create", "--draft", "--base", "main", "--head", run.branch, "--title", title, "--body-file", bodyFile);
 }
 
+/** The ticket's screenshot folder, for the report, when the project has a browser check and the folder exists. */
+function screenshotFolder(number) {
+  if (!config.browserCheck) return null;
+  const dir = fill(config.browserCheck.screenshots, { N: number });
+  return existsSync(join(ROOT, dir)) ? `${dir}/` : null;
+}
+
 async function finishBuilt(ticket, base, options, run, session) {
   const hash = git("rev-parse", "--short", "HEAD");
   const stat = git("diff", "--shortstat", `${base}..HEAD`);
@@ -1304,7 +1411,7 @@ async function finishBuilt(ticket, base, options, run, session) {
     status: "built",
     hash,
     stat,
-    outside: outsideAreas(files, ticketAreas(ticket.body)),
+    outside: outsideAreas(files, ticketAreas(ticket.body), config.alwaysInScope),
     migrations,
     destructive: destructive(migrations),
     assumptions: verdict.assumptions ?? [],
@@ -1312,7 +1419,7 @@ async function finishBuilt(ticket, base, options, run, session) {
     foundElsewhere: verdict.foundElsewhere ?? [],
     handedForward: verdict.handedForward ?? [],
     summary: verdict.summary ?? "",
-    screenshots: existsSync(join(ROOT, ".impeccable", `review-${ticket.number}`)) ? `.impeccable/review-${ticket.number}/` : null,
+    screenshots: screenshotFolder(ticket.number),
     notes: [],
     session,
   };
@@ -1334,7 +1441,7 @@ async function park(ticket, base, kind, detail, run, session) {
     git("branch", "-f", keptOn, "HEAD");
     git("reset", "--hard", base);
   }
-  await freePort(QA_PORT);
+  await freeTicketPorts();
 
   const heading = kind === "question" ? "The phase run parked this ticket: it needs your decision." : "The phase run could not finish this ticket.";
   const body = [
@@ -1354,14 +1461,15 @@ async function park(ticket, base, kind, detail, run, session) {
   // Set aside for this run either way; GitHub only knows if the two calls got through.
   ticket.labels = [...ticket.labels.filter((label) => label !== READY_LABEL), PARK_LABEL[kind]];
 
-  const leftOnNeon = [...run.neonApplied].filter((name) => !existsSync(join(ROOT, "prisma", "migrations", name)));
+  // Applied to the target, but its file went with the reset: the target holds what the branch does not.
+  const leftOnTarget = [...run.migrationsApplied].filter((name) => migrationFiles.has(name) && !existsSync(join(ROOT, migrationFiles.get(name))));
   recordResult(run, {
     number: n,
     title: ticket.title,
     status: kind === "question" ? "parked" : "failed",
     detail,
     keptOn,
-    leftOnNeon,
+    leftOnTarget,
     notPosted: !(commented && labelled),
     session,
   });
@@ -1397,15 +1505,16 @@ async function runTicket(ticket, options, run) {
   };
   rmSync(join(STATE, `verdict-${n}.json`), { force: true });
   rmSync(stopCheckMarker(n), { force: true });
-  // What every call for this ticket shares. A background session reads the
-  // run's variables from its settings file; a `-p` one inherits them.
+  // What every call for this ticket shares. Its settings file (the run's
+  // rules, the project's, the run's variables) is written for either kind of
+  // session; a `-p` one also inherits the variables.
   const slug = ticket.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40);
   const session = {
     options,
     env,
     number: n,
     name: `ticket-${n}-${slug}`,
-    settings: options.print ? join("tools", "phase-run", "settings.json") : writeSessionSettings(run, n, env),
+    settings: writeSessionSettings(run, n, env, { background: !options.print }),
   };
   const values = {
     N: n,
@@ -1416,6 +1525,7 @@ async function runTicket(ticket, options, run) {
     BASE: base,
     FRONTEND: ticket.labels.includes("frontend") ? "yes" : "no",
   };
+  Object.assign(values, promptValues(config, projectProse, values));
 
   log(`#${n} ${ticket.title}: starting${options.print ? ` (session ${sessionId})` : ""}.`);
   let call = await runSession({
@@ -1442,7 +1552,7 @@ async function runTicket(ticket, options, run) {
       await park(ticket, base, "question", verdict.question ?? "(The session parked the ticket without writing its question.)", run, facts);
       return "continue";
     }
-    // The last gate migrates dev Neon and a pass is followed by a push: both need the connection.
+    // The last gate may migrate a shared database, and a pass is followed by a push: both need the connection.
     if (!(await waitForInternet(waitDeadline(options), `before #${n}'s checks`))) {
       await park(
         ticket,
@@ -1457,7 +1567,7 @@ async function runTicket(ticket, options, run) {
     log(`#${n}: running the gates${round ? ` (after fix round ${round})` : ""}.`);
     const gates = await runGates(ticket, base, options, run, startedAt);
     if (gates.ok) {
-      await freePort(QA_PORT);
+      await freeTicketPorts();
       await finishBuilt(ticket, base, options, run, facts);
       return "continue";
     }
@@ -1569,7 +1679,7 @@ function report(run, options, remaining, { final = true } = {}) {
     if (r.summary) out.push(`- ${r.summary}`);
     out.push(`- Size: ${r.stat || "no diff"}`);
     if (r.outside.length) out.push(`- ⚠ Files outside the areas the ticket named: ${r.outside.map((f) => `\`${f}\``).join(", ")}`);
-    if (r.migrations.length) out.push(`- Applied to dev Neon: ${r.migrations.join(", ")}`);
+    if (r.migrations.length) out.push(`- Applied to ${targetName()}: ${r.migrations.join(", ")}`);
     if (r.destructive.length) out.push(`- 🚨 Destructive migration (it drops or rewrites data): ${r.destructive.join(", ")}`);
     if (r.screenshots) out.push(`- Screenshots: \`${r.screenshots}\``);
     if (r.session?.denials.length) out.push(`- Commands the session was refused (${r.session.denials.length}): ${r.session.denials.slice(0, 6).map((d) => `\`${String(d).slice(0, 60)}\``).join(", ")}`);
@@ -1602,7 +1712,7 @@ function report(run, options, remaining, { final = true } = {}) {
   if (failed.length) out.push("### Failed", "");
   for (const r of failed) {
     out.push(`**#${r.number} ${r.title}**`, "", r.detail, "", r.keptOn ? `Work kept on \`${r.keptOn}\`.` : "", unposted(r));
-    if (r.leftOnNeon?.length) out.push(`🚨 dev Neon holds ${r.leftOnNeon.join(", ")} from this ticket, which is not on the phase branch.`);
+    if (r.leftOnTarget?.length) out.push(`🚨 ${targetName()} holds ${r.leftOnTarget.join(", ")} from this ticket, which is not on the phase branch.`);
     if (r.session?.watch) out.push(`The whole session, to read back: \`claude attach ${r.session.watch}\``);
     out.push(`Effort: ${effort(r.session)}`, "");
   }
@@ -1662,7 +1772,7 @@ async function main() {
   process.on("exit", () => {
     if (!liveBackground) return;
     exec("claude", ["stop", liveBackground]);
-    stopStrayTests("by the session this run stopped");
+    stopStray("by the session this run stopped");
   });
   process.on("SIGINT", () => process.exit(130));
 
@@ -1686,7 +1796,7 @@ async function main() {
     results: [], // this run's
     all: [], // every run's on this branch, as results.json holds them
     carried: [], // an earlier run's that never reached a report
-    neonApplied: new Set(),
+    migrationsApplied: new Set(),
     pullRequest: null,
   };
   mkdirSync(run.dir, { recursive: true });
@@ -1695,8 +1805,8 @@ async function main() {
   const reportFile = join(run.dir, `report-${run.runId.slice(0, 16).replace(/[:T]/g, "-")}.md`);
   mkdirSync(join(STATE, "tmp"), { recursive: true }); // where a session keeps its scratch files
   logFile = join(run.dir, "run.log");
-  const appliedFile = join(run.dir, "neon-applied.json");
-  if (existsSync(appliedFile)) for (const name of JSON.parse(readFileSync(appliedFile, "utf8"))) run.neonApplied.add(name);
+  const appliedFile = join(run.dir, "migrations-applied.json");
+  if (existsSync(appliedFile)) for (const name of JSON.parse(readFileSync(appliedFile, "utf8"))) run.migrationsApplied.add(name);
 
   log(
     `Run started on ${branch}: ${limit} ticket(s)${options.until ? `, stopping after #${options.until}` : ""}, ` +
@@ -1719,7 +1829,7 @@ async function main() {
       recordResult(run, { number: next.number, title: next.title, status: "failed", detail: `The runner stopped on an error of its own:\n\n\`\`\`\n${error.stack ?? error.message}\n\`\`\`\n\nThe branch was left as it was. Look before running again.`, keptOn: null, session: null });
       outcome = "stop";
     }
-    writeFileSync(appliedFile, JSON.stringify([...run.neonApplied], null, 2));
+    writeFileSync(appliedFile, JSON.stringify([...run.migrationsApplied], null, 2));
     // Rewritten after every ticket, so a run that dies in the night still leaves its report.
     writeFileSync(reportFile, report(run, options, [], { final: false }));
   }
@@ -1745,24 +1855,26 @@ async function main() {
 
 // Exported so these can be tested without starting a run.
 export {
-  BUILD_INPUT,
   QUIET_MS,
-  SCREEN_FILE,
   SETTLE_MS,
-  castDatabaseUrl,
+  applyMigrations,
   fetchBlockers,
   loadResults,
   online,
   outsideAreas,
+  projectGates,
+  promptValues,
   pullRequestBody,
+  render,
   readTurn,
   recordResult,
   report,
   runSession,
   screenshotsSince,
   sessionEnv,
+  sessionSettings,
   stopCheckRunning,
-  stopStrayTests,
+  stopStray,
   turnOver,
   waitForInternet,
   writeSessionSettings,

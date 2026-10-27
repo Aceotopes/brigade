@@ -13,7 +13,8 @@
 //
 // `{base}` in a check's `run` is the phase run's base commit. A `note` key is allowed anywhere
 // (JSON has no comments). Every other key is checked, so a typo fails loudly instead of turning a
-// rule off. The rules the workflow itself needs (no --no-verify, no trailer, the phase-run
+// rule off, except inside `phaseRun`, which belongs to the phase runner and is checked by its
+// preflight (template/tools/phase-run/config.mjs). The rules the workflow itself needs (no --no-verify, no trailer, the phase-run
 // discipline) stay in guard-shell.mjs; this file holds only one project's habits.
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -41,7 +42,8 @@ export function loadWorkflowConfig(root) {
 /** The file's JSON, checked and with its patterns compiled. Throws on the first problem. */
 export function parseWorkflowConfig(data) {
   if (data?.version !== 1) throw new Error(`"version" must be 1 (it is ${JSON.stringify(data?.version)}).`);
-  onlyKeys(data, ["version", "guard", "stopGate", "note"], "the file");
+  // `phaseRun` is the phase runner's (template/tools/phase-run/config.mjs checks it at preflight).
+  onlyKeys(data, ["version", "guard", "stopGate", "phaseRun", "note"], "the file");
   onlyKeys(data.guard ?? {}, ["block", "note"], "guard");
   onlyKeys(data.stopGate ?? {}, ["checks", "note"], "stopGate");
   const rules = list(data.guard?.block, "guard.block").map((rule, i) => {

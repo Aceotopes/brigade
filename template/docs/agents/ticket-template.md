@@ -47,13 +47,13 @@ The end-to-end behaviour this ticket makes work, from the person's side. Not a l
 ## Prototype screen                     <!-- a `frontend` ticket only -->
 
 - The prototype file and the screen or state in it this ticket builds.
-- Its surface brief: `.impeccable/surfaces/<slug>.md`.
+- Its surface brief, in a project that keeps them (with Impeccable, `.impeccable/surfaces/<slug>.md`).
 
 ## Areas
 
-- `src/app/schedule/`                    <!-- folders or simple globs the change should stay inside -->
-- `src/lib/schedule*.ts`
-- `prisma/`
+- `src/app/checkout/`                    <!-- folders or simple globs the change should stay inside -->
+- `src/lib/checkout*.ts`
+- `db/migrations/`
 
 ## Read first
 
@@ -73,23 +73,23 @@ The end-to-end behaviour this ticket makes work, from the person's side. Not a l
 ## Rules for filling it in
 
 - **Labels:** `ready-for-agent`, the module label, and `backend` and/or `frontend`. The `frontend`
-  label is what sends a ticket through Impeccable and the prototype-match review, so put it on
-  every ticket that changes what a screen shows. `run-ready` is added only by `/ticket-check`.
+  label is what sends a ticket through the browser check's screenshot gate and the design review,
+  so put it on every ticket that changes what a screen shows. `run-ready` is added only by
+  `/ticket-check`.
 - **Blocked by** is also set as a native GitHub dependency (`docs/agents/issue-tracker.md`), and the
   ticket is attached to its spec as a sub-issue. The runner reads both; the text is for people.
 - **Areas** are folders, not file lists. The morning report flags a changed file outside them, so a
-  missing area produces a false flag and an over-wide one hides over-building. `docs/`, `test/`,
-  `CLAUDE.md`, `CONTEXT.md`, `DESIGN.md` and `.impeccable/` are always in scope, and so are the
-  shared registries nearly every ticket touches (`src/components/shell/nav-config.ts` and
-  `icons.tsx`, `src/lib/audit-log.ts`, `src/lib/notifications.ts`, `src/app/globals.css`) and the
-  committed browser walks under `scripts/walks/` (`ALWAYS_IN_SCOPE` in `tools/phase-run/run.mjs`).
+  missing area produces a false flag and an over-wide one hides over-building. `docs/`,
+  `CLAUDE.md` and `CONTEXT.md` are always in scope, and so is whatever the project lists in
+  `phaseRun.alwaysInScope` (`.claude/workflow.json`): its tests, its design files, and the shared
+  registries nearly every ticket touches.
 - **Handed forward** is written when the tickets are drafted, from what each ticket's "Not in this
   ticket" sends on; a session adds to it through its verdict, never by editing the issue.
 - **One schema ticket per migration.** A ticket that adds a migration says so in What to build; the
-  runner applies it to dev Neon after the ticket's checks pass.
+  runner applies it to the migration target after the ticket's checks pass.
 - **The mid-run rule is not repeated in the ticket.** Every session gets it from
   `tools/phase-run/ticket-prompt.md`: small, easily changed choices are taken and recorded under
-  "Assumptions made"; a money or payroll rule, privacy, who may see or do something, or a
+  "Assumptions made"; a money rule, privacy, who may see or do something, or a
   hard-to-reverse schema choice parks the ticket with its question.
 - **The finish ticket** (the phase's last, blocked by every other) is built attended, not by the
   runner: leave `run-ready` off it. It carries the finish review, the phase-end docs and the

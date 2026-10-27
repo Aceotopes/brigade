@@ -29,13 +29,137 @@
   },
   "stopGate": {
     "checks": [
-      { "label": "Typecheck", "run": "pnpm typecheck" },
-      { "label": "Lint", "run": "pnpm lint" },
+      {
+        "label": "Typecheck",
+        "run": "pnpm typecheck"
+      },
+      {
+        "label": "Lint",
+        "run": "pnpm lint"
+      },
       {
         "label": "The tests your changes touch",
         "run": "pnpm exec vitest run --changed {base} --passWithNoTests",
         "note": "--passWithNoTests: a ticket that changes no tested file (docs, a workflow) is not a failure."
       }
     ]
+  },
+  "phaseRun": {
+    "note": "Steak To Juan's phase runner, exactly what run.mjs hardcoded at 905e2d8 (README step 7). The prose a session is given is examples/steak-to-juan/phase-run-prompt.md.",
+    "prompt": "docs/agents/phase-run-prompt.md",
+    "preflight": [
+      {
+        "label": "The Docker test database",
+        "run": "pnpm test:db:up",
+        "hint": "Is Docker Desktop running?"
+      }
+    ],
+    "ports": [
+      {
+        "port": 8400,
+        "what": "the QA cast",
+        "freeAfterEachTicket": true
+      },
+      {
+        "port": 3000,
+        "what": "pnpm dev"
+      }
+    ],
+    "qa": {
+      "note": "scripts/qa-cast.ts's DB_NAME, in the Docker test container, under the loopback name the test database's address does not use: vitest.config.ts refuses to start when NEON_TEST_DATABASE_URL and NEON_DATABASE_URL look like one database, comparing the hostname alone for a host that is not Neon.",
+      "name": "stj_cast",
+      "url": "postgresql://postgres:postgres@{loopbackNotUsedBy:NEON_TEST_DATABASE_URL}:5432/stj_cast"
+    },
+    "sessionEnv": {
+      "note": ".env holds the dev Neon address and the live Loyverse token, and node --env-file, prisma.config.ts, vitest.config.ts and each prisma/ script's loadDotEnv all read it; each leaves a variable alone once set. The R2 keys are left as they are: the QA app stores a captured photo with them.",
+      "NEON_DATABASE_URL": "{qaUrl}",
+      "LOYVERSE_ACCESS_TOKEN": "phase-run-sessions-get-no-loyverse-token"
+    },
+    "strayProcess": "vitest",
+    "gates": [
+      {
+        "label": "typecheck",
+        "run": "pnpm typecheck"
+      },
+      {
+        "label": "lint",
+        "run": "pnpm lint"
+      },
+      {
+        "note": "Typecheck, lint and the suite all pass on a client component that imports a file reaching Prisma; only the bundler refuses it (#54, #86, #89). The build never needs a database, and is pointed at the local one so Next reading .env cannot hand it dev Neon. A QA server left running holds .next open on Windows, hence freePorts.",
+        "label": "build (next build)",
+        "run": "pnpm exec next build",
+        "when": "^(src/|public/|package\\.json$|pnpm-lock\\.yaml$|next\\.config\\.|tsconfig)",
+        "env": {
+          "NEON_DATABASE_URL": "{qaUrl}"
+        },
+        "freePorts": true
+      },
+      {
+        "builtin": "browser-check"
+      },
+      {
+        "note": "One suite at a time on the test database: alone stops any vitest left running first.",
+        "label": "tests (full suite)",
+        "run": "pnpm test",
+        "alone": true
+      }
+    ],
+    "browserCheck": {
+      "screenFiles": "^src/(components/|app/.*\\.(tsx|css)$)",
+      "sourceFiles": "^src/",
+      "screenshots": ".impeccable/review-{N}",
+      "minimum": 2,
+      "redo": "the QA cast on stj_cast, headless Playwright, every acceptance criterion, no console error or failed request, screenshots at 390 and 1280"
+    },
+    "migrations": {
+      "added": "^prisma/migrations/([^/]+)/migration\\.sql$",
+      "target": {
+        "name": "dev Neon",
+        "urlFrom": "NEON_DATABASE_URL",
+        "direct": [
+          [
+            "-pooler.",
+            "."
+          ]
+        ]
+      },
+      "apply": {
+        "run": "pnpm exec prisma migrate deploy",
+        "env": {
+          "NEON_DATABASE_URL": "{targetUrl}"
+        }
+      },
+      "rollBack": {
+        "run": "pnpm exec prisma migrate resolve --rolled-back {name}",
+        "env": {
+          "NEON_DATABASE_URL": "{targetUrl}"
+        }
+      },
+      "destructive": "\\bDROP\\s+(TABLE|COLUMN|TYPE|INDEX|CONSTRAINT)\\b|\\bTRUNCATE\\b|\\bDELETE\\s+FROM\\b|\\bALTER\\s+COLUMN\\b[^;]*\\bTYPE\\b"
+    },
+    "alwaysInScope": [
+      "^test/",
+      "^DESIGN\\.md$",
+      "^\\.impeccable/",
+      "^src/components/shell/(nav-config\\.ts|icons\\.tsx)$",
+      "^src/lib/notifications\\.ts$",
+      "^src/app/globals\\.css$",
+      "^scripts/walks/"
+    ],
+    "permissions": {
+      "allow": [
+        "Bash(pnpm *)",
+        "Bash(docker *)",
+        "Bash(.claude/skills/impeccable/scripts/impeccable *)",
+        "Bash(.claude/skills/impeccable/scripts/impeccable.cmd *)",
+        "Bash(bash .claude/skills/impeccable/scripts/impeccable *)",
+        "Bash(sh .claude/skills/impeccable/scripts/impeccable *)",
+        "PowerShell(pnpm *)",
+        "PowerShell(docker *)",
+        "PowerShell(.claude/skills/impeccable/scripts/impeccable.cmd *)",
+        "PowerShell(& .claude/skills/impeccable/scripts/impeccable.cmd *)"
+      ]
+    }
   }
 }

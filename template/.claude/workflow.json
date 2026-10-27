@@ -1,6 +1,13 @@
 {
   "version": 1,
-  "note": "This project's own rules for Brigade's hooks (the plugin's hooks/workflow-config.mjs has the format). guard.block: commands the guard refuses; stopGate.checks: what a phase-run session must pass before it stops, in order ({base} is the run's base commit). The workflow's own rules (no --no-verify, no attribution trailer, the phase-run discipline) are built in and need no row.",
-  "guard": { "block": [] },
-  "stopGate": { "checks": [] }
+  "note": "This project's own rules for Brigade's hooks (the plugin's hooks/workflow-config.mjs has the format). guard.block: commands the guard refuses; stopGate.checks: what a phase-run session must pass before it stops, in order ({base} is the run's base commit). The workflow's own rules (no --no-verify, no attribution trailer, the phase-run discipline) are built in and need no row. phaseRun: what the phase runner checks and pins for this project (template/tools/phase-run/config.mjs has the format).",
+  "guard": {
+    "block": []
+  },
+  "stopGate": {
+    "checks": []
+  },
+  "phaseRun": {
+    "gates": []
+  }
 }
