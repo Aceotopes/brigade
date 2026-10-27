@@ -1,0 +1,20 @@
+{
+  "note": "Spec issues: the owner closes each by hand, so no commit or PR may carry a closing keyword for one (guard-shell.mjs). Add a phase's spec here when /to-spec publishes it.",
+  "specs": [
+    28,
+    41,
+    55,
+    67,
+    94,
+    104,
+    114,
+    126,
+    127,
+    142,
+    161,
+    179,
+    198,
+    212,
+    225
+  ]
+}

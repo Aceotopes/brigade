@@ -1,0 +1,15 @@
+{
+  "name": "argee",
+  "owner": {
+    "name": "Argee Vizcarra"
+  },
+  "description": "Argee's personal Claude Code workflow, as an installable plugin.",
+  "plugins": [
+    {
+      "name": "brigade",
+      "source": "./",
+      "description": "Docs that hold a budget, guard hooks, ticket readiness checks and the unattended phase run.",
+      "category": "engineering"
+    }
+  ]
+}

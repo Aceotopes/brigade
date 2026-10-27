@@ -1,0 +1,40 @@
+name: Doc check
+
+# The docs' own checks (tools/doc-check.mjs; devlog #339–#342): every living doc
+# within the budget its header declares, every path and relative link resolving,
+# every generated index current, and (on a push) the commit's devlog entry. The
+# guard hook runs the same check before a commit made in a Claude Code session;
+# this catches a commit made anywhere else (GitHub's editor, a plain terminal).
+# The tools import only Node's built-ins: no install, no database. Full history
+# is fetched because a devlog entry counts as closed once a commit message cites it.
+on:
+  push: {}
+  pull_request: {}
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  docs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: The doc tools' own tests
+        run: node --test tools/doc-tools.test.mjs
+
+      - name: doc-check (and, on a push, the commit's devlog entry)
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            node tools/doc-check.mjs --head
+          else
+            node tools/doc-check.mjs
+          fi
