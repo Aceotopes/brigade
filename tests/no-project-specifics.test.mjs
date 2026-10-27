@@ -1,4 +1,4 @@
-// The generic half of Brigade (skills/, hooks/, template/) names no one project. A project's own
+// The generic half of Brigade (skills/, hooks/, template/, scaffold/, scripts/) names no one project. A project's own
 // rules live in its config (.claude/workflow.json, tools/doc-config.mjs, docs/agents/doc-sync-rows.md);
 // examples/steak-to-juan/ holds the project this was lifted from.
 //
@@ -16,7 +16,7 @@ import { test } from "node:test";
 
 import { PLUGIN } from "./helpers.mjs";
 
-const SCANNED = ["skills", "hooks", "template"];
+const SCANNED = ["skills", "hooks", "template", "scaffold", "scripts"];
 
 const BANNED = [
   { term: /steak ?to ?juan/i, why: "the project's name" },

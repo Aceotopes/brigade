@@ -1,5 +1,5 @@
 {
-  "note": "Lines doc-check accepts as correct as written (a doc that quotes a stale phrase, or says a file is gone). Starts with only the template's own docs: the two docs/guides/phase-run.md lines describe the clean-tree check, they are not stale. An attended session adds a line with node tools/doc-check.mjs --update-baseline, after reading it; never inside a phase run.",
+  "note": "Lines doc-check accepts as correct as written (a doc that quotes a stale phrase, or says a file is gone). Starts with only the template's own docs: the two docs/guides/phase-run.md lines describe the clean-tree check, they are not stale. An attended session adds a line with node tools/doc-check.mjs --update-baseline, after reading it; never inside a phase run. A repo that adopted the workflow with docs of its own may also list, under headers, docs accepted without a header: that list only shrinks.",
   "stale": {
     "docs/guides/phase-run.md": [
       "6. The script itself then checks, in order: exactly one commit, nothing left uncommitted, an",

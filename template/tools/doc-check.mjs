@@ -7,6 +7,7 @@
 //   node tools/doc-check.mjs --message-file F   + the devlog's top entry matches a commit about to be made
 //   node tools/doc-check.mjs --message TEXT     the same, for a message given inline
 //   node tools/doc-check.mjs --update-baseline  accept every current stale-phrase / missing-path hit (attended sessions only)
+//   node tools/doc-check.mjs --adopt            the same, and accept every doc now without a header (setup, once)
 //   node tools/doc-check.mjs --report           each budgeted doc's size against its limit, fullest first
 //
 // A change that raises a doc's budget is printed; inside a phase run it is refused.
@@ -18,6 +19,11 @@
 // baseline's own "note" says how far its first set of lines was audited.
 // Budgets have no baseline: a doc over its header's limit is trimmed, or its
 // header's limit is raised, where the diff shows it.
+//
+// A repo that adopts the workflow with docs of its own has docs with no
+// header. /setup-workflow lists them once (--adopt) in the baseline's
+// "headers"; after that the list only shrinks: --update-baseline drops a file
+// once it has a header, and never adds one, so a new doc still needs a header.
 //
 // Historical records (the devlog's archive, the numbered implementation log,
 // docs/adr, docs/research, the discovery rounds) are left as written and are
@@ -95,9 +101,9 @@ function requiredHeaderFiles() {
 }
 
 function loadBaseline() {
-  if (!existsSync(BASELINE_PATH)) return { stale: {}, missing: {} };
+  if (!existsSync(BASELINE_PATH)) return { stale: {}, missing: {}, headers: [] };
   const parsed = JSON.parse(readFileSync(BASELINE_PATH, "utf8"));
-  return { stale: parsed.stale ?? {}, missing: parsed.missing ?? {} };
+  return { stale: parsed.stale ?? {}, missing: parsed.missing ?? {}, headers: parsed.headers ?? [] };
 }
 
 function loadBaselineNote() {
@@ -168,13 +174,21 @@ function headeredFiles() {
   return { files, required };
 }
 
-function headerProblems() {
+/** Docs that must have a header and have none. */
+function headerless() {
+  const { files, required } = headeredFiles();
+  return files.filter((file) => required.has(file) && !parseFrontmatter(read(file)));
+}
+
+function headerProblems(accepted = new Set()) {
   const problems = [];
   const { files, required } = headeredFiles();
   for (const file of files) {
     const text = read(file);
     if (!parseFrontmatter(text)) {
-      if (required.has(file)) problems.push(`${file}: has no header. Open it with --- job / kind / budget --- (see docs/_templates/).`);
+      if (required.has(file) && !accepted.has(file)) {
+        problems.push(`${file}: has no header. Open it with --- job / kind / budget --- (see docs/_templates/).`);
+      }
       continue;
     }
     problems.push(...budgetProblems(file, text));
@@ -307,7 +321,8 @@ function main() {
 
   const found = scan();
 
-  if (flag("--update-baseline")) {
+  const adopt = flag("--adopt");
+  if (adopt || flag("--update-baseline")) {
     if (process.env.PHASE_RUN === "1") {
       console.error("doc-check: the baseline is never updated inside a phase run. Fix the line instead.");
       process.exit(1);
@@ -318,6 +333,11 @@ function main() {
         next[kind][file] = [...new Set(hits.map((hit) => hit.text))].sort();
       }
     }
+    // Adopting lists every header-less doc; an update only keeps the listed ones still without one.
+    const without = headerless();
+    const kept = new Set(loadBaseline().headers);
+    const headers = adopt ? without : without.filter((file) => kept.has(file));
+    if (headers.length) next.headers = headers;
     writeFileSync(BASELINE_PATH, `${JSON.stringify(next, null, 2)}\n`);
     console.log(`doc-check: baseline written (${BASELINE_PATH}).`);
     return;
@@ -339,7 +359,7 @@ function main() {
     }
   }
 
-  failures.push(...headerProblems());
+  failures.push(...headerProblems(new Set(baseline.headers)));
   failures.push(...staleIndexes());
 
   const raises = budgetRaises(flag("--head") ? "HEAD~1" : "HEAD");

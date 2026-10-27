@@ -20,11 +20,14 @@ two copies can drift: a workflow fix made there after `905e2d8` has to be carrie
 | Folder | What | Where it runs |
 |---|---|---|
 | `.claude-plugin/` | `plugin.json` (the plugin), `marketplace.json` (so `/plugin marketplace add` can install it from a git repo) | — |
-| `skills/` | `doc-sync`, `ticket-check` (and, still to write, `setup-workflow`) | from the plugin, in every project |
+| `skills/` | `doc-sync`, `ticket-check`, `setup-workflow`, `update-workflow` | from the plugin, in every project |
+| `scripts/` | `setup.mjs`, the file work behind the two setup skills (detect, plan, apply, update, the autoMode lines), and `migrations.mjs`, each version's config format changes | from the plugin, run by those skills |
 | `hooks/` | `guard-shell.mjs` (PreToolUse), `stop-gate.mjs` (Stop), wired by `hooks.json`; both read the project's `.claude/workflow.json` through `workflow-config.mjs` | from the plugin, in every project |
 | `template/` | files a project keeps **in its own repo**, because CI and `node` run them there: the doc tools, the phase runner, `docs/_templates`, the workflow docs, the doc-check CI job, and blank starting copies of the project's config (`.claude/workflow.json`, `.claude/spec-issues.json`, `tools/doc-config.mjs`, `tools/doc-check-baseline.json`) | copied in by `/setup-workflow` |
+| `scaffold/` | files setup writes **once**, which the project then owns and update never touches: the `CLAUDE.md` skeleton, the devlog with entry #1, the roadmap, the handoff, the issue-tracker page, the generated indexes' heads | rendered by `/setup-workflow` |
+| `CHANGELOG.md` | what each version changed, which `/update-workflow` shows a project before it re-copies the template | — |
 | `examples/steak-to-juan/` | Steak To Juan's own rows, moved out of the generic files (its `workflow.json` with its `phaseRun` section, its doc-sync rows, its part of the session prompt, its phase-run history), and what step 9 needs | never copied; read at step 9 |
-| `tests/` | the plugin's own tests: the hooks, the env contract, the runner config as shipped, the template on day one, no project's name in the generic half | `node --test tests/*.test.mjs`, from here |
+| `tests/` | the plugin's own tests: the hooks, the env contract, the runner config as shipped, the template on day one, setup in each mode, no project's name in the generic half | `node --test tests/*.test.mjs`, from here |
 
 The template's tests run from `template/`: `node --test tools/doc-tools.test.mjs` and
 `node --test tools/phase-run/run.test.mjs`.
@@ -68,7 +71,15 @@ The template's tests run from `template/`: `node --test tools/doc-tools.test.mjs
 
 ## To do, in order
 
-8. **`skills/setup-workflow`**: scaffolds a new repo — CLAUDE.md skeleton, `docs/` folders with
+8. 🔨 **Built, not done: the throwaway-repo trials are next** (2026-10-27, 0.2.0).
+   `/setup-workflow` and `/update-workflow` call `scripts/setup.mjs` (detect → plan → apply; update;
+   the autoMode lines), tested in `tests/setup.test.mjs` against stand-in repos in each mode. The
+   stamp is `.claude/workflow-version.json` (version, mode, a hash per template file, so update never
+   overwrites a file the project edited). doc-check's baseline gained `headers` (`--adopt`, merge
+   mode; it only shrinks). The trials below decide what still needs a code change. The owner's
+   step-8 brief, which the build follows:
+
+   **`skills/setup-workflow`**: scaffolds a new repo — CLAUDE.md skeleton, `docs/` folders with
    their generated-index markers, `template/` copied in, `test:docs`/`test:runner` scripts,
    triage labels (or defer to mattpocock's `/setup-matt-pocock-skills`), and the project's
    `Project <path> —` lines in `~/.claude/settings.json` `autoMode.environment`.
@@ -132,7 +143,7 @@ The template's tests run from `template/`: `node --test tools/doc-tools.test.mjs
 2. Make it here (never in a project's copy of a template file), with its test.
 3. Bump `version` in `.claude-plugin/plugin.json` (installed plugins are cached per version, so an
    unbumped change may never reach a project), commit, push.
-4. In each project: update the plugin (skills and hooks follow), then run the update mode if
+4. In each project: update the plugin (skills and hooks follow), then run `/update-workflow` if
    `template/` changed.
 
 Not part of this plugin: Impeccable (someone else's plugin with its own versions; `/setup-workflow`

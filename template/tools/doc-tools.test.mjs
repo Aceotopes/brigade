@@ -258,6 +258,29 @@ test("a new doc anywhere in docs/ needs a header", () => {
   assert.match(node("doc-check.mjs").stderr, /docs\/notes\.md: has no header/);
 });
 
+test("adopting accepts today's header-less docs; the list only shrinks, and never inside a phase run", () => {
+  const { dir, node } = repo();
+  writeFileSync(join(dir, "docs", "old-notes.md"), "# Notes from before the workflow\n");
+  writeFileSync(join(dir, "docs", "old-plan.md"), "# A plan from before\n");
+  const inRun = spawnSync(process.execPath, ["tools/doc-check.mjs", "--adopt"], { cwd: dir, encoding: "utf8", env: { ...process.env, PHASE_RUN: "1" } });
+  assert.equal(inRun.status, 1);
+  assert.match(inRun.stderr, /never updated inside a phase run/);
+  assert.equal(node("doc-check.mjs", "--adopt").status, 0);
+  const baseline = () => JSON.parse(readFileSync(join(dir, "tools", "doc-check-baseline.json"), "utf8"));
+  assert.deepEqual(baseline().headers, ["docs/old-notes.md", "docs/old-plan.md"]);
+  assert.equal(node("doc-check.mjs").status, 0, node("doc-check.mjs").stderr);
+  // A doc written after adopting still needs a header, and --update-baseline does not add it:
+  writeFileSync(join(dir, "docs", "new.md"), "# New\n");
+  assert.equal(node("doc-check.mjs", "--update-baseline").status, 0);
+  assert.match(node("doc-check.mjs").stderr, /docs\/new\.md: has no header/);
+  // A listed doc that gets a header leaves the list at the next update:
+  writeFileSync(join(dir, "docs", "new.md"), "---\njob: New.\nkind: living\nmax-lines: 20\n---\n# New\n");
+  writeFileSync(join(dir, "docs", "old-plan.md"), "---\njob: The old plan.\nkind: living\nmax-lines: 20\n---\n# A plan\n");
+  assert.equal(node("doc-check.mjs", "--update-baseline").status, 0);
+  assert.deepEqual(baseline().headers, ["docs/old-notes.md"]);
+  assert.equal(node("doc-check.mjs").status, 0);
+});
+
 test("the health report lists each budgeted doc, fullest first, and closed files apart", () => {
   const { dir, node } = repo();
   writeFileSync(join(dir, "docs", "roadmap.md"), `---\njob: Where things stand.\nkind: living\nmax-lines: 10\n---\n# Roadmap\n${"- a line\n".repeat(4)}`);

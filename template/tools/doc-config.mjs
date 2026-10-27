@@ -68,6 +68,7 @@ export const HEADER_EXEMPT = [
   /^docs\/adr\/\d{4}-/, // an ADR's header holds its status, not a job
   /^docs\/history\/implementation-log\/\d/,
   /^docs\/_templates\/(?!README\.md$)/, // a template's header is a placeholder
+  /^docs\/history\/pre-workflow\//, // what an adopted repo had before, archived by /setup-workflow
 ];
 
 /**

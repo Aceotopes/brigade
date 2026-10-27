@@ -1,0 +1,650 @@
+// The file work behind /setup-workflow and /update-workflow. The skills do the talking (which mode,
+// is this stack right, may I write this); this script does what must be the same every time, and is
+// tested (tests/setup.test.mjs).
+//
+//   node scripts/setup.mjs detect <dir>                          what is there: git, stack, docs, a stamp
+//   node scripts/setup.mjs propose <dir>                         the .claude/workflow.json its stack suggests
+//   node scripts/setup.mjs plan <dir> --answers <f> --out <f> [--preview <d>]
+//                                                                what setup would do, summed up; --preview writes the
+//                                                                proposed text of each changed or conflicting file under <d>
+//   node scripts/setup.mjs apply <dir> --plan <f>                do it, if the repo is still as planned
+//   node scripts/setup.mjs verify <dir>                          doc-check, the template's tests, both config loaders
+//   node scripts/setup.mjs update <dir> [--apply] [--remove]     re-copy template/ into a set-up project
+//   node scripts/setup.mjs automode --settings <f> --lines <f> [--apply]   the project's autoMode lines
+//   node scripts/setup.mjs labels                                the GitHub labels the workflow reads
+//
+// Three kinds of file reach a project:
+//   template/  the plugin keeps owning them; update re-copies them; a project never edits one.
+//   scaffold/  written once, then the project's own (CLAUDE.md, the devlog, the roadmap…).
+//   config     the project's settings (CONFIG_FILES), written from its stack; update never touches them.
+// The stamp (.claude/workflow-version.json) records the plugin version, the mode, and a hash of every
+// template file as copied, so update can tell a file the project edited from one it left alone.
+import { execFileSync, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { basename, dirname, join, posix } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+import { MIGRATIONS } from "./migrations.mjs";
+
+export const PLUGIN = join(dirname(fileURLToPath(import.meta.url)), "..");
+export const STAMP = ".claude/workflow-version.json";
+export const ARCHIVE = "docs/history/pre-workflow";
+export const BRANCH = "adopt-workflow";
+/** The project's own settings: written once from its stack, never re-copied. */
+export const CONFIG_FILES = [".claude/workflow.json", ".claude/spec-issues.json", "tools/doc-config.mjs", "tools/doc-check-baseline.json"];
+/** Settings keys a project-scope plugin install writes: a change to only these is not a dirty tree. */
+const INSTALL_KEYS = ["enabledPlugins", "extraKnownMarketplaces"];
+/** What the runner and /ticket-check read (tools/phase-run/run.mjs: READY_LABEL, PARK_LABEL; the browser check). */
+export const LABELS = [
+  { name: "run-ready", color: "0e8a16", description: "/ticket-check found no open question: a phase run may build it" },
+  { name: "needs-info", color: "d876e3", description: "A phase run parked it on a question for the owner" },
+  { name: "ready-for-human", color: "b60205", description: "A phase run parked it after its gates failed" },
+  { name: "frontend", color: "1d76db", description: "Changes a screen: the browser check and design review apply" },
+];
+const FRONTEND_DEPS = ["react", "next", "vue", "nuxt", "svelte", "@sveltejs/kit", "solid-js", "astro", "@angular/core"];
+const FRONTEND_DIRS = ["app", "pages", "src/app", "src/pages", "src/components", "components"];
+/** Top-level folders that are build output, never cited by a doc. */
+const NOT_CODE = ["node_modules", "dist", "build", "out", "coverage", "target", "vendor", "docs", "tools"];
+/** Existing docs that look like they do a job the workflow has a fixed home for (reported in merge mode, never moved). */
+const SAME_JOB = [
+  [/(^|\/)[^/]*road-?map[^/]*\.md$/i, "docs/status/roadmap.md"],
+  [/(^|\/)[^/]*hand-?off[^/]*\.md$/i, "docs/status/handoff.md"],
+  [/(^|\/)(devlog|changelog)[^/]*\.md$/i, "docs/history/devlog.md"],
+  [/^docs\/(logs?|journal)\/[^/]+\.md$/i, "docs/history/implementation-log/"],
+  [/(^|\/)(adrs?|decisions)\/(?!\d{4}-)[^/]+\.md$/i, "docs/adr/ (named NNNN-<slug>.md)"],
+];
+
+const lf = (text) => text.replace(/\r\n/g, "\n");
+export const hash = (text) => createHash("sha256").update(lf(text)).digest("hex").slice(0, 16);
+const readText = (path) => readFileSync(path, "utf8");
+const unique = (items) => [...new Set(items)];
+
+/** Every file under `root`, as posix paths relative to it. */
+function walk(root, rel = "", out = []) {
+  const abs = join(root, rel);
+  if (!existsSync(abs)) return out;
+  for (const name of readdirSync(abs).sort()) {
+    if (name === ".git" || name === "node_modules") continue;
+    const child = rel ? `${rel}/${name}` : name;
+    if (statSync(join(root, child)).isDirectory()) walk(root, child, out);
+    else out.push(child);
+  }
+  return out;
+}
+
+export const templateFiles = (plugin = PLUGIN) => walk(join(plugin, "template")).filter((f) => !CONFIG_FILES.includes(f));
+export const scaffoldFiles = (plugin = PLUGIN) => walk(join(plugin, "scaffold"));
+export const pluginVersion = (plugin = PLUGIN) => JSON.parse(readText(join(plugin, ".claude-plugin", "plugin.json"))).version;
+
+/** `{{KEY}}` filled from `values`; a key with no value is an error, so nothing ships half-filled. */
+export function render(text, values) {
+  return text.replace(/\{\{([A-Z_]+)\}\}/g, (marker, key) => {
+    if (values[key] === undefined) throw new Error(`No value for ${marker}.`);
+    return values[key];
+  });
+}
+
+/** -1, 0 or 1, for versions like 0.2.0. */
+export function compareVersions(a, b) {
+  const pa = String(a).split(".").map(Number);
+  const pb = String(b).split(".").map(Number);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const d = (pa[i] ?? 0) - (pb[i] ?? 0);
+    if (d) return Math.sign(d);
+  }
+  return 0;
+}
+
+// ------------------------------------------------------------------ detect
+
+function gitIn(dir) {
+  return (...args) => {
+    const result = spawnSync("git", args, { cwd: dir, encoding: "utf8" });
+    return result.status === 0 ? result.stdout.trim() : null;
+  };
+}
+
+/** True when `.claude/settings.json` differs from HEAD only in what a plugin install writes. */
+function installOnlyChange(dir, git) {
+  const path = join(dir, ".claude", "settings.json");
+  if (!existsSync(path)) return false;
+  const strip = (data) => Object.fromEntries(Object.entries(data ?? {}).filter(([key]) => !INSTALL_KEYS.includes(key)));
+  try {
+    const now = strip(JSON.parse(readText(path)));
+    const before = git("show", "HEAD:.claude/settings.json");
+    return JSON.stringify(now) === JSON.stringify(before === null ? {} : strip(JSON.parse(before)));
+  } catch {
+    return false;
+  }
+}
+
+/** What is in `dir`: everything the plan reads. No writes, no network. */
+export function detect(dir) {
+  const git = gitIn(dir);
+  const isRepo = git("rev-parse", "--git-dir") !== null;
+  const status = isRepo ? (git("status", "--porcelain", "--untracked-files=all") ?? "") : "";
+  const changes = status.split("\n").filter(Boolean);
+  const tolerated = isRepo && installOnlyChange(dir, git);
+  const dirty = changes.filter((line) => !(tolerated && line.slice(3) === ".claude/settings.json"));
+  const files = isRepo
+    ? (git("ls-files", "--cached", "--others", "--exclude-standard") ?? "").split("\n").filter(Boolean)
+    : walk(dir);
+  const meaningful = files.filter((f) => !/^(README(\.md)?|LICENSE(\..+)?|\.gitignore|\.gitattributes|\.claude\/settings\.json)$/i.test(f));
+
+  const json = (rel) => {
+    try {
+      return JSON.parse(readText(join(dir, rel)));
+    } catch {
+      return null;
+    }
+  };
+  const pkg = json("package.json");
+  const deps = { ...(pkg?.dependencies ?? {}), ...(pkg?.devDependencies ?? {}) };
+  const lockfiles = [["pnpm-lock.yaml", "pnpm"], ["yarn.lock", "yarn"], ["bun.lockb", "bun"], ["bun.lock", "bun"], ["package-lock.json", "npm"]];
+  const packageManager = lockfiles.find(([file]) => existsSync(join(dir, file)))?.[1] ?? (pkg ? "npm" : null);
+  const schema = existsSync(join(dir, "prisma", "schema.prisma")) ? readText(join(dir, "prisma", "schema.prisma")) : null;
+  const frontend = [
+    ...FRONTEND_DEPS.filter((d) => deps[d]).map((d) => `depends on ${d}`),
+    ...FRONTEND_DIRS.filter((d) => existsSync(join(dir, d)) && statSync(join(dir, d)).isDirectory()).map((d) => `has ${d}/`),
+  ];
+  const docs = files.filter((f) => f.endsWith(".md") && (/^docs\//.test(f) || !f.includes("/")));
+  const topFolders = unique(files.filter((f) => f.includes("/")).map((f) => f.split("/")[0])).filter(
+    (name) => !name.startsWith(".") && !NOT_CODE.includes(name),
+  );
+  const settings = json(".claude/settings.json");
+  return {
+    dir,
+    name: basename(dir),
+    git: {
+      repo: isRepo,
+      head: isRepo ? git("rev-parse", "--verify", "-q", "HEAD") : null,
+      branch: isRepo ? git("branch", "--show-current") : null,
+      remote: isRepo ? git("remote", "get-url", "origin") : null,
+      dirty,
+      installOnly: tolerated,
+    },
+    empty: meaningful.length === 0,
+    stamp: json(STAMP),
+    packageManager,
+    packageJson: pkg !== null,
+    scripts: pkg?.scripts ?? {},
+    typescript: existsSync(join(dir, "tsconfig.json")) || Boolean(deps.typescript),
+    prisma: schema ? { provider: schema.match(/datasource\s+\w+\s*\{[^}]*provider\s*=\s*"([^"]+)"/)?.[1] ?? "unknown" } : null,
+    frontend,
+    docs,
+    agentFiles: ["CLAUDE.md", "AGENTS.md", "CONTEXT.md"].filter((f) => existsSync(join(dir, f))),
+    topFolders,
+    brigadeEnabled: Object.entries(settings?.enabledPlugins ?? {}).some(([id, on]) => on && id.startsWith("brigade@")),
+  };
+}
+
+// ------------------------------------------------------------------ the config a stack suggests
+
+const RUN = { pnpm: (s) => `pnpm ${s}`, npm: (s) => `npm run ${s}`, yarn: (s) => `yarn ${s}`, bun: (s) => `bun run ${s}` };
+const EXEC = { pnpm: "pnpm exec", npm: "npx", yarn: "yarn", bun: "bunx" };
+const PLACEHOLDER_TEST = /no test specified/;
+
+/** The checks the stack already has: a typecheck, a lint, the tests and a build, as commands. */
+export function stackChecks(det) {
+  const pm = det.packageManager;
+  if (!pm) return [];
+  const has = (name) => typeof det.scripts[name] === "string" && !PLACEHOLDER_TEST.test(det.scripts[name]);
+  const out = [];
+  if (has("typecheck")) out.push({ key: "typecheck", label: "Typecheck", run: RUN[pm]("typecheck") });
+  else if (det.typescript) out.push({ key: "typecheck", label: "Typecheck", run: `${EXEC[pm]} tsc --noEmit` });
+  if (has("lint")) out.push({ key: "lint", label: "Lint", run: RUN[pm]("lint") });
+  if (has("build")) out.push({ key: "build", label: "Build", run: RUN[pm]("build") });
+  if (has("test")) out.push({ key: "test", label: "Tests", run: RUN[pm]("test") });
+  return out;
+}
+
+/** `.claude/workflow.json` as the stack suggests it: the template's blank copy with the checks filled in. */
+export function proposeWorkflow(det, plugin = PLUGIN) {
+  const config = JSON.parse(readText(join(plugin, "template", ".claude", "workflow.json")));
+  const checks = stackChecks(det);
+  config.stopGate.checks = checks.filter((c) => c.key !== "build").map(({ label, run }) => ({ label, run }));
+  config.phaseRun.gates = checks.map(({ key, label, run }) => ({ label: label.toLowerCase(), run, ...(key === "test" ? { alone: true } : {}) }));
+  const pm = det.packageManager;
+  if (pm) {
+    const tools = pm === "npm" ? ["npm", "npx"] : [pm];
+    config.phaseRun.permissions = { allow: tools.flatMap((t) => [`Bash(${t} *)`, `PowerShell(${t} *)`]) };
+  }
+  return config;
+}
+
+/** The template's doc-config.mjs, pointed at the project's code folders and (merge) its existing docs. */
+export function docConfigText({ pathRoots = [], liveDocs = [] }, plugin = PLUGIN) {
+  let text = readText(join(plugin, "template", "tools", "doc-config.mjs"));
+  const rootsLine = /^export const PATH_ROOTS = (\[.*\]);$/m;
+  const roots = unique([...JSON.parse(text.match(rootsLine)[1]), ...pathRoots]);
+  text = text.replace(rootsLine, `export const PATH_ROOTS = ${JSON.stringify(roots).replaceAll('","', '", "')};`);
+  if (liveDocs.length) {
+    const added = liveDocs.map((doc) => `  ${JSON.stringify(doc)}, // the project's own, from before the workflow`).join("\n");
+    text = text.replace(/(export const LIVE_DOCS = \[\r?\n[\s\S]*?)(\r?\n\];)/, (all, body, end) => `${body}\n${added}${end}`);
+  }
+  return text;
+}
+
+/** The commands `CLAUDE.md` lists, as markdown bullets. */
+function commandLines(det, workflow) {
+  const lines = workflow.stopGate.checks.filter((c) => !c.run.includes("{")).map((c) => `- \`${c.run}\`: ${c.label.toLowerCase()}`);
+  const pm = det.packageJson ? det.packageManager : null;
+  lines.push(
+    `- \`${pm ? RUN[pm]("test:docs") : "node --test tools/doc-tools.test.mjs"}\`: the doc tools' own tests`,
+    `- \`${pm ? RUN[pm]("test:runner") : "node --test tools/phase-run/run.test.mjs"}\`: the phase runner's own tests`,
+    "- `node tools/doc-check.mjs`: the docs' checks (a hook runs it before every commit)",
+  );
+  return lines.join("\n");
+}
+
+// ------------------------------------------------------------------ plan
+
+/**
+ * Every action setup would take, in order, each with the text it would write. `answers`:
+ *   mode      "new" | "overwrite" | "merge"
+ *   name, summary, date   for the scaffold (date defaults to today)
+ *   workflow  the owner's `.claude/workflow.json` (defaults to proposeWorkflow)
+ *   pathRoots, liveDocs   for doc-config.mjs (default: the code folders; in merge, the top-level docs)
+ */
+export function buildPlan(dir, det, answers, plugin = PLUGIN) {
+  const mode = answers.mode;
+  if (!["new", "overwrite", "merge"].includes(mode)) throw new Error(`mode must be new, overwrite or merge (it is ${JSON.stringify(mode)}).`);
+  const problems = [];
+  if (det.stamp) problems.push(`This project is already set up (${STAMP}, version ${det.stamp.version}). Use /update-workflow.`);
+  if (mode === "new" && !det.empty) problems.push("New mode is for an empty repo; this one has files. Use overwrite or merge.");
+  if (mode !== "new" && !det.git.repo) problems.push("Not a git repository: overwrite and merge need git, to show and undo what they change.");
+  if (mode !== "new" && det.git.dirty.length) problems.push(`The working tree has changes; commit or put them away first:\n${det.git.dirty.join("\n")}`);
+  if (mode !== "new" && !det.git.head) problems.push("The repo has no commits yet; use new mode.");
+
+  const workflow = answers.workflow ?? proposeWorkflow(det, plugin);
+  const date = answers.date ?? new Date().toISOString().slice(0, 10);
+  const values = {
+    NAME: answers.name ?? det.name,
+    SUMMARY: answers.summary ?? "What this project is, in one paragraph: who uses it, and for what.",
+    DATE: date,
+    MODE: `${mode} mode`,
+    COMMANDS: commandLines(det, workflow),
+  };
+  const docConfig = {
+    pathRoots: answers.pathRoots ?? det.topFolders,
+    liveDocs: answers.liveDocs ?? (mode === "merge" ? det.docs.filter((d) => /^docs\/[^/]+\.md$/.test(d)) : []),
+  };
+
+  // Every file setup writes, before it looks at what is there.
+  const wanted = [
+    ...templateFiles(plugin).map((path) => ({ path, kind: "template", text: readText(join(plugin, "template", path)) })),
+    ...scaffoldFiles(plugin).map((path) => ({ path, kind: "scaffold", text: render(readText(join(plugin, "scaffold", path)), values) })),
+    { path: ".claude/workflow.json", kind: "config", text: `${JSON.stringify(workflow, null, 2)}\n` },
+    { path: ".claude/spec-issues.json", kind: "config", text: readText(join(plugin, "template", ".claude", "spec-issues.json")) },
+    { path: "tools/doc-config.mjs", kind: "config", text: docConfigText(docConfig, plugin) },
+    { path: "tools/doc-check-baseline.json", kind: "config", text: readText(join(plugin, "template", "tools", "doc-check-baseline.json")) },
+  ];
+  const exists = (path) => existsSync(join(dir, path));
+  const actions = [];
+
+  // Overwrite: the old docs, agent files and any file in the way move into the archive first.
+  const archived = new Set();
+  if (mode === "overwrite") {
+    const inTheWay = wanted.map((w) => w.path).filter((p) => exists(p) && !p.startsWith("docs/"));
+    const settings = join(dir, ".claude", "settings.json");
+    const oldSettings = existsSync(settings) ? JSON.parse(readText(settings)) : null;
+    const settingsHasMore = oldSettings && Object.keys(oldSettings).some((key) => !INSTALL_KEYS.includes(key));
+    const moves = unique([
+      ...(exists("docs") ? ["docs"] : []),
+      ...det.agentFiles,
+      ...inTheWay,
+      ...(settingsHasMore ? [".claude/settings.json"] : []),
+    ]);
+    for (const from of moves) {
+      actions.push({ op: "archive", path: from, to: `${ARCHIVE}/${from}` });
+      archived.add(from);
+    }
+    if (settingsHasMore) {
+      const kept = Object.fromEntries(INSTALL_KEYS.filter((key) => oldSettings[key]).map((key) => [key, oldSettings[key]]));
+      actions.push({ op: "add", path: ".claude/settings.json", kind: "config", text: `${JSON.stringify(kept, null, 2)}\n`, note: "only the plugin keys carried over" });
+    }
+  }
+  const gone = (path) => archived.has(path) || (archived.has("docs") && path.startsWith("docs/"));
+
+  for (const item of wanted) {
+    if (!exists(item.path) || gone(item.path)) {
+      actions.push({ op: "add", ...item });
+      continue;
+    }
+    const current = readText(join(dir, item.path));
+    if (lf(current) === lf(item.text)) {
+      actions.push({ op: "same", path: item.path, kind: item.kind });
+    } else if (item.path === "CLAUDE.md") {
+      actions.push({ op: "append", path: item.path, kind: item.kind, text: claudeMerge(current, item.text) });
+    } else {
+      actions.push({ op: "conflict", path: item.path, kind: item.kind, text: item.text, note: "exists and differs: left as it is" });
+    }
+  }
+
+  // .phase-run/ is the runner's state; its clean-tree gate trips on it unless git ignores it.
+  const ignore = exists(".gitignore") && !gone(".gitignore") ? readText(join(dir, ".gitignore")) : null;
+  if (ignore === null) actions.push({ op: "add", path: ".gitignore", kind: "scaffold", text: ".phase-run/\n" });
+  else if (!/^\/?\.phase-run\/?\s*$/m.test(ignore)) {
+    actions.push({ op: "append", path: ".gitignore", kind: "scaffold", text: `${ignore}${ignore.endsWith("\n") || !ignore ? "" : "\n"}.phase-run/\n` });
+  }
+
+  // package.json gets test:docs and test:runner, but only when it can be edited without reformatting it.
+  if (det.packageJson && !gone("package.json")) {
+    const text = readText(join(dir, "package.json"));
+    const data = JSON.parse(text);
+    const want = { "test:docs": "node --test tools/doc-tools.test.mjs", "test:runner": "node --test tools/phase-run/run.test.mjs" };
+    const missing = Object.entries(want).filter(([key]) => !data.scripts?.[key]);
+    if (missing.length) {
+      const indent = text.match(/^\{\r?\n([ \t]+)"/)?.[1] ?? "  ";
+      const roundTrips = lf(text).replace(/\n?$/, "\n") === `${JSON.stringify(data, null, indent)}\n`;
+      if (roundTrips) {
+        data.scripts = { ...(data.scripts ?? {}), ...Object.fromEntries(missing) };
+        actions.push({ op: "append", path: "package.json", kind: "scaffold", text: `${JSON.stringify(data, null, indent)}\n`, note: "adds test:docs and test:runner" });
+      } else {
+        actions.push({ op: "manual", path: "package.json", note: `add to "scripts" by hand (rewriting it would reformat the file): ${missing.map(([k, v]) => `"${k}": "${v}"`).join(", ")}` });
+      }
+    }
+  }
+
+  const sameJob = mode === "merge" ? sameJobPairs(det.docs) : [];
+  return { mode, head: det.git.head, problems, answers: { ...answers, date }, actions, sameJob };
+}
+
+/** The workflow's CLAUDE.md sections (its commands on) after the project's own text, and a header on top if it had none. */
+export function claudeMerge(current, scaffold) {
+  const sections = lf(scaffold).slice(lf(scaffold).indexOf("## Commands"));
+  const body = `${lf(current).replace(/\n*$/, "\n")}\n${sections}`;
+  if (/^---\n/.test(lf(current))) return body;
+  const lines = body.split("\n").length;
+  const budget = Math.ceil((lines + 40) / 10) * 10;
+  return `---\njob: What every session on this repo must know first, its rules, and where everything else lives.\nkind: living\nmax-lines: ${budget}\n---\n${body}`;
+}
+
+/** Existing docs that look like they do a job the workflow keeps elsewhere, one row per pair. */
+export function sameJobPairs(docs) {
+  const ours = new Set([...scaffoldFiles(), ...templateFiles()]);
+  const pairs = new Map();
+  for (const doc of docs) {
+    if (ours.has(doc)) continue;
+    const match = SAME_JOB.find(([pattern]) => pattern.test(doc));
+    if (!match) continue;
+    const where = match[1].endsWith("/") || match[1].includes("(") ? `${posix.dirname(doc)}/` : doc;
+    pairs.set(`${where}→${match[1]}`, { theirs: where, ours: match[1] });
+  }
+  return [...pairs.values()];
+}
+
+/** The plan as saved and shown: each action without its text, with a hash of it instead. */
+export function plan(dir, answers, plugin = PLUGIN) {
+  const built = buildPlan(dir, detect(dir), answers, plugin);
+  return { ...built, actions: built.actions.map(({ text, ...rest }) => (text === undefined ? rest : { ...rest, hash: hash(text) })) };
+}
+
+// ------------------------------------------------------------------ apply
+
+/** Carries out a saved plan, if the repo is still as it was planned against. */
+export function apply(dir, saved, plugin = PLUGIN) {
+  const det = detect(dir);
+  const fresh = buildPlan(dir, det, saved.answers, plugin);
+  if (fresh.problems.length) throw new Error(fresh.problems.join("\n"));
+  const strip = (actions) => actions.map(({ text, ...rest }) => (text === undefined ? rest : { ...rest, hash: hash(text) }));
+  if (fresh.head !== saved.head || JSON.stringify(strip(fresh.actions)) !== JSON.stringify(saved.actions)) {
+    throw new Error("The repo changed since this plan was made. Run plan again and review it.");
+  }
+  const git = (...args) => execFileSync("git", args, { cwd: dir, encoding: "utf8" });
+  if (!det.git.repo) git("init", "-q");
+  if (fresh.mode === "overwrite") git("switch", "-q", "-c", BRANCH);
+
+  const touched = [];
+  const write = (path, text) => {
+    mkdirSync(dirname(join(dir, path)), { recursive: true });
+    writeFileSync(join(dir, path), text);
+    touched.push(path);
+  };
+  // Archive in two moves: docs/ cannot be moved into its own docs/history/pre-workflow/.
+  const archives = fresh.actions.filter((a) => a.op === "archive");
+  const holding = ".brigade-archive";
+  for (const a of archives) {
+    mkdirSync(dirname(join(dir, holding, a.path)), { recursive: true });
+    renameSync(join(dir, a.path), join(dir, holding, a.path));
+  }
+  for (const a of archives) {
+    mkdirSync(dirname(join(dir, a.to)), { recursive: true });
+    renameSync(join(dir, holding, a.path), join(dir, a.to));
+    touched.push(a.path, a.to);
+  }
+  rmSync(join(dir, holding), { recursive: true, force: true });
+
+  for (const a of fresh.actions) if (a.op === "add" || a.op === "append") write(a.path, a.text);
+
+  const node = (...args) => spawnSync(process.execPath, args, { cwd: dir, encoding: "utf8" });
+  node("tools/doc-index.mjs");
+  if (fresh.mode === "merge") node("tools/doc-check.mjs", "--adopt");
+  touched.push("docs", "tools/doc-check-baseline.json");
+
+  // The stamp: a template file is hashed only if setup wrote it, so update never replaces one it did not.
+  const files = {};
+  for (const a of fresh.actions) if (a.kind === "template" && (a.op === "add" || a.op === "same")) files[a.path] = hash(readText(join(dir, a.path)));
+  const stamp = { plugin: "brigade", version: pluginVersion(plugin), mode: fresh.mode, adopted: fresh.answers.date, updated: fresh.answers.date, files };
+  write(STAMP, `${JSON.stringify(stamp, null, 2)}\n`);
+
+  const present = unique(touched).filter((p) => existsSync(join(dir, p)) || git("ls-files", "--", p).trim());
+  git("add", "-A", "--", ...present);
+  const check = node("tools/doc-check.mjs");
+  return {
+    branch: fresh.mode === "overwrite" ? BRANCH : det.git.branch,
+    written: fresh.actions.filter((a) => a.op === "add" || a.op === "append").map((a) => a.path),
+    archived: archives.map((a) => `${a.path} → ${a.to}`),
+    conflicts: fresh.actions.filter((a) => a.op === "conflict").map((a) => a.path),
+    manual: fresh.actions.filter((a) => a.op === "manual").map((a) => `${a.path}: ${a.note}`),
+    sameJob: fresh.sameJob,
+    docCheck: { status: check.status, output: `${check.stdout}${check.stderr}`.trim() },
+  };
+}
+
+// ------------------------------------------------------------------ update
+
+/** The CHANGELOG.md sections after `from`, up to and including `to`. */
+export function changesSince(from, to, plugin = PLUGIN) {
+  const path = join(plugin, "CHANGELOG.md");
+  if (!existsSync(path)) return [];
+  const out = [];
+  let current = null;
+  for (const line of lf(readText(path)).split("\n")) {
+    const heading = line.match(/^## (\d+\.\d+\.\d+)\b/);
+    if (heading) {
+      const v = heading[1];
+      current = compareVersions(v, from) > 0 && compareVersions(v, to) <= 0 ? { version: v, lines: [line] } : null;
+      if (current) out.push(current);
+    } else if (current) current.lines.push(line);
+  }
+  return out.map((s) => ({ version: s.version, text: s.lines.join("\n").trim() }));
+}
+
+/**
+ * Re-copies the template into a set-up project. Per template file:
+ *   the project's copy is as stamped → replaced by the plugin's (if it changed)
+ *   the project edited it            → a conflict: never overwritten
+ *   new in the plugin                → added
+ *   gone from the plugin             → listed; removed only with `remove`, and only if unedited
+ * Config and scaffold files are never touched, except by a version's migration.
+ */
+export function update(dir, { apply: doApply = false, remove = false, plugin = PLUGIN, migrations = MIGRATIONS, date } = {}) {
+  const stampPath = join(dir, STAMP);
+  if (!existsSync(stampPath)) throw new Error(`No ${STAMP}: this project was not set up by /setup-workflow. Run that first.`);
+  const stamp = JSON.parse(readText(stampPath));
+  const to = pluginVersion(plugin);
+  const changes = [];
+  for (const path of templateFiles(plugin)) {
+    const upstream = readText(join(plugin, "template", path));
+    const local = join(dir, path);
+    if (!existsSync(local)) {
+      changes.push(stamp.files[path] ? { op: "conflict", path, note: "the project deleted it" } : { op: "add", path, text: upstream });
+      continue;
+    }
+    const mine = hash(readText(local));
+    if (mine === hash(upstream)) changes.push({ op: "same", path });
+    else if (stamp.files[path] === mine) changes.push({ op: "replace", path, text: upstream });
+    else changes.push({ op: "conflict", path, note: stamp.files[path] ? "edited in the project" : "not written by setup" });
+  }
+  const current = new Set(templateFiles(plugin));
+  for (const path of Object.keys(stamp.files)) {
+    if (current.has(path) || !existsSync(join(dir, path))) continue;
+    const edited = hash(readText(join(dir, path))) !== stamp.files[path];
+    changes.push({ op: remove && !edited ? "remove" : "gone", path, note: edited ? "edited in the project: kept" : "no longer in the plugin" });
+  }
+  const pending = migrations.filter((m) => compareVersions(m.version, stamp.version) > 0 && compareVersions(m.version, to) <= 0);
+  const report = {
+    from: stamp.version,
+    to,
+    changelog: changesSince(stamp.version, to, plugin),
+    changes: changes.filter((c) => c.op !== "same").map(({ text, ...rest }) => rest),
+    migrations: pending.map((m) => `${m.version}: ${m.describe}`),
+  };
+  if (!doApply) return report;
+
+  const touched = [];
+  for (const c of changes) {
+    if (c.op === "add" || c.op === "replace") {
+      mkdirSync(dirname(join(dir, c.path)), { recursive: true });
+      writeFileSync(join(dir, c.path), c.text);
+      touched.push(c.path);
+    } else if (c.op === "remove") {
+      execFileSync("git", ["rm", "-q", "--", c.path], { cwd: dir });
+    }
+  }
+  for (const m of pending) touched.push(...(m.run(dir) ?? []));
+  const files = { ...stamp.files };
+  for (const c of changes) {
+    if (c.op === "add" || c.op === "replace" || c.op === "same") files[c.path] = hash(readText(join(dir, c.path)));
+    if (c.op === "remove") delete files[c.path];
+  }
+  const next = { ...stamp, version: to, updated: date ?? new Date().toISOString().slice(0, 10), files };
+  writeFileSync(stampPath, `${JSON.stringify(next, null, 2)}\n`);
+  touched.push(STAMP);
+  spawnSync("git", ["add", "-A", "--", ...unique(touched)], { cwd: dir });
+  return report;
+}
+
+// ------------------------------------------------------------------ autoMode
+
+/**
+ * The project's lines in `autoMode.environment` of a user settings file. Each line reads
+ * `**Project <path> — <topic>**: …`; earlier lines for the same path are replaced, other projects'
+ * lines are left exactly as they are. Written only if the file round-trips through JSON.stringify
+ * unchanged, so the rest of the file is never reformatted; otherwise `writable` is false and the
+ * lines are for pasting by hand.
+ */
+export function autoModeLines(settingsText, lines) {
+  const path = lines[0]?.match(/^\*\*Project (.+?) — /)?.[1];
+  if (!path) throw new Error('Each line must start "**Project <path> — <topic>**:".');
+  if (!lines.every((line) => line.startsWith(`**Project ${path} — `))) throw new Error(`Every line must name the same project (${path}).`);
+  const text = lf(settingsText);
+  const data = JSON.parse(text);
+  const writable = text.replace(/\n?$/, "\n") === `${JSON.stringify(data, null, 2)}\n`;
+  const before = data.autoMode?.environment ?? [];
+  const env = before.filter((line) => !line.startsWith(`**Project ${path} — `));
+  if (!env.includes("$defaults")) env.unshift("$defaults");
+  let at = env.findLastIndex((line) => line.startsWith("**Project "));
+  if (at === -1) {
+    at = env.findIndex((line) => line.startsWith("### Per-project"));
+    if (at === -1) {
+      at = env.indexOf("$defaults") + 1;
+      env.splice(at, 0, "### Per-project additions — each line below applies ONLY when the session's working directory is that project; in any other project, rely on the defaults above");
+    }
+  }
+  env.splice(at + 1, 0, ...lines);
+  const after = { ...data, autoMode: { ...(data.autoMode ?? {}), environment: env } };
+  return {
+    writable,
+    changed: JSON.stringify(before) !== JSON.stringify(env),
+    removed: before.filter((line) => !env.includes(line)),
+    added: env.filter((line) => !before.includes(line)),
+    text: `${JSON.stringify(after, null, 2)}\n`,
+  };
+}
+
+// ------------------------------------------------------------------ the command line
+
+function summarize(p) {
+  const count = (op) => p.actions.filter((a) => a.op === op);
+  const out = [`Mode: ${p.mode}`];
+  if (p.problems.length) out.push("", "Cannot go ahead:", ...p.problems.map((x) => `  - ${x}`));
+  for (const [op, label] of [["archive", "Moved into the archive"], ["add", "Written"], ["append", "Changed (shown as a diff before writing)"], ["conflict", "Left alone: exists and differs"], ["manual", "By hand"], ["same", "Already identical"]]) {
+    const items = count(op);
+    if (!items.length) continue;
+    out.push("", `${label} (${items.length}):`);
+    for (const a of items) out.push(`  ${a.path}${a.to ? ` → ${a.to}` : ""}${a.note ? `  (${a.note})` : ""}`);
+  }
+  if (p.sameJob.length) out.push("", "Docs of yours that look like they do a job the workflow keeps elsewhere (nothing moved):", ...p.sameJob.map((s) => `  ${s.theirs}  ~  ${s.ours}`));
+  return out.join("\n");
+}
+
+/** The checks a set-up project must pass: doc-check, the template's two test suites, and its config through both loaders. */
+export async function verify(dir) {
+  const node = (...args) => spawnSync(process.execPath, args, { cwd: dir, encoding: "utf8" });
+  const results = [];
+  const run = (label, ...args) => {
+    const r = node(...args);
+    results.push({ label, ok: r.status === 0, output: r.status === 0 ? "" : `${r.stdout}${r.stderr}`.trim().slice(-2000) });
+  };
+  run("doc-check", "tools/doc-check.mjs");
+  run("the doc tools' tests", "--test", "tools/doc-tools.test.mjs");
+  run("the phase runner's tests", "--test", "tools/phase-run/run.test.mjs");
+  const { loadWorkflowConfig } = await import(pathToFileURL(join(PLUGIN, "hooks", "workflow-config.mjs")).href);
+  const hooks = loadWorkflowConfig(dir);
+  results.push({ label: "the hooks' config", ok: !hooks.error, output: hooks.error ?? "" });
+  const { loadRunConfig } = await import(pathToFileURL(join(dir, "tools", "phase-run", "config.mjs")).href);
+  const runner = loadRunConfig(dir);
+  results.push({ label: "the phase runner's config", ok: !runner.error, output: runner.error ?? "" });
+  return results;
+}
+
+async function main() {
+  const [command, ...rest] = process.argv.slice(2);
+  const value = (name) => (rest.includes(name) ? rest[rest.indexOf(name) + 1] : null);
+  const target = rest[0];
+  const print = (data) => console.log(JSON.stringify(data, null, 2));
+  try {
+    if (command === "detect") print(detect(target));
+    else if (command === "propose") print(proposeWorkflow(detect(target)));
+    else if (command === "verify") {
+      const results = await verify(target);
+      for (const r of results) console.log(`${r.ok ? "ok  " : "FAIL"}  ${r.label}${r.output ? `\n${r.output}` : ""}`);
+      if (results.some((r) => !r.ok)) process.exitCode = 1;
+    } else if (command === "plan") {
+      const p = plan(target, JSON.parse(readText(value("--answers"))));
+      if (value("--out")) {
+        mkdirSync(dirname(value("--out")), { recursive: true });
+        writeFileSync(value("--out"), `${JSON.stringify(p, null, 2)}\n`);
+      }
+      // The proposed text of each file setup would change or leaves in conflict, for a real diff.
+      if (value("--preview")) {
+        for (const a of buildPlan(target, detect(target), p.answers).actions) {
+          if (a.op !== "append" && a.op !== "conflict") continue;
+          mkdirSync(dirname(join(value("--preview"), a.path)), { recursive: true });
+          writeFileSync(join(value("--preview"), a.path), a.text);
+        }
+      }
+      console.log(summarize(p));
+      if (p.problems.length) process.exitCode = 1;
+    } else if (command === "apply") print(apply(target, JSON.parse(readText(value("--plan")))));
+    else if (command === "update") print(update(target, { apply: rest.includes("--apply"), remove: rest.includes("--remove") }));
+    else if (command === "automode") {
+      const settings = value("--settings");
+      const result = autoModeLines(readText(settings), JSON.parse(readText(value("--lines"))));
+      if (rest.includes("--apply")) {
+        if (!result.writable) throw new Error(`${settings} would be reformatted by a rewrite; paste the lines by hand.`);
+        writeFileSync(settings, result.text);
+      }
+      print({ writable: result.writable, changed: result.changed, removed: result.removed, added: result.added, written: rest.includes("--apply") });
+    } else if (command === "labels") print(LABELS);
+    else throw new Error("Usage: setup.mjs detect|propose|plan|apply|verify|update|automode|labels (see the top of this file).");
+  } catch (error) {
+    console.error(`setup: ${error.message}`);
+    process.exit(1);
+  }
+}
+
+if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) await main();

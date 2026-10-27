@@ -1,0 +1,242 @@
+// Tests for scripts/setup.mjs, the file work behind /setup-workflow and /update-workflow: each mode
+// applied to a stand-in repo must leave a project that passes its own checks, and must never
+// overwrite what the project already had.
+// Run: node --test tests/*.test.mjs
+import assert from "node:assert/strict";
+import { execFileSync, spawnSync } from "node:child_process";
+import { cpSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { test } from "node:test";
+import { pathToFileURL } from "node:url";
+
+import { parseWorkflowConfig } from "../hooks/workflow-config.mjs";
+import { ARCHIVE, STAMP, apply, autoModeLines, compareVersions, detect, plan, update } from "../scripts/setup.mjs";
+import { PLUGIN, repo, write } from "./helpers.mjs";
+
+const read = (dir, rel) => readFileSync(join(dir, rel), "utf8");
+const node = (dir, ...args) => spawnSync(process.execPath, args, { cwd: dir, encoding: "utf8" });
+const ANSWERS = { name: "Gym Desk", summary: "A desk app for a gym.", date: "2026-10-27" };
+
+/** A repo the way an older project looks: a stack, loose docs with no headers, a CLAUDE.md. */
+function existing() {
+  const pkg = { name: "gym", private: true, scripts: { dev: "next dev", build: "next build", lint: "eslint", test: "vitest run" }, dependencies: { next: "16.0.0", react: "19.0.0" } };
+  return repo("brigade-existing-", {
+    "package.json": `${JSON.stringify(pkg, null, 2)}\n`,
+    "pnpm-lock.yaml": "lockfileVersion: '9.0'\n",
+    "tsconfig.json": "{}\n",
+    ".gitignore": "node_modules/\n",
+    "src/app/page.tsx": "export default function Page() { return null; }\n",
+    "prisma/schema.prisma": 'datasource db {\n  provider = "postgresql"\n  url = env("DATABASE_URL")\n}\n',
+    "CLAUDE.md": "# Gym\n\nUse pnpm. Never push to main.\n",
+    "docs/ROADMAP.md": "# Roadmap\n\nPhase 2 is next.\n",
+    "docs/SESSION_HANDOFF.md": "# Handoff\n\nStopped at payments.\n",
+    "docs/PROJECT_OVERVIEW.md": "# Overview\n\nThe client list lives in `src/gone.ts`.\n",
+    "docs/adr/ADR-001.md": "# ADR-001: Prisma\n\nWe use Prisma.\n",
+  });
+}
+
+function runPlan(dir, answers) {
+  const p = plan(dir, { ...ANSWERS, ...answers });
+  assert.deepEqual(p.problems, []);
+  return p;
+}
+
+test("detect reads the stack, the docs and the git state, and tolerates the plugin install's own settings", () => {
+  const { dir } = existing();
+  const det = detect(dir);
+  assert.equal(det.packageManager, "pnpm");
+  assert.equal(det.typescript, true);
+  assert.deepEqual(det.prisma, { provider: "postgresql" });
+  assert.ok(det.frontend.includes("depends on next"));
+  assert.deepEqual(det.topFolders, ["prisma", "src"]);
+  assert.ok(det.docs.includes("docs/ROADMAP.md") && det.docs.includes("CLAUDE.md"));
+  assert.equal(det.empty, false);
+  assert.deepEqual(det.git.dirty, []);
+  // What `claude plugin install --scope project` writes is not a dirty tree; anything else is.
+  write(dir, { ".claude/settings.json": `${JSON.stringify({ enabledPlugins: { "brigade@argee": true } }, null, 2)}\n` });
+  assert.deepEqual(detect(dir).git.dirty, []);
+  assert.equal(detect(dir).brigadeEnabled, true);
+  write(dir, { ".claude/settings.json": `${JSON.stringify({ enabledPlugins: { "brigade@argee": true }, permissions: {} })}\n` });
+  assert.equal(detect(dir).git.dirty.length, 1);
+});
+
+test("new mode on an empty repo: the whole workflow, clean on day one, staged and not committed", () => {
+  const { dir, git } = repo("brigade-new-");
+  write(dir, { ".claude/settings.json": `${JSON.stringify({ enabledPlugins: { "brigade@argee": true } }, null, 2)}\n` });
+  const workflow = { ...JSON.parse(readFileSync(join(PLUGIN, "template/.claude/workflow.json"), "utf8")) };
+  workflow.phaseRun = { gates: [{ label: "tests", run: "node --test" }] };
+  const p = runPlan(dir, { mode: "new", workflow });
+  const result = apply(dir, p);
+  assert.equal(result.docCheck.status, 0, result.docCheck.output);
+  assert.deepEqual(result.conflicts, []);
+  assert.match(read(dir, "CLAUDE.md"), /^---\njob: [\s\S]*# Gym Desk\n\nA desk app for a gym\./);
+  assert.match(read(dir, "CLAUDE.md"), /node --test tools\/doc-tools\.test\.mjs/); // no package.json: the raw commands
+  assert.match(read(dir, ".gitignore"), /^\.phase-run\/$/m);
+  assert.match(read(dir, "docs/history/devlog.md"), /## #1 · chore · adopt the workflow\n- 2026-10-27: .*\(new mode\)/);
+  const stamp = JSON.parse(read(dir, STAMP));
+  assert.equal(stamp.mode, "new");
+  assert.ok(stamp.files["tools/phase-run/run.mjs"] && !stamp.files["tools/doc-config.mjs"]);
+  // The config it wrote loads through the hooks' loader, and setup made no commit:
+  assert.doesNotThrow(() => parseWorkflowConfig(JSON.parse(read(dir, ".claude/workflow.json"))));
+  assert.equal(git("rev-list", "--count", "HEAD"), "1");
+  assert.equal(git("status", "--porcelain", "--", ".claude/settings.json"), "?? .claude/settings.json");
+  assert.match(git("diff", "--cached", "--name-only"), /tools\/phase-run\/run\.mjs/);
+  git("commit", "-q", "-m", "chore: adopt the workflow — devlog #1");
+  assert.equal(node(dir, "tools/doc-check.mjs", "--head").status, 0);
+});
+
+test("the runner's own loader accepts the config setup proposes from a stack", async () => {
+  const { dir: target } = existing();
+  apply(target, runPlan(target, { mode: "merge" }));
+  const { loadRunConfig } = await import(pathToFileURL(join(target, "tools/phase-run/config.mjs")).href);
+  const { config, error } = loadRunConfig(target);
+  assert.equal(error, null);
+  assert.deepEqual(config.gates.map((g) => g.label), ["typecheck", "lint", "build", "tests"]);
+  assert.equal(JSON.parse(read(target, ".claude/workflow.json")).stopGate.checks[0].run, "pnpm exec tsc --noEmit");
+});
+
+test("merge keeps every file the project had, accepts its docs as they stand, and reports same-job docs", () => {
+  const { dir, git } = existing();
+  const before = Object.fromEntries(["docs/ROADMAP.md", "docs/SESSION_HANDOFF.md", "docs/PROJECT_OVERVIEW.md", "docs/adr/ADR-001.md", "src/app/page.tsx"].map((f) => [f, read(dir, f)]));
+  const p = runPlan(dir, { mode: "merge" });
+  assert.deepEqual(p.actions.filter((a) => a.op === "append").map((a) => a.path).sort(), [".gitignore", "CLAUDE.md", "package.json"]);
+  assert.deepEqual(p.sameJob.map((s) => s.theirs).sort(), ["docs/ROADMAP.md", "docs/SESSION_HANDOFF.md", "docs/adr/"]);
+  const result = apply(dir, p);
+  assert.equal(result.docCheck.status, 0, result.docCheck.output);
+  for (const [file, text] of Object.entries(before)) assert.equal(read(dir, file), text, file);
+  assert.match(read(dir, "CLAUDE.md"), /^---\n[\s\S]*Use pnpm\. Never push to main\.\n\n## Commands\n\n- `pnpm exec tsc --noEmit`[\s\S]*`pnpm test:docs`[\s\S]*## Working agreement/);
+  const baseline = JSON.parse(read(dir, "tools/doc-check-baseline.json"));
+  assert.ok(baseline.headers.includes("docs/ROADMAP.md") && baseline.headers.includes("docs/adr/ADR-001.md"));
+  assert.deepEqual(baseline.missing["docs/PROJECT_OVERVIEW.md"], ["src/gone.ts"]);
+  assert.match(read(dir, "tools/doc-config.mjs"), /PATH_ROOTS = \["docs", "tools", "\.github", "\.claude", "prisma", "src"\]/);
+  assert.match(JSON.parse(read(dir, "package.json")).scripts["test:docs"], /doc-tools\.test\.mjs/);
+  assert.equal(git("branch", "--show-current"), "main");
+  // A doc written after the merge still needs its header:
+  write(dir, { "docs/new.md": "# New\n" });
+  assert.match(node(dir, "tools/doc-check.mjs").stderr, /docs\/new\.md: has no header/);
+});
+
+test("the command line: plan previews the changed files, apply writes, verify passes every check", () => {
+  const { dir } = existing();
+  const scratch = mkdtempSync(join(tmpdir(), "brigade-cli-"));
+  const cli = (...args) => spawnSync(process.execPath, [join(PLUGIN, "scripts/setup.mjs"), ...args], { encoding: "utf8" });
+  writeFileSync(join(scratch, "answers.json"), JSON.stringify({ ...ANSWERS, mode: "merge" }));
+  const planned = cli("plan", dir, "--answers", join(scratch, "answers.json"), "--out", join(scratch, "plan.json"), "--preview", join(scratch, "preview"));
+  assert.equal(planned.status, 0, planned.stderr);
+  assert.match(planned.stdout, /Changed \(shown as a diff before writing\) \(3\):/);
+  assert.match(readFileSync(join(scratch, "preview/CLAUDE.md"), "utf8"), /Never push to main\.\n\n## Commands\n/);
+  assert.equal(cli("apply", dir, "--plan", join(scratch, "plan.json")).status, 0);
+  const verified = cli("verify", dir);
+  assert.equal(verified.status, 0, verified.stdout);
+  assert.match(verified.stdout, /^ok +the phase runner's config$/m);
+});
+
+test("overwrite works on its own branch and archives the old docs, CLAUDE.md and settings instead of deleting them", () => {
+  const { dir, git } = existing();
+  write(dir, { ".claude/settings.json": `${JSON.stringify({ permissions: { allow: ["Bash(pnpm *)"] }, enabledPlugins: { "brigade@argee": true } }, null, 2)}\n` });
+  git("add", "-A");
+  git("commit", "-q", "-m", "settings");
+  const result = apply(dir, runPlan(dir, { mode: "overwrite" }));
+  assert.equal(result.docCheck.status, 0, result.docCheck.output);
+  assert.equal(git("branch", "--show-current"), "adopt-workflow");
+  assert.equal(read(dir, `${ARCHIVE}/docs/ROADMAP.md`), "# Roadmap\n\nPhase 2 is next.\n");
+  assert.equal(read(dir, `${ARCHIVE}/CLAUDE.md`), "# Gym\n\nUse pnpm. Never push to main.\n");
+  assert.ok(!existsSync(join(dir, "docs/ROADMAP.md")));
+  assert.deepEqual(JSON.parse(read(dir, ".claude/settings.json")), { enabledPlugins: { "brigade@argee": true } });
+  assert.match(read(dir, `${ARCHIVE}/.claude/settings.json`), /Bash\(pnpm \*\)/);
+  assert.ok(!existsSync(join(dir, ".brigade-archive")));
+  // git sees moves, not deletions:
+  assert.match(git("status", "--porcelain"), /^R {2}docs\/ROADMAP\.md -> docs\/history\/pre-workflow\/docs\/ROADMAP\.md$/m);
+});
+
+test("a dirty tree, a second setup, the wrong mode and a stale plan are each refused", () => {
+  const { dir } = existing();
+  write(dir, { "src/app/page.tsx": "changed\n" });
+  assert.match(plan(dir, { ...ANSWERS, mode: "merge" }).problems.join("\n"), /working tree has changes[\s\S]*src\/app\/page\.tsx/);
+  assert.match(plan(dir, { ...ANSWERS, mode: "new" }).problems.join("\n"), /New mode is for an empty repo/);
+  const { dir: clean } = existing();
+  const p = runPlan(clean, { mode: "merge" });
+  write(clean, { "docs/ROADMAP.md": "# Roadmap, changed after the plan\n" });
+  assert.throws(() => apply(clean, p), /working tree has changes/);
+  const { dir: other, git } = existing();
+  const q = runPlan(other, { mode: "merge" });
+  write(other, { "docs/LATER.md": "# Added later\n" });
+  git("add", "-A");
+  git("commit", "-q", "-m", "later");
+  assert.throws(() => apply(other, q), /changed since this plan was made/);
+  apply(other, runPlan(other, { mode: "merge" }));
+  assert.match(plan(other, { ...ANSWERS, mode: "merge" }).problems.join("\n"), /already set up/);
+});
+
+/** A copy of the plugin, so a test can change its template and version. */
+function pluginCopy() {
+  const dir = mkdtempSync(join(tmpdir(), "brigade-plugin-"));
+  for (const part of ["template", "scaffold", ".claude-plugin", "CHANGELOG.md"]) cpSync(join(PLUGIN, part), join(dir, part), { recursive: true });
+  return dir;
+}
+
+test("update replaces what the project left alone, never what it edited, never its config, and runs a migration once", () => {
+  const plugin = pluginCopy();
+  const { dir, git } = repo("brigade-update-");
+  apply(dir, plan(dir, { ...ANSWERS, mode: "new" }, plugin), plugin);
+  git("add", "-A");
+  git("commit", "-q", "-m", "chore: adopt the workflow — devlog #1");
+  // The plugin moves on: a changed guide, a new file, a new version with its changelog.
+  const manifest = JSON.parse(readFileSync(join(plugin, ".claude-plugin/plugin.json"), "utf8"));
+  const from = manifest.version;
+  writeFileSync(join(plugin, ".claude-plugin/plugin.json"), JSON.stringify({ ...manifest, version: "9.0.0" }));
+  writeFileSync(join(plugin, "CHANGELOG.md"), `# Changelog\n\n## 9.0.0 — 2027-01-01\n- The guide got better.\n\n${readFileSync(join(plugin, "CHANGELOG.md"), "utf8").replace(/^# Changelog\n+/, "")}`);
+  writeFileSync(join(plugin, "template/docs/guides/phase-run.md"), `${read(dir, "docs/guides/phase-run.md")}\nA new line.\n`);
+  writeFileSync(join(plugin, "template/tools/new-tool.mjs"), "export {};\n");
+  writeFileSync(join(plugin, "template/docs/agents/workflow.md"), `${read(dir, "docs/agents/workflow.md")}\nUpstream too.\n`);
+  // The project edited one template file and its config:
+  write(dir, { "docs/agents/workflow.md": `${read(dir, "docs/agents/workflow.md")}\nMy own line.\n` });
+  const config = `${read(dir, ".claude/workflow.json").trimEnd()}\n`;
+  let ran = 0;
+  const migrations = [{ version: "9.0.0", describe: "a fake format change", run: () => (ran++, []) }];
+  const report = update(dir, { plugin, migrations, date: "2027-01-02" });
+  assert.equal(report.from, from);
+  assert.equal(report.changelog[0].version, "9.0.0");
+  const byPath = Object.fromEntries(report.changes.map((c) => [c.path, c.op]));
+  assert.deepEqual(byPath, { "docs/guides/phase-run.md": "replace", "docs/agents/workflow.md": "conflict", "tools/new-tool.mjs": "add" });
+  assert.equal(ran, 0, "a report alone changes nothing");
+  update(dir, { plugin, migrations, apply: true, date: "2027-01-02" });
+  assert.equal(ran, 1);
+  assert.match(read(dir, "docs/guides/phase-run.md"), /A new line\.\n$/);
+  assert.match(read(dir, "docs/agents/workflow.md"), /My own line\.\n$/);
+  assert.equal(read(dir, ".claude/workflow.json"), config);
+  assert.equal(JSON.parse(read(dir, STAMP)).version, "9.0.0");
+  update(dir, { plugin, migrations, apply: true });
+  assert.equal(ran, 1, "a migration runs once");
+});
+
+const STJ_LINES = [
+  "$defaults",
+  "### Per-project additions — each line below applies ONLY when the session's working directory is that project; in any other project, rely on the defaults above",
+  "**Project D:\\HGP\\Example — what it is**: someone else's project",
+  "**Project D:\\HGP\\Example — routine work**: pnpm under D:\\HGP\\Example\\",
+];
+
+test("autoMode lines go after the other projects', replace their own earlier lines, and leave the rest byte for byte", () => {
+  const settings = `${JSON.stringify({ model: "x", autoMode: { environment: STJ_LINES } }, null, 2)}\n`;
+  const mine = ["**Project D:\\HGP\\Gym — what it is**: a gym desk app", "**Project D:\\HGP\\Gym — routine work**: pnpm under D:\\HGP\\Gym\\"];
+  const first = autoModeLines(settings, mine);
+  assert.equal(first.writable, true);
+  assert.deepEqual(JSON.parse(first.text).autoMode.environment, [...STJ_LINES, ...mine]);
+  assert.deepEqual(first.removed, []);
+  // Run again with a changed line: replaced in place, nothing duplicated, the others untouched.
+  const again = autoModeLines(first.text, ["**Project D:\\HGP\\Gym — what it is**: a gym desk app, v2"]);
+  assert.deepEqual(JSON.parse(again.text).autoMode.environment, [...STJ_LINES, "**Project D:\\HGP\\Gym — what it is**: a gym desk app, v2"]);
+  assert.equal(again.text.split(STJ_LINES[2].replaceAll("\\", "\\\\")).length, 2);
+  // No autoMode yet: $defaults and the header come first.
+  assert.deepEqual(JSON.parse(autoModeLines("{}\n", mine).text).autoMode.environment.slice(0, 2), STJ_LINES.slice(0, 2));
+  // A file a rewrite would reformat is not writable:
+  assert.equal(autoModeLines('{"model":"x"}\n', mine).writable, false);
+  assert.throws(() => autoModeLines(settings, ["no project here"]), /must start/);
+});
+
+test("versions compare by number, not as text", () => {
+  assert.equal(compareVersions("0.10.0", "0.9.0"), 1);
+  assert.equal(compareVersions("0.2.0", "0.2.0"), 0);
+});
