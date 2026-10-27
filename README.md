@@ -10,10 +10,10 @@ new or existing project gets the workflow without hand setup.
 docs restructure (PR #224, devlog #339–#345). Until Steak To Juan switches onto this plugin, the
 two copies can drift: a workflow fix made there after `905e2d8` has to be carried here by hand.
 
-> 🚨 **Do not install this plugin yet.** The hooks still find the repo from their own location
-> (`../..`), which inside a plugin points at the plugin, not the project; and Steak To Juan already
-> runs its own copies of both hooks, so installing it there would run every check twice. Install
-> once the hooks read `CLAUDE_PROJECT_DIR` and Steak To Juan has dropped its own copies.
+> 🚨 **Do not install this plugin yet.** Steak To Juan already runs its own copies of both hooks, so
+> installing it there would run every check twice, and the phase runner (step 7) is still Steak To
+> Juan's. Install at project scope only, once step 8's throwaway-repo trial passes (the hooks read
+> `CLAUDE_PROJECT_DIR` since step 2).
 
 ## Layout
 
@@ -21,32 +21,50 @@ two copies can drift: a workflow fix made there after `905e2d8` has to be carrie
 |---|---|---|
 | `.claude-plugin/` | `plugin.json` (the plugin), `marketplace.json` (so `/plugin marketplace add` can install it from a git repo) | — |
 | `skills/` | `doc-sync`, `ticket-check` (and, still to write, `setup-workflow`) | from the plugin, in every project |
-| `hooks/` | `guard-shell.mjs` (PreToolUse), `stop-gate.mjs` (Stop), wired by `hooks.json` | from the plugin, in every project |
-| `template/` | files a project keeps **in its own repo**, because CI and `node` run them there: the doc tools, the phase runner, `docs/_templates`, the workflow docs, the doc-check CI job | copied in by `/setup-workflow` |
+| `hooks/` | `guard-shell.mjs` (PreToolUse), `stop-gate.mjs` (Stop), wired by `hooks.json`; both read the project's `.claude/workflow.json` through `workflow-config.mjs` | from the plugin, in every project |
+| `template/` | files a project keeps **in its own repo**, because CI and `node` run them there: the doc tools, the phase runner, `docs/_templates`, the workflow docs, the doc-check CI job, and blank starting copies of the project's config (`.claude/workflow.json`, `.claude/spec-issues.json`, `tools/doc-config.mjs`, `tools/doc-check-baseline.json`) | copied in by `/setup-workflow` |
+| `examples/steak-to-juan/` | Steak To Juan's own rows, moved out of the generic files (its `workflow.json`, its doc-sync rows), and what step 9 needs | never copied; read at step 9 |
+| `tests/` | the plugin's own tests: the hooks, the env contract, the template on day one, no project's name in the generic half | `node --test tests/*.test.mjs`, from here |
+
+The template's tests run from `template/`: `node --test tools/doc-tools.test.mjs` and
+`node --test tools/phase-run/run.test.mjs`.
+
+## Done (2026-10-27)
+
+1. ✅ **One generic env contract**: `PHASE_RUN`, `PHASE_RUN_TICKET`, `PHASE_RUN_BASE`,
+   `PHASE_RUN_SPEC`, `PHASE_RUN_NET_HOSTS`, in the hooks, doc-check and run.mjs together.
+   `tests/env-contract.test.mjs` keeps the two halves in step.
+2. ✅ **Hooks find the project, not themselves**: the project is `CLAUDE_PROJECT_DIR`. guard-shell
+   resolves the folder each command is aimed at (`cd`, `Set-Location`, `pushd`, git's `-C`, quoted
+   and Git Bash paths); the project's rules pass a command aimed at another repo, the owner's rules
+   (no `--no-verify`, no trailer) hold everywhere, and inside a phase run every rule holds for every
+   command. A folder the shell computes (`cd $X`) keeps the project's rules on. No
+   `tools/doc-check.mjs` in the project, no doc-check. Not resolved: `gh --repo`, paths passed as
+   arguments.
+3. ✅ **Hook rules in `.claude/workflow.json`**: block rules (`command` or `text`, optional `with`
+   and `unless`, `when: always | phase-run`) and the stop gate's checks (`{base}` filled in). A
+   broken file fails closed. The spec list stays its own file, now `.claude/spec-issues.json`.
+   Steak To Juan's rows are in `examples/steak-to-juan/workflow.json`. Still a habit in code: the
+   wrapper stripping knows `pnpm` and `npx`, not `yarn` or `bun`.
+4. ✅ **doc-check's folder list** is `PATH_ROOTS` / `PATH_EXTENSIONS` in `doc-config.mjs`.
+5. ✅ **Blank starting copies**: `doc-config.mjs` holds the workflow's own layout only,
+   `DEVLOG_TAGGED_FROM = 1`; the baseline holds only the template's own two lines; no specs.
+   `tests/template.test.mjs` proves the template passes doc-check on day one, given the files
+   setup must write (its `SETUP_WRITES` list is step 8's contract).
+6. ✅ **Skills**: ticket-check reads the repo from `gh api repos/{owner}/{repo}/…`; doc-sync reads a
+   project's `docs/agents/doc-sync-rows.md` first; Impeccable rows are conditional; Steak To Juan's
+   rows are in `examples/steak-to-juan/doc-sync-rows.md`. `tests/no-project-specifics.test.mjs`
+   bans its names from the generic half, with step 7's files on a pending list.
 
 ## To do, in order
 
-1. **One generic env contract.** `STJ_PHASE_RUN` / `STJ_PHASE_TICKET` / `STJ_PHASE_BASE` /
-   `STJ_PHASE_SPEC` / `STJ_PHASE_NET_HOSTS` → `PHASE_RUN_*`, in `hooks/*.mjs`,
-   `template/tools/doc-check.mjs` and `template/tools/phase-run/run.mjs` together.
-2. **Hooks find the project, not themselves.** `ROOT` from `process.env.CLAUDE_PROJECT_DIR`.
-   And a rule applies only to commands aimed at that project: on 2026-10-27, SteakToJuan's
-   guard-shell blocked `git -C D:/HGP/brigade commit …` because SteakToJuan's devlog rule ran
-   against another repo's commit. Resolve the repo a git command targets (`-C <dir>`, a leading
-   `cd`) and let the project's rules pass a command for any other repo.
-3. **Hook rules into a per-project config** (e.g. `.claude/workflow.json`): the formatter
-   blocklist (`prettier --write`, `prisma format`), the migration rule, the spec-issues list,
-   and `stop-gate`'s three commands (typecheck, lint, changed tests).
-4. **`doc-check.mjs:57`'s top-level folder regex** (`design|docs|src|prisma|…`) into `doc-config.mjs`.
-5. **`doc-config.mjs` becomes a skeleton**: drop Steak To Juan's paths (DESIGN.md, `.impeccable`,
-   discovery rounds, `DEVLOG_TAGGED_FROM = 339` → `1`). Empty `doc-check-baseline.json`'s entries.
-6. **Skills:** `ticket-check`'s repo slug from `gh repo view`; `doc-sync`'s Module 6 verbs row
-   (SKILL.md ~158) out, with a slot for project-specific routing rows (e.g. a project's
-   `docs/agents/doc-sync-rows.md`); its Impeccable/DESIGN.md rows conditional.
 7. **The phase runner** (`template/tools/phase-run/run.mjs`, ~73 couplings): the gates
    (`pnpm typecheck/lint/test`, `next build`), the Prisma → dev Neon migration step, the
    `stj_cast` QA database and the Loyverse-token blanking into a config of commands plus an
-   optional after-gates step. Same for `ticket-prompt.md`, `settings.json` and the guide.
+   optional after-gates step. Same for `ticket-prompt.md`, `settings.json` and the guide. Also:
+   run.mjs's `Edit(./.claude/hooks/**)` deny rule guards a folder the hooks no longer live in (they
+   are the plugin's now); deny edits to `.claude/workflow.json` instead. Done when
+   `tests/no-project-specifics.test.mjs`'s `PENDING` list is empty.
 8. **`skills/setup-workflow`**: scaffolds a new repo — CLAUDE.md skeleton, `docs/` folders with
    their generated-index markers, `template/` copied in, `test:docs`/`test:runner` scripts,
    triage labels (or defer to mattpocock's `/setup-matt-pocock-skills`), and the project's

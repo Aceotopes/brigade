@@ -255,10 +255,10 @@ function listening(port) {
 }
 
 // A session talks to Anthropic; the runner talks to GitHub. Without both, a
-// ticket cannot be built or pushed. STJ_PHASE_NET_HOSTS overrides the list
+// ticket cannot be built or pushed. PHASE_RUN_NET_HOSTS overrides the list
 // (comma-separated, each `host` or `host:port`), which is how the offline
 // path is tested.
-const NET_HOSTS = (process.env.STJ_PHASE_NET_HOSTS ?? "api.anthropic.com,github.com").split(",").filter(Boolean);
+const NET_HOSTS = (process.env.PHASE_RUN_NET_HOSTS ?? "api.anthropic.com,github.com").split(",").filter(Boolean);
 
 function reachable(target) {
   const [host, port = "443"] = target.split(":");
@@ -537,7 +537,7 @@ function runPrint({ prompt, sessionId, resume, options, env, settings, transcrip
 //
 //  1. A background session takes NOTHING from the shell that starts it. It
 //     runs under a background service that keeps the environment of whoever
-//     started the service first. So the run's variables (STJ_PHASE_*, the
+//     started the service first. So the run's variables (PHASE_RUN*, the
 //     pinned database and token) travel in the `env` block of a settings file
 //     written per ticket, which the hooks and the session's commands both see.
 //  2. `--permission-prompts none` is for `-p` only. Its stand-in is the
@@ -1390,10 +1390,10 @@ async function runTicket(ticket, options, run) {
   let sessionId = randomUUID();
   const env = {
     ...sessionEnv(),
-    STJ_PHASE_RUN: "1",
-    STJ_PHASE_TICKET: String(n),
-    STJ_PHASE_BASE: base,
-    ...(options.spec ? { STJ_PHASE_SPEC: String(options.spec) } : {}),
+    PHASE_RUN: "1",
+    PHASE_RUN_TICKET: String(n),
+    PHASE_RUN_BASE: base,
+    ...(options.spec ? { PHASE_RUN_SPEC: String(options.spec) } : {}),
   };
   rmSync(join(STATE, `verdict-${n}.json`), { force: true });
   rmSync(stopCheckMarker(n), { force: true });

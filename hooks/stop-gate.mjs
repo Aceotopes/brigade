@@ -1,10 +1,11 @@
-// Stop hook (.claude/settings.json). Inert unless STJ_PHASE_RUN=1, so an
+// Stop hook (the plugin's hooks.json). Inert unless PHASE_RUN=1, so an
 // attended session is never slowed by it.
 //
 // Inside a phase run it is the check a person would have made before letting
-// the session say "done": typecheck, lint, and the tests the ticket's changes
-// touch. A failure exits 2, which sends the session back to fix it while it
-// still holds the ticket in mind.
+// the session say "done": the project's stop checks, in order (stopGate.checks
+// in .claude/workflow.json; typically typecheck, lint, and the tests the
+// ticket's changes touch). A failure exits 2, which sends the session back to
+// fix it while it still holds the ticket in mind. No checks, no gate.
 //
 // It sends the session back ONCE. On the second stop the hook's input carries
 // `stop_hook_active`, and the stop goes through: the runner then runs the full
@@ -20,23 +21,26 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
 
-const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
+import { loadWorkflowConfig } from "./workflow-config.mjs";
+
 const TAIL = 5000;
 
-if (process.env.STJ_PHASE_RUN !== "1") process.exit(0);
+if (process.env.PHASE_RUN !== "1") process.exit(0);
 
 let input = {};
 try {
-  input = JSON.parse(readFileSync(0, "utf8"));
+  input = JSON.parse(readFileSync(0, "utf8")) ?? {};
 } catch {
   input = {};
 }
 if (input.stop_hook_active) process.exit(0);
 
+// The project, not this file's folder: inside a plugin that is the plugin's cache.
+const ROOT = resolve(process.env.CLAUDE_PROJECT_DIR || (typeof input.cwd === "string" && input.cwd) || process.cwd());
+
 // A parked ticket has nothing to check: the session wrote its question and stopped.
-const ticket = process.env.STJ_PHASE_TICKET;
+const ticket = process.env.PHASE_RUN_TICKET;
 const verdictPath = join(ROOT, ".phase-run", `verdict-${ticket}.json`);
 if (ticket && existsSync(verdictPath)) {
   try {
@@ -53,7 +57,10 @@ function run(label, command) {
   return `${label} failed (\`${command}\`). The end of its output:\n\n${output.slice(-TAIL)}`;
 }
 
-const base = process.env.STJ_PHASE_BASE || "main";
+const config = loadWorkflowConfig(ROOT);
+if (!config.error && config.checks.length === 0) process.exit(0);
+
+const base = process.env.PHASE_RUN_BASE || "main";
 const changed = spawnSync("git", ["status", "--porcelain"], { cwd: ROOT, encoding: "utf8" }).stdout.trim();
 const ahead = spawnSync("git", ["rev-list", "--count", `${base}..HEAD`], { cwd: ROOT, encoding: "utf8" }).stdout.trim();
 if (changed === "" && ahead === "0") process.exit(0); // nothing was written
@@ -66,11 +73,11 @@ if (ticket) {
   process.on("exit", () => rmSync(marker, { force: true }));
 }
 
-const failure =
-  run("Typecheck", "pnpm typecheck") ??
-  run("Lint", "pnpm lint") ??
-  // --passWithNoTests: a ticket that changes no tested file (docs, a workflow) is not a failure.
-  run("The tests your changes touch", `pnpm exec vitest run --changed ${base} --passWithNoTests`);
+let failure = config.error ? `The project's stop checks could not be read: ${config.error}` : null;
+for (const check of config.checks) {
+  if (failure) break;
+  failure = run(check.label, check.run.replaceAll("{base}", base));
+}
 
 if (!failure) process.exit(0);
 

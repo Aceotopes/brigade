@@ -1,4 +1,4 @@
-// The mechanical half of doc-sync (.claude/skills/doc-sync/SKILL.md): the
+// The mechanical half of the doc-sync skill (the Brigade plugin): the
 // checks that used to be greps a session ran from memory. No tokens, no
 // network, a second or two.
 //
@@ -32,6 +32,8 @@ import {
   HEADER_EXEMPT,
   HEADER_REQUIRED,
   LIVE_DOCS,
+  PATH_EXTENSIONS,
+  PATH_ROOTS,
   STATUS_DOCS,
 } from "./doc-config.mjs";
 import { staleIndexes } from "./doc-index.mjs";
@@ -53,8 +55,15 @@ const STALE_PHRASES = [
 // a stale decision. An undecided-then-decided item is a reversal, which a
 // phrase list cannot catch anyway (doc-sync SKILL.md, §2).
 
+/** A repo path a doc cites: one of the project's top-level folders, then a file of a known type. No folders, no check. */
+const escape = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const PATH_PATTERN =
-  /(?<![A-Za-z0-9._/-])(?:design|docs|src|prisma|scripts|test|sync|tools|\.github|\.claude)\/[A-Za-z0-9._/-]+\.(?:md|html|tsx|ts|mjs|sql|yml|json|sh|css)\b/g;
+  PATH_ROOTS.length && PATH_EXTENSIONS.length
+    ? new RegExp(
+        String.raw`(?<![A-Za-z0-9._/-])(?:${PATH_ROOTS.map(escape).join("|")})\/[A-Za-z0-9._/-]+\.(?:${PATH_EXTENSIONS.map(escape).join("|")})\b`,
+        "g",
+      )
+    : null;
 
 /** `[text](target)` or `[text](target#anchor)`: the target, without its anchor. */
 const MARKDOWN_LINK = /\]\(([^)\s#]+)(?:#[^)\s]*)?\)/g;
@@ -106,7 +115,7 @@ function scan() {
       if (STATUS_DOCS.test(file) && STALE_PHRASES.some((phrase) => line.includes(phrase))) {
         (stale[file] ??= []).push({ line: index + 1, text: line });
       }
-      for (const match of line.matchAll(PATH_PATTERN)) {
+      for (const match of PATH_PATTERN ? line.matchAll(PATH_PATTERN) : []) {
         const path = match[0];
         // A pattern, not a path: `docs/guides/module-N.md`, `NNN-*.md`, `001-...md`.
         if (/(^|[/_-])N([-_.]|$)|NNN|\.\.\./.test(path)) continue;
@@ -299,7 +308,7 @@ function main() {
   const found = scan();
 
   if (flag("--update-baseline")) {
-    if (process.env.STJ_PHASE_RUN === "1") {
+    if (process.env.PHASE_RUN === "1") {
       console.error("doc-check: the baseline is never updated inside a phase run. Fix the line instead.");
       process.exit(1);
     }
@@ -334,7 +343,7 @@ function main() {
   failures.push(...staleIndexes());
 
   const raises = budgetRaises(flag("--head") ? "HEAD~1" : "HEAD");
-  if (process.env.STJ_PHASE_RUN === "1") {
+  if (process.env.PHASE_RUN === "1") {
     for (const raise of raises) failures.push(`${raise} A phase run never raises a budget: trim the doc instead.`);
   } else {
     for (const raise of raises) console.log(`  note: ${raise} Raising a budget is the owner's call.`);

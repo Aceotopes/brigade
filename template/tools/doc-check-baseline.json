@@ -1,95 +1,10 @@
 {
-  "note": "First written 2026-10-07 from the tree as it stood. The stale-phrase lines outside docs/reference/domain-model.md and every missing-path line were read and are correct as written (ordinary English, a quoted phrase, or a file the line says is gone). The ⚠ OPEN-nn markers in docs/reference/domain-model.md were accepted in bulk and NOT re-checked against its section 5 register: audit them when that file is next worked on. Later additions are made one at a time, after reading the line.",
+  "note": "Lines doc-check accepts as correct as written (a doc that quotes a stale phrase, or says a file is gone). Starts with only the template's own docs: the two docs/guides/phase-run.md lines describe the clean-tree check, they are not stale. An attended session adds a line with node tools/doc-check.mjs --update-baseline, after reading it; never inside a phase run.",
   "stale": {
-    "CONTEXT.md": [
-      "(`adr/0032`, closes `⚠ OPEN-28`, spec #28/ticket #30). Linked to the original by a real",
-      "**Beverage Fund** (added 2026-08-23, spec #28, closes the Module-4 half of `⚠ OPEN-29`):",
-      "_Avoid_: Restock, delivery (qualify which kind — see `⚠ OPEN-05`).",
-      "`⚠ OPEN-05`).",
-      "deliberately carries no link to one — `⚠ OPEN-11`), line item (a valid synonym, but \"Line\"",
-      "directly with the owner during grilling — the fact this register's `⚠ OPEN-29` entry existed to",
-      "the business — see the next three entries and `⚠ OPEN-05`. Which of these is the system of"
-    ],
     "docs/guides/phase-run.md": [
       "6. The script itself then checks: exactly one commit, nothing left uncommitted, typecheck, lint,",
       "| \"Not ready to run: The working tree has uncommitted changes\" | A run starts only from a clean folder | Commit or put away the changes it lists |"
-    ],
-    "docs/guides/runbook.md": [
-      "**Prerequisites:** on `main` (or already on the phase branch) with nothing uncommitted and `main`"
-    ],
-    "docs/reference/domain-model.md": [
-      "### 4.3 Append-only tables (rule 6, and `⚠ OPEN-23`)",
-      "(IO7)                                ⚠ OPEN-14",
-      "**`⚠ OPEN-05`** — `expense` (categories `gas_lpg`/`utilities`), `utility_bill` (§3.6, below),",
-      "**`⚠ OPEN-13`** — `stock_unit` appears on `tracked_item` here (matching Round 2 Inventory §11)",
-      "**⚠ OPEN-28 — An adjusting expense has no structural link that lets a future aggregate query",
-      "**⚠ OPEN-29 — The beverage revolving fund isn't modeled, and it likely breaks the specified",
-      "*This document should be revisited once the `⚠ OPEN-nn` items are resolved with the owner.",
-      "- `pay_period`, `payroll_run`, `payslip` — `⚠ OPEN-09`",
-      "-- deliberately NO shift or staff correlation (A23) — see ⚠ OPEN-26",
-      "balance                       ⚠ OPEN-07 — stored vs derived, see register (still open)",
-      "cash_advance_deduction         ⚠ OPEN-06 — overlaps payroll_deduction, see register",
-      "cost                              nullable — see ⚠ OPEN-05 (overlap with expense)",
-      "item_conversion                (versioned — I2)                          ⚠ OPEN-13, ⚠ OPEN-10",
-      "menu_item_id                    ⚠ OPEN-10 — added; the draft keyed this on item_id alone,",
-      "once closed, `stock_count_result` once finalised, `payroll_run` once released. See `⚠ OPEN-23`.",
-      "pay_period                     ⚠ OPEN-09 — referenced by three tables above, defined nowhere",
-      "pay_period_id                  → pay_period, ⚠ OPEN-09",
-      "pay_period_id                 → pay_period, ⚠ OPEN-09",
-      "payroll_deduction              ⚠ OPEN-06 — overlaps cash_advance_deduction, see register",
-      "payroll_run                    ⚠ OPEN-09 — required by the mandatory approval gate (Block C C16)",
-      "payslip                        ⚠ OPEN-09 — required by Block E §3.3/§3.6 (payslip history,",
-      "replaces_delivery_line_id        nullable → delivery_batch              ⚠ OPEN-14 — the draft",
-      "stock_unit                     pc | kg | L                             ⚠ OPEN-13 — see below",
-      "| Append-only tables | Marked **APPEND-ONLY** in the table header. Full list and rationale: `⚠ OPEN-23` |",
-      "| missing_punch                       ⚠ OPEN-15 — `day_off` and",
-      "⚠ OPEN-16"
     ]
   },
-  "missing": {
-    ".impeccable/surfaces/src-app-payroll-page-tsx.md": [
-      "src/app/me/payslips/page.tsx",
-      "src/app/payroll/page.tsx"
-    ],
-    "CONTEXT.md": [
-      "src/lib/market-report.ts"
-    ],
-    "design/README.md": [
-      "design/flow-diagrams/app-shell-flow.md",
-      "design/flow-diagrams/close-shift-calculator-flow.md",
-      "design/flow-diagrams/expenses-flow.md",
-      "design/wireframes/app-shell.html",
-      "design/wireframes/close-shift-calculator.html",
-      "design/wireframes/expenses.html"
-    ],
-    "design/module-4/flow-diagrams/admin-flow.md": [
-      "src/components/gcash/template-form.tsx"
-    ],
-    "design/module-4/flow-diagrams/sales-flow.md": [
-      "src/lib/gcash-discount-report.ts"
-    ],
-    "design/module-4/wireframes/expenses-day.html": [
-      "src/lib/market-report.ts"
-    ],
-    "design/shared/flow-diagrams/app-shell-flow.md": [
-      "design/wireframes/options/README.md"
-    ],
-    "design/shared/wireframes/app-shell.html": [
-      "design/wireframes/options/README.md"
-    ],
-    "docs/agents/gotchas/module-4/expenses-and-sales.md": [
-      "src/app/expenses/actions.ts",
-      "src/lib/expense-category-labels.ts"
-    ],
-    "docs/agents/gotchas/module-6/6a.md": [
-      "src/lib/actor-employee.ts"
-    ],
-    "docs/guides/docker-test-database.md": [
-      "test/shift-report.test.ts"
-    ],
-    "docs/reference/domain-model.md": [
-      "src/lib/gcash-discount-report.ts",
-      "src/lib/market-report.ts"
-    ]
-  }
+  "missing": {}
 }

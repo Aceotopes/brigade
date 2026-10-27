@@ -20,7 +20,7 @@
             "type": "command",
             "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/stop-gate.mjs\"",
             "timeout": 1800,
-            "statusMessage": "Phase run: typecheck, lint, changed tests"
+            "statusMessage": "Phase run: the project's stop checks"
           }
         ]
       }

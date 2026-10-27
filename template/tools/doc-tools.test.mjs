@@ -93,6 +93,8 @@ export const DEVLOG_ARCHIVE = "docs/devlog";
 export const PHASES = "docs/devlog/phases.json";
 export const LIVE_DOCS = ["docs/roadmap.md"];
 export const STATUS_DOCS = /^docs\\/roadmap\\.md$/;
+export const PATH_ROOTS = ["docs", "scripts", "tools"];
+export const PATH_EXTENSIONS = ["md", "ts", "mjs"];
 export const HEADER_REQUIRED = ["docs"];
 export const HEADER_EXEMPT = [/^docs\\/devlog\\//];
 export const GENERATED = [{ name: "devlog-archive", target: "docs/devlog/README.md", dir: "docs/devlog" }];
@@ -229,13 +231,23 @@ test("a missing path git ignores is local-only and passes; any other missing pat
   assert.match(node("doc-check.mjs").stderr, /names a file that does not exist: tools\/gone\.mjs/);
 });
 
+test("only a path under the config's folders, of its file types, is checked", () => {
+  const { dir, node } = repo();
+  const roadmap = (body) => `---\njob: Where things stand.\nkind: living\nmax-lines: 20\n---\n# Roadmap\n${body}\n`;
+  // src/ is not one of this project's PATH_ROOTS, and .css not one of its PATH_EXTENSIONS: both are prose.
+  writeFileSync(join(dir, "docs", "roadmap.md"), roadmap("Built in `src/gone.ts`, styled by `tools/gone.css`."));
+  assert.equal(node("doc-check.mjs").status, 0, node("doc-check.mjs").stderr);
+  writeFileSync(join(dir, "docs", "roadmap.md"), roadmap("Built in `scripts/gone.ts`."));
+  assert.match(node("doc-check.mjs").stderr, /names a file that does not exist: scripts\/gone\.ts/);
+});
+
 test("raising a budget is noted, and refused inside a phase run", () => {
   const { dir, node } = repo();
   writeFileSync(join(dir, "docs", "roadmap.md"), "---\njob: Where things stand.\nkind: living\nmax-lines: 30\n---\n# Roadmap\n");
   const attended = node("doc-check.mjs");
   assert.equal(attended.status, 0, attended.stderr);
   assert.match(attended.stdout, /docs\/roadmap\.md: max-lines raised from 20 to 30\. Raising a budget is the owner's call/);
-  const run = spawnSync(process.execPath, ["tools/doc-check.mjs"], { cwd: dir, encoding: "utf8", env: { ...process.env, STJ_PHASE_RUN: "1" } });
+  const run = spawnSync(process.execPath, ["tools/doc-check.mjs"], { cwd: dir, encoding: "utf8", env: { ...process.env, PHASE_RUN: "1" } });
   assert.equal(run.status, 1);
   assert.match(run.stderr, /A phase run never raises a budget/);
 });

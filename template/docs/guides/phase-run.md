@@ -7,8 +7,8 @@ max-lines: 560
 
 **Scope:** Building a phase's tickets overnight with nobody watching, since 2026-10-07. Covers the
 evening and morning routines, what the run does and never does, merging a pull request (your first),
-undoing one ticket, and a fix for every likely problem. Background: `docs/history/workflow-upgrade-plan.md`
-(why it exists), `docs/agents/workflow.md` (the whole path of a phase), implementation log `140`.
+undoing one ticket, and a fix for every likely problem. Background: `docs/agents/workflow.md` (the
+whole path of a phase).
 **Date:** 2026-10-07; updated 2026-10-17 after 6B's and 6C's nights (`#194`, devlog `#291`)
 
 ---
@@ -319,7 +319,7 @@ applied to dev Neon is **not** undone by a revert; it needs a new migration that
 
 ## What a run can never do
 
-These are enforced by scripts, not by the session remembering them (`.claude/hooks/guard-shell.mjs`
+These are enforced by scripts, not by the session remembering them (Brigade's `guard-shell` hook
 and the runner's own checks):
 
 - push anything itself, or commit anywhere but the phase branch; only the runner pushes, and only

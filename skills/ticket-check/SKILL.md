@@ -13,10 +13,12 @@ Argument: the spec's issue number. With none, ask for it.
 ## 1. Read
 
 1. The spec: `gh issue view <spec> --comments`.
-2. Its tickets, in order: `gh api repos/Aceotopes/SteakToJuan/issues/<spec>/sub_issues`, then each
-   ticket in full, and each ticket's blockers (`…/issues/<n>/dependencies/blocked_by`).
+2. Its tickets, in order: `gh api repos/{owner}/{repo}/issues/<spec>/sub_issues` (gh fills in
+   `{owner}/{repo}` from the current repo), then each ticket in full, and each ticket's blockers
+   (`…/issues/<n>/dependencies/blocked_by`).
 3. For each ticket: the code its **Areas** name, the gotcha blocks and ADRs under **Read first**,
-   and for a `frontend` ticket its prototype screen and its surface brief.
+   and for a `frontend` ticket its prototype screen and its surface brief, where the project keeps
+   them.
 4. `docs/agents/ticket-template.md`, the shape each ticket must have.
 
 A phase of a dozen tickets is a lot to hold. Read ticket by ticket and write findings down as you
@@ -26,16 +28,16 @@ go; do not ask anything until every ticket has been read.
 
 - **A decision nobody made.** Something the session must choose that the spec, an ADR and the
   ticket's "Decisions already made" do not settle. Sort each one:
-  - *the owner's* (a money or payroll rule, privacy, who may see or do something, a schema choice
+  - *the owner's* (a money rule, privacy, who may see or do something, a schema choice
     that is hard to reverse, anything the owner would be surprised to find decided): ask it;
   - *small* (a label, an empty state, a sort order): leave it to the session, which records it
     under "Assumptions made". Do not ask these. Asking forty small questions is its own failure.
 - **A sentence that reads two ways.** An acceptance criterion two sessions would build differently.
 - **A conflict** with an ADR, a rule in `CLAUDE.md`, a gotcha, another ticket, or what the code
   already does.
-- **A screen the prototype lacks**, or a state of it (empty, error, a long name, the other role).
-- **A `frontend` ticket with no surface brief**, or a UI-changing ticket without the `frontend`
-  label.
+- **A UI-changing ticket without the `frontend` label.** Where the project keeps prototypes and
+  surface briefs (an Impeccable project): **a screen the prototype lacks**, or a state of it (empty,
+  error, a long name, the other role), and **a `frontend` ticket with no surface brief**.
 - **A wrong edge.** A ticket that needs another's work but is not blocked by it, or is blocked by
   one it does not need; a ticket missing from the spec's sub-issues; a cycle.
 - **A manual step nobody listed** under "Run by hand" (a secret, a script, a real-phone check).
@@ -68,8 +70,8 @@ and change only what is needed):
 An answer that is hard to reverse and would surprise a later reader also gets an ADR (the
 `doc-sync` skill's ADR row), named in the ticket's "Read first".
 
-Add the spec's number to `.claude/hooks/spec-issues.json` if it is not there, so no commit can
-close the spec by keyword.
+Add the spec's number to `.claude/spec-issues.json` if it is not there, so no commit can close the
+spec by keyword (Brigade's guard-shell hook reads it).
 
 ## 5. Label
 

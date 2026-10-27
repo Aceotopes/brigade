@@ -3,9 +3,12 @@
 //   tools/doc-index.mjs   the indexes nobody writes by hand
 //   tools/doc-rotate.mjs  the end-of-phase move of the devlog into its archive
 //
-// The tools themselves know nothing about Steak To Juan; every path they
-// touch is named here. A doc's own rules (its job, kind and budget) are not
-// here either: they sit in the doc's frontmatter, where a reader sees them.
+// The tools themselves know no project; every path they touch is named here.
+// This is Brigade's starting copy: the layout the workflow itself uses (the
+// paths the doc-sync skill names). A project adds its own docs to these lists
+// (a DESIGN.md, a design/ folder, its code folders in PATH_ROOTS) and keeps
+// every export: the tools import each one. A doc's own rules (its job, kind and
+// budget) are not here: they sit in the doc's frontmatter, where a reader sees them.
 
 /** The current phase's devlog: open entry on top. Rotated at each phase end. */
 export const DEVLOG = "docs/history/devlog.md";
@@ -19,14 +22,11 @@ export const PHASES = "docs/history/devlog/phases.json";
  * a doc answers (status, guides, reference), the skill config in docs/agents,
  * and the hand-written heads of the history folders' indexes. The
  * missing-path and header checks cover all of them. The history records, the
- * ADRs, research, the discovery rounds and the handbook's chapters are left as
- * written.
+ * ADRs, research and the handbook's chapters are left as written.
  */
 export const LIVE_DOCS = [
   "CLAUDE.md",
   "CONTEXT.md",
-  "DESIGN.md",
-  "PRODUCT.md",
   "docs/README.md",
   "docs/status",
   "docs/guides",
@@ -35,18 +35,20 @@ export const LIVE_DOCS = [
   "docs/history/devlog/README.md",
   "docs/history/implementation-log/README.md",
   "docs/handbook/README.md",
-  "design",
-  ".claude/skills/doc-sync",
-  ".claude/skills/ticket-check",
-  ".impeccable/surfaces",
   "tools/phase-run",
 ];
 
-/**
- * The stale-phrase check covers status-bearing docs only. A design file or
- * DESIGN.md says "still open" about a drawer, not about a decision.
- */
+/** The stale-phrase check covers status-bearing docs only. */
 export const STATUS_DOCS = /^(CLAUDE\.md|CONTEXT\.md|docs\/(status|guides|reference|agents)\/.+)$/;
+
+/**
+ * The missing-path check: a path a live doc cites (`docs/guides/x.md`) must exist.
+ * Only paths under these top-level folders, ending in one of these file types,
+ * are read as paths; anything else in a doc is prose. Add the project's own
+ * folders ("src", "test", ...) as its docs start citing them.
+ */
+export const PATH_ROOTS = ["docs", "tools", ".github", ".claude"];
+export const PATH_EXTENSIONS = ["md", "html", "tsx", "ts", "mjs", "sql", "yml", "json", "sh", "css"];
 
 /**
  * Docs that must open with a frontmatter header (job, kind, budget): files, or
@@ -60,19 +62,11 @@ export const HEADER_REQUIRED = [
 
 /** Never asked for a header: another tool writes or reads these files as they are. */
 export const HEADER_EXEMPT = [
-  /^PRODUCT\.md$/, // Impeccable reads it by its own schema marker
-  /^DESIGN\.md$/, // Impeccable's documenter owns its format
-  /^AGENTS\.md$/, // `next dev` rewrites it
-  /^\.impeccable\//,
-  /^design\//, // prototypes and flow diagrams, deleted once built
-  /^\.claude\/skills\//, // skill files carry the skill loader's own frontmatter
   /^tools\/phase-run\//, // prompts the runner renders
   // Frozen records inside docs/: written once, never budgeted.
-  /^docs\/claude-discovery-rounds\//,
   /^docs\/research\//,
   /^docs\/adr\/\d{4}-/, // an ADR's header holds its status, not a job
   /^docs\/history\/implementation-log\/\d/,
-  /^docs\/history\/workflow-upgrade-plan\.md$/,
   /^docs\/_templates\/(?!README\.md$)/, // a template's header is a placeholder
 ];
 
@@ -102,5 +96,5 @@ export const GENERATED = [
 
 /** The devlog's commit-type tags (the commit message's own prefix). */
 export const DEVLOG_TYPES = ["feat", "fix", "docs", "chore", "refactor", "test", "style", "design", "ci", "infra", "research", "perf"];
-/** Entries from this number on use `## #NNN · type · title` and carry no hash. */
-export const DEVLOG_TAGGED_FROM = 339;
+/** Entries from this number on use `## #NNN · type · title` and carry no hash. A project that starts on the workflow starts at 1. */
+export const DEVLOG_TAGGED_FROM = 1;

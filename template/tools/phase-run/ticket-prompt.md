@@ -142,7 +142,7 @@ round: there is no score to chase.
 
 ## 7. Docs, then one commit
 
-Follow the **per-ticket tier** of `.claude/skills/doc-sync/SKILL.md`. In short: the implementation
+Follow the **per-ticket tier** of the `doc-sync` skill. In short: the implementation
 log in full; a devlog entry; the ticket's gotchas block in this phase's file,
 `docs/agents/gotchas/module-<N>/{{PHASE}}.md` (made from `docs/_templates/gotchas-phase.md` if it does
 not exist yet); an ADR if something hard to reverse was decided; the runbook only for a new manual

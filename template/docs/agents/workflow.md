@@ -84,7 +84,7 @@ the prototype is deleted in the finish ticket.
 ## `doc-sync`: runs with every change
 
 Not a step of the pipeline: a checklist run after any verified change and before its commit, in
-two tiers (per ticket / phase end). Full detail: `.claude/skills/doc-sync/SKILL.md`. Its mechanical
+two tiers (per ticket / phase end). Full detail: the `doc-sync` skill (Brigade plugin). Its mechanical
 checks are a script, `node tools/doc-check.mjs`, which a hook also runs before every commit.
 
 ## On-ramps: they feed the path above

@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "note": "Steak To Juan's rows, exactly what its own guard-shell.mjs and stop-gate.mjs hardcoded at 905e2d8. Copied into its .claude/workflow.json at README step 9.",
+  "guard": {
+    "block": [
+      {
+        "when": "always",
+        "command": "^prettier\\b",
+        "with": "\\s(--write|-w)\\b",
+        "message": "`prettier --write` rewrites whole files in this repo. Edit by hand and check `git diff --stat`."
+      },
+      {
+        "when": "always",
+        "command": "^prisma\\s+format\\b",
+        "message": "`prisma format` rewrites the whole schema file. Edit prisma/schema.prisma by hand."
+      },
+      {
+        "when": "phase-run",
+        "command": "^prisma\\s+(migrate\\s+(deploy|resolve|reset|dev)|db\\s+(push|execute))\\b",
+        "unless": "localhost|127\\.0\\.0\\.1",
+        "message": "a phase-run session never migrates dev Neon. The test database and stj_cast take migrations on their own; the runner applies a new migration to dev Neon after the ticket's checks pass."
+      },
+      {
+        "when": "phase-run",
+        "text": "apply-pending-migrations",
+        "message": "a phase-run session never migrates dev Neon. The test database and stj_cast take migrations on their own; the runner applies a new migration to dev Neon after the ticket's checks pass."
+      }
+    ]
+  },
+  "stopGate": {
+    "checks": [
+      { "label": "Typecheck", "run": "pnpm typecheck" },
+      { "label": "Lint", "run": "pnpm lint" },
+      {
+        "label": "The tests your changes touch",
+        "run": "pnpm exec vitest run --changed {base} --passWithNoTests",
+        "note": "--passWithNoTests: a ticket that changes no tested file (docs, a workflow) is not a failure."
+      }
+    ]
+  }
+}

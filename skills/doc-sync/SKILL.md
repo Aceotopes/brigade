@@ -8,8 +8,7 @@ one job; touch only the ones the change affects. Skipping a file that isn't affe
 
 **This runs after verification**, not after writing code, and before the commit.
 
-Rewritten 2026-10-07 into two tiers (owner's decision; the reasoning is
-`docs/history/workflow-upgrade-plan.md`). The long reference material moved out and is read only when
+Two tiers, per ticket and per phase. The long reference material sits apart and is read only when
 needed:
 
 - `docs/README.md`: every doc and its job, generated from each doc's own header, so a new doc is
@@ -18,6 +17,11 @@ needed:
 - `reference/routing-table.md`: when to touch each kind of file that §1 does not cover, and the
   files outside `docs/` (tools, hooks, Artifact pages). Read the row of any file you are about to touch.
 - `reference/artifact-mirrors.md`: how to republish an Artifact page. Phase end only.
+
+**This project's own rows.** If `docs/agents/doc-sync-rows.md` exists, read it before §1. Its rows
+cover files only this project has (a design system, a guide table a test pins, a published page),
+and they add to §1's tables, §5's checklist and the routing table. Where one of its rows and a
+general row here disagree, the project's row wins.
 
 ## 1. Two tiers
 
@@ -37,7 +41,7 @@ status into the roadmap, and only when a phase's state changes. New docs start f
 | `docs/status/roadmap.md` | **Nothing, as a rule.** Its phase line changes only when the phase starts, merges or is blocked; the draft pull request counts the tickets. |
 | `docs/status/noted-for-later.md` | The command-center check: if the ticket exposed a real signal a future monitoring dashboard could show, one line under the sync/ops dashboard's suggestion list. Most tickets add nothing; silence is the correct report. |
 | `docs/guides/runbook.md` | Only when the ticket adds a step a person must run (a migration to apply by hand, a secret, a script). This cannot wait for phase end. |
-| `DESIGN.md` (+ `.impeccable/design.json`) | A **short** entry, only when the ticket adds a reusable component or changes a rule (a token, a colour role, a cap), in the section format the file already uses. A new colour role needs an ADR first. |
+| `DESIGN.md` (+ `.impeccable/design.json`), in a project that uses Impeccable | A **short** entry, only when the ticket adds a reusable component or changes a rule (a token, a colour role, a cap), in the section format the file already uses. A new colour role needs an ADR first. |
 | `CLAUDE.md`, `CONTEXT.md`, `docs/reference/domain-model.md`, `docs/reference/tech-stack.md` | Only when a rule, a term, the schema or the stack changed. Each holds a budget in its header: compress before growing, and check with a search that anything trimmed still exists elsewhere. |
 
 ### Once per phase, in its finish ticket
@@ -51,9 +55,9 @@ status into the roadmap, and only when a phase's state changes. New docs start f
   how-tos, owner-held items. Present tense; no build history.
 - `docs/status/roadmap.md`: the phase's line, and the next phase's.
 - `docs/status/handoff.md`: where things stand and the next step. Overwrite, don't append (≤120 lines).
-- `DESIGN.md`'s full re-documentation and its sidecar (the `impeccable-documenter`), the finish
-  review, the design files' dated notes, the prototype deleted.
-- Every Artifact page, the Build Roadmap page included: `reference/artifact-mirrors.md`.
+- In a project that uses Impeccable: `DESIGN.md`'s full re-documentation and its sidecar (the
+  `impeccable-documenter`), the finish review, the prototype deleted once `DESIGN.md` documents it.
+- Every Artifact page the project mirrors: `reference/artifact-mirrors.md`.
 - A pass over the phase's gotcha blocks: retire the ones that no longer bite, collapse the ones a test
   now enforces to "pinned: …". Then close the finished phase's files: its gotchas file and its handbook
   file get `growth: closed` and `max-lines` set to their size, so they can only shrink.
@@ -70,7 +74,7 @@ tier, plus any phase-end file the change makes wrong. Its gotchas block goes in 
 ## 2. Order, and the checks
 
 1. Schema and vocabulary first (`docs/reference/domain-model.md`, `CONTEXT.md`), then decisions (`docs/adr/`),
-   then `CLAUDE.md` / `DESIGN.md` if a rule moved. Closing an `OPEN-nn` item is not optional: mark
+   then `CLAUDE.md` (and `DESIGN.md`, with Impeccable) if a rule moved. Closing an `OPEN-nn` item is not optional: mark
    it `✅ CLOSED`, link the ADR.
 2. The gotchas block, the runbook if needed.
 3. The implementation log.
@@ -90,9 +94,9 @@ Two checks the script cannot make:
 - **A reversal is stale in its own words.** When the change reverses an earlier decision, search for
   the words that recorded the *original* decision ("deferred to its own module"), across the repo.
   The fixed phrase list will not catch them. This missed five files once (2026-08-27).
-- **A moved, renamed or deleted file** also means repathing code comments that cite it (`src/`,
-  `test/`, `prisma/`), `design/README.md`'s layout and path map, `.impeccable/config.json`, and any
-  surface brief's frontmatter.
+- **A moved, renamed or deleted file** also means repathing code comments that cite it, and any
+  index or config that names it (with Impeccable: `.impeccable/config.json` and any surface brief's
+  frontmatter; the project's rows may name more).
 
 ## 3. The devlog entry: one per commit, short
 
@@ -134,7 +138,7 @@ How it was verified, stated plainly. For a docs-only change say what was checked
 ```
 
 - **`Closes #N`** for the ticket's own issue, the exact keyword. A plain `#N` closes nothing.
-- **Never a closing keyword beside a spec issue's number** (`.claude/hooks/spec-issues.json`): the
+- **Never a closing keyword beside a spec issue's number** (`.claude/spec-issues.json`): the
   owner closes specs by hand. Write "Part of #N".
 - **No attribution trailer, ever.**
 
@@ -155,10 +159,7 @@ during a run. A fix after the commit amends it; a ticket is one commit.
 - The implementation log entry exists, with its Common Questions.
 - `node tools/doc-index.mjs` has run and `node tools/doc-check.mjs` is clean, and for a reversal or a moved file, §2's two extra checks ran.
 - The devlog entry is the last edit made.
-- **If the change added, wired or re-scoped a Module 6 Verb:** `docs/guides/module-6.md`'s verbs table
-  matches `VERBS` / `ROLE_VERBS` / `MODULE_6_VERBS` (`src/lib/permissions.ts`) and
-  `test/module-6-verbs.test.ts` passes. This one row of the owner's guide is not deferred to phase
-  end: the test pins it.
+- Every row of `docs/agents/doc-sync-rows.md` the change touches, if the project has one.
 - In a finish ticket: every phase-end file above, and each Artifact page checked against its source
   (`reference/artifact-mirrors.md`), none assumed current.
 
