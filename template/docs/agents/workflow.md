@@ -1,7 +1,7 @@
 ---
 job: Which skill, when: how a phase moves from grill to merge. Changes only when the process does.
 kind: living
-max-lines: 130
+max-lines: 140
 ---
 # Workflow — which skill, when, and how a phase gets built
 
@@ -33,7 +33,8 @@ morning, one pull request) → **tickets** (one session, one commit).
 3. **Phase 0**, the skeleton: the app, its test runner, lint and typecheck, a first test. Grilled
    like any phase, then built **attended** on branch `phase-0` (the runner has no gates to run yet)
    and merged through its pull request. Then its checks become the gates and stop checks in
-   `.claude/workflow.json`: the plugin's `scripts/setup.mjs propose .` suggests them.
+   `.claude/workflow.json`: the plugin's `scripts/setup.mjs propose .` suggests them. A project
+   with screens also builds its shell here (the design rung below).
 
 Every grill after that names its sources the same way: the module guide's **Sources:** say which
 discovery docs to read.
@@ -41,15 +42,15 @@ discovery docs to read.
 ## The path of a phase (since 2026-10-07)
 
 ```
-/grill-with-docs → flow diagram + prototype → /to-spec → /to-tickets → /ticket-check
+/grill-with-docs → prototype + flow diagram → /to-spec → /to-tickets → /ticket-check
       → the phase run (unattended, a night at a time) → the finish ticket → merge
 ```
 
 | # | Step | Who | What happens |
 |---|---|---|---|
 | 1 | **Grill** — `/grill-with-docs` | Owner + Claude, one sitting | Every question a ticket would otherwise stop on is answered now. Settled terms and decisions go into `GLOSSARY.md` / `docs/adr/` as it goes. After it, only the outcome is written; the owner runs the next commands |
-| 2 | **Flow diagram + prototype** | Claude builds, owner reviews | A Mermaid flow diagram, then a clickable prototype in the app's real colours with fake data (through Impeccable, in a project that uses it). Polish here for as long as it takes: a change costs minutes here and days later. With Impeccable, a surface brief is written at approval per new screen family (`.impeccable/surfaces/`). A backend-only phase skips this step |
-| 3 | **Spec and tickets** — `/to-spec`, `/to-tickets` | Owner starts, Claude writes | Tickets follow [`ticket-template.md`](ticket-template.md): each stands alone, names its prototype screen, its decisions and its areas |
+| 2 | **Prototype + flow diagram** | Claude builds, owner reviews | Once per module, before its first frontend phase's tickets: the design rung below. Polish here for as long as it takes: a change costs minutes here and days later. A backend-only phase skips this step |
+| 3 | **Spec and tickets** — `/to-spec`, `/to-tickets` | Owner starts, Claude writes | Tickets follow [`ticket-template.md`](ticket-template.md): each stands alone, names its screen (from its module's flow), its decisions and its areas |
 | 4 | **Readiness check** — `/ticket-check <spec>` | Owner + Claude, one sitting | Claude reads the spec, every ticket and the code, and asks every open question in one batch. Answers are written into the tickets; ready ones get the `run-ready` label |
 | 5 | **The phase run** — `node tools/phase-run/run.mjs --spec <N> --branch phase-<name>` | Claude alone | Builds the `run-ready` tickets in dependency order on the phase branch, a fresh session each. Each is a Claude Code background session, so the owner can watch one (`claude agents`, `claude attach <id>`). See below |
 | 6 | **The morning** | Owner | Reads the report on the pull request, answers parked questions on their issues, checks out the branch and hand-tests. Runs step 5 again for the tickets left |
@@ -97,14 +98,26 @@ knows of an earlier one is in the code, the gotchas block and the ADR it wrote.
 are separate asks (`CLAUDE.md`, Working agreement). Include `Closes #N` in the commit message.
 `/clear` between tickets.
 
-## Design lead-time: check before a ticket with a screen
+## The design rung (a project with screens)
 
-A new screen family needs its flow diagram and, for a screen-heavy phase, its approved prototype
-before any ticket builds it (where the project keeps them, `CLAUDE.md` says). Check against the
-ticket's own acceptance criteria, not a note written before the ticket existed: a ticket that needs
-a screen nothing was designed for is a stop-and-flag moment, and `/ticket-check` looks for exactly
-that. After a build the shipped screen is the record (with Impeccable, `DESIGN.md`), and the
-prototype is deleted in the finish ticket.
+Screens are designed before their tickets, in the real app (Impeccable's commands where named;
+without it, the same with Claude).
+
+1. **Phase 0 builds the app shell** (header, navigation, layout, type, colour) with one stand-in
+   page per candidate module, on a first draft of each module's sample data
+   (`design/sample-data/module-N.json`). Also its prototype guard: the prototype folder
+   (doc-config's `PROTOTYPE_DIR`) renders only in development, its layout carries the
+   `brigade:prototype-guard` marker, and a test proves production hides it. Then `DESIGN.md`, from
+   the built shell (Impeccable's documenter, or `docs/_templates/design-system.md`).
+2. **Per module, after its planning grill:** refine its sample data, build its prototype in the
+   prototype folder (`/impeccable shape`, then `live`), approve it, then draw its flow diagram,
+   `design/flows/module-N.md` from `docs/_templates/flow.md`: the **Approved:** line, and a screen
+   brief under each screen. Only then `/to-tickets`.
+3. **`/ticket-check` refuses** a `frontend` ticket while `DESIGN.md` is missing, its module's flow
+   is unapproved, its screen is not one of the flow's, or the screen has no brief.
+4. **Each frontend ticket gets one finish review** against its screen brief and `DESIGN.md` (the
+   prompt file's `## Review`), then one fix batch. **At the module's finish** its prototype folder
+   is deleted and its flow updated to match what shipped ([the design index](../../design/README.md)).
 
 ## `doc-sync`: runs with every change
 

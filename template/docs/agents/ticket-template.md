@@ -44,10 +44,12 @@ The end-to-end behaviour this ticket makes work, from the person's side. Not a l
   ticket (#N), each in one line. "None" when there is none. A session that finds something owed
   writes it into its verdict's `handedForward` too, and the morning report lists it.
 
-## Prototype screen                     <!-- a `frontend` ticket only -->
+## Screen                               <!-- a `frontend` ticket only -->
 
-- The prototype file and the screen or state in it this ticket builds.
-- Its surface brief, in a project that keeps them (with Impeccable, `.impeccable/surfaces/<slug>.md`).
+- Its module's flow, `design/flows/module-N.md`, and the screen it builds: one of the flow's `###`
+  headings, written exactly. Its screen brief is under that heading (with Impeccable, also
+  `.impeccable/surfaces/<slug>.md`).
+- The states of it this ticket builds, if not all of them.
 
 ## Areas
 
@@ -92,5 +94,5 @@ The end-to-end behaviour this ticket makes work, from the person's side. Not a l
   "Assumptions made"; a money rule, privacy, who may see or do something, or a
   hard-to-reverse schema choice parks the ticket with its question.
 - **The finish ticket** (the phase's last, blocked by every other) is built attended, not by the
-  runner: leave `run-ready` off it. It carries the finish review, the phase-end docs and the
-  deletion of the prototype.
+  runner: leave `run-ready` off it. It carries the finish review and the phase-end docs and, in a
+  module's last phase, the deletion of the module's prototype.

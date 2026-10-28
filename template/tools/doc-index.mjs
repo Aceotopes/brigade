@@ -12,6 +12,7 @@
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, posix, relative } from "node:path";
 
+import * as docConfig from "./doc-config.mjs";
 import { DEVLOG, GENERATED, PHASES } from "./doc-config.mjs";
 import { ROOT, bucketFor, devlogEntries, isMain, loadPhases, parseFrontmatter, read, write } from "./doc-lib.mjs";
 
@@ -177,6 +178,40 @@ function discovery({ target, dir }) {
     .join("\n");
 }
 
+/** A flow diagram's screens: each `### ` heading under its `## Screens`. */
+function flowScreens(text) {
+  const lines = text.replace(/\r\n/g, "\n").split("\n");
+  const start = lines.findIndex((line) => /^## Screens\b/.test(line));
+  if (start === -1) return [];
+  const out = [];
+  for (const line of lines.slice(start + 1)) {
+    if (/^## /.test(line)) break;
+    const screen = line.match(/^### (.+?)\s*$/);
+    if (screen) out.push(screen[1]);
+  }
+  return out;
+}
+
+/**
+ * One line per module's flow diagram: its approval (the `**Approved:**` line), its screens, and, where
+ * the project has a prototype folder (doc-config's PROTOTYPE_DIR), whether the module's prototype is
+ * still open or was deleted once built.
+ */
+function design({ target, dir }) {
+  const prototypes = docConfig.PROTOTYPE_DIR ?? null;
+  return markdownFiles(dir)
+    .filter((f) => posix.basename(f) !== "README.md")
+    .map((file) => {
+      const text = read(file);
+      const module = posix.basename(file, ".md");
+      const approved = text.match(/^\*\*Approved:\*\*\s*(\d{4}-\d{2}-\d{2})/m)?.[1];
+      const count = flowScreens(text).length;
+      const prototype = prototypes ? ` · prototype ${existsSync(join(ROOT, prototypes, module)) ? "open" : "deleted"}` : "";
+      return `- [${module}](${link(target, file)}) · ${title(text)} · ${approved ? `approved ${approved}` : "not approved"} · ${count} screen${count === 1 ? "" : "s"}${prototype}`;
+    })
+    .join("\n");
+}
+
 /** The top-level bullets under a `## <heading>` (matched by its start), each joined onto one line. */
 function bulletsUnder(text, heading) {
   const lines = text.split("\n");
@@ -231,6 +266,7 @@ function openItems({ target, register, lists = [] }) {
 export const GENERATORS = {
   "adr-index": adrIndex,
   discovery,
+  design,
   "open-items": openItems,
   "implementation-log": implementationLog,
   "devlog-archive": devlogArchive,

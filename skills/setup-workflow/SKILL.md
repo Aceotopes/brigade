@@ -50,11 +50,19 @@ and the proposed gates, and ask in one batch:
   it must be a shared development database, never production; if named, fill `phaseRun.migrations`
   from `template/docs/guides/phase-run.md`'s "What your config sets";
 - **a browser check** for a frontend: off unless the owner wants it (`phaseRun.browserCheck`);
+- **does it have screens?** (default: yes when `frontend` is not empty; ask on an empty repo). A
+  project with screens gets the design rung (`docs/agents/workflow.md`): the prompt file with its
+  design review (`docs/agents/phase-run-prompt.md`, named by `phaseRun.prompt`) and
+- **its prototype folder**, inside the app, so prototypes run in the real shell: show
+  `prototypeDir` from detect (a route group where the framework has them: `src/app/(prototype)` for
+  Next's app router, `src/routes/(prototype)` for SvelteKit, `pages/prototype` for Nuxt,
+  `src/prototype` for a plain React app). When it is null, ask; "not yet" is a fine answer, set
+  later in `tools/doc-config.mjs`'s `PROTOTYPE_DIR`;
 - merge only: the project's **docs to treat as living** (default: the `.md` files directly under
   `docs/`) and its **code folders** for the path check (default: `topFolders`).
 
 Write the answers to `.git/brigade/answers.json`:
-`{ "mode", "name", "summary", "workflow", "pathRoots"?, "liveDocs"? }`.
+`{ "mode", "name", "summary", "workflow", "frontend"?, "prototypeDir"?, "pathRoots"?, "liveDocs"? }`.
 
 ## 4. Show the plan, then write
 

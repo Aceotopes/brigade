@@ -17,8 +17,9 @@ Argument: the spec's issue number. With none, ask for it.
    `{owner}/{repo}` from the current repo), then each ticket in full, and each ticket's blockers
    (`…/issues/<n>/dependencies/blocked_by`).
 3. For each ticket: the code its **Areas** name, the gotcha blocks and ADRs under **Read first**,
-   and for a `frontend` ticket its prototype screen and its surface brief, where the project keeps
-   them.
+   and for a `frontend` ticket its **Screen**: its module's flow diagram (`design/flows/module-N.md`,
+   or under doc-config's `DESIGN_DIR`), the screen's brief there (with Impeccable, also its surface
+   brief) and `DESIGN.md`.
 4. `docs/agents/ticket-template.md`, the shape each ticket must have.
 
 A phase of a dozen tickets is a lot to hold. Read ticket by ticket and write findings down as you
@@ -35,9 +36,18 @@ go; do not ask anything until every ticket has been read.
 - **A sentence that reads two ways.** An acceptance criterion two sessions would build differently.
 - **A conflict** with an ADR, a rule in `CLAUDE.md`, a gotcha, another ticket, or what the code
   already does.
-- **A UI-changing ticket without the `frontend` label.** Where the project keeps prototypes and
-  surface briefs (an Impeccable project): **a screen the prototype lacks**, or a state of it (empty,
-  error, a long name, the other role), and **a `frontend` ticket with no surface brief**.
+- **A UI-changing ticket without the `frontend` label.**
+- **A `frontend` ticket the design rung has not cleared** (`docs/agents/workflow.md`, "The design
+  rung"). Each of these keeps `run-ready` off it, whatever the owner answers, until it is fixed:
+  - no `DESIGN.md` at the repo root: the visual system comes first (Phase 0);
+  - its module's flow diagram is missing, or its `**Approved:**` line has no date: the prototype
+    is not approved yet;
+  - its **Screen** is not one of the flow's `###` headings, written exactly;
+  - that screen has no brief under its heading (job, states, must not), or, with Impeccable, no
+    surface brief in `.impeccable/surfaces/`.
+
+  Also report a state the brief lists that no ticket builds (empty, error, a long name, the other
+  role).
 - **A wrong edge.** A ticket that needs another's work but is not blocked by it, or is blocked by
   one it does not need; a ticket missing from the spec's sub-issues; a cycle.
 - **A manual step nobody listed** under "Run by hand" (a secret, a script, a real-phone check).
@@ -79,6 +89,7 @@ Add `run-ready` to every ticket with no open question left
 (`gh issue edit <n> --add-label run-ready`). Leave it off:
 
 - a ticket whose question the owner deferred (say so in a comment on the issue);
+- a `frontend` ticket the design rung has not cleared (§2): name what is missing in a comment;
 - the finish ticket, which is built attended.
 
 ## 6. Report

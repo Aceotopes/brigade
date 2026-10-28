@@ -11,7 +11,7 @@ import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 
 import { parseWorkflowConfig } from "../hooks/workflow-config.mjs";
-import { ARCHIVE, STAMP, apply, autoModeLines, compareVersions, detect, plan, update } from "../scripts/setup.mjs";
+import { ARCHIVE, STAMP, apply, autoModeLines, buildPlan, compareVersions, detect, plan, suggestPrototypeDir, update } from "../scripts/setup.mjs";
 import { PLUGIN, repo, write } from "./helpers.mjs";
 
 const read = (dir, rel) => readFileSync(join(dir, rel), "utf8");
@@ -110,6 +110,40 @@ test("the runner's own loader accepts the config setup proposes from a stack", a
   assert.equal(JSON.parse(read(target, ".claude/workflow.json")).stopGate.checks[0].run, "pnpm exec tsc --noEmit");
 });
 
+test("the prototype folder is a route group where the framework has them, and unknown otherwise", () => {
+  const has = (...dirs) => (d) => dirs.includes(d);
+  assert.equal(suggestPrototypeDir({ next: "16" }, has("src/app")), "src/app/(prototype)");
+  assert.equal(suggestPrototypeDir({ next: "16" }, has("app")), "app/(prototype)");
+  assert.equal(suggestPrototypeDir({ next: "16" }, has("pages")), null, "the pages router: the skill asks");
+  assert.equal(suggestPrototypeDir({ "@sveltejs/kit": "2" }, has()), "src/routes/(prototype)");
+  assert.equal(suggestPrototypeDir({ nuxt: "3" }, has()), "pages/prototype");
+  assert.equal(suggestPrototypeDir({ react: "19", vite: "6" }, has()), "src/prototype");
+  assert.equal(suggestPrototypeDir({}, has()), null, "no framework yet: the skill asks");
+});
+
+test("a project with screens gets the design review's prompt file, which the runner can splice; one without does not", async () => {
+  const { dir: front } = existing();
+  const p = runPlan(front, { mode: "merge" });
+  assert.ok(p.actions.some((a) => a.op === "add" && a.path === "docs/agents/phase-run-prompt.md"));
+  apply(front, p);
+  assert.equal(JSON.parse(read(front, ".claude/workflow.json")).phaseRun.prompt, "docs/agents/phase-run-prompt.md");
+  const { loadRunConfig } = await import(pathToFileURL(join(front, "tools/phase-run/config.mjs")).href);
+  assert.equal(loadRunConfig(front).error, null);
+  const headings = [...read(front, "docs/agents/phase-run-prompt.md").matchAll(/^## (.+)$/gm)].map((m) => m[1].trim());
+  assert.deepEqual(headings, ["Read", "Review"]);
+  assert.ok(headings.every((h) => ["Read", "Build", "Browser check", "Review", "Fix"].includes(h)), "the runner refuses any other section");
+  assert.match(read(front, "docs/agents/phase-run-prompt.md"), /impeccable-finish-reviewer[\s\S]*otherwise a general subagent/);
+  // A project that names its own prompt file keeps it.
+  const built = (dir, answers) => buildPlan(dir, detect(dir), { ...ANSWERS, ...answers });
+  const ownDir = existing().dir;
+  const own = built(ownDir, { mode: "merge", workflow: { version: 1, guard: { block: [] }, stopGate: { checks: [] }, phaseRun: { gates: [], prompt: "docs/agents/ours.md" } } });
+  assert.equal(JSON.parse(own.actions.find((a) => a.path === ".claude/workflow.json").text).phaseRun.prompt, "docs/agents/ours.md");
+  const { dir: back } = repo("brigade-backend-");
+  const none = built(back, { mode: "new" });
+  assert.ok(!none.actions.some((a) => a.path === "docs/agents/phase-run-prompt.md"));
+  assert.equal(JSON.parse(none.actions.find((a) => a.path === ".claude/workflow.json").text).phaseRun.prompt, undefined);
+});
+
 test("merge keeps every file the project had, accepts its docs as they stand, and reports same-job docs", () => {
   const { dir, git } = existing();
   const before = Object.fromEntries(["docs/ROADMAP.md", "docs/SESSION_HANDOFF.md", "docs/PROJECT_OVERVIEW.md", "docs/adr/ADR-001.md", "src/app/page.tsx"].map((f) => [f, read(dir, f)]));
@@ -123,7 +157,8 @@ test("merge keeps every file the project had, accepts its docs as they stand, an
   const baseline = JSON.parse(read(dir, "tools/doc-check-baseline.json"));
   assert.ok(baseline.headers.includes("docs/ROADMAP.md") && baseline.headers.includes("docs/adr/ADR-001.md"));
   assert.deepEqual(baseline.missing["docs/PROJECT_OVERVIEW.md"], ["src/gone.ts"]);
-  assert.match(read(dir, "tools/doc-config.mjs"), /PATH_ROOTS = \["docs", "tools", "\.github", "\.claude", "prisma", "src"\]/);
+  assert.match(read(dir, "tools/doc-config.mjs"), /PATH_ROOTS = \["docs", "design", "tools", "\.github", "\.claude", "prisma", "src"\]/);
+  assert.match(read(dir, "tools/doc-config.mjs"), /^export const PROTOTYPE_DIR = "src\/app\/\(prototype\)";/m, "a Next app router: a route group");
   assert.match(JSON.parse(read(dir, "package.json")).scripts["test:docs"], /doc-tools\.test\.mjs/);
   assert.equal(git("branch", "--show-current"), "main");
   // A doc written after the merge still needs its header:

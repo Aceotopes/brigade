@@ -358,3 +358,45 @@ test("a committed discovery doc is never rewritten: a changed line, an edited ad
   assert.match(check().stderr, /01-shop\.md: a discovery doc was deleted/);
   assert.equal(node("doc-check.mjs", "--report").status, 0);
 });
+
+/** The fixture repo with the design rung: a design index and a prototype folder setting. */
+function withDesign() {
+  const made = repo();
+  const config = `${CONFIG.replace(
+    "export const GENERATED = [",
+    'export const GENERATED = [{ name: "design", target: "design/README.md", dir: "design/flows" }, ',
+  )}export const PROTOTYPE_DIR = "app/(prototype)";\n`;
+  writeFileSync(join(made.dir, "tools", "doc-config.mjs"), config);
+  mkdirSync(join(made.dir, "design", "flows"), { recursive: true });
+  writeFileSync(join(made.dir, "design", "README.md"), "# Design\n\n<!-- generated:start design -->\n<!-- generated:end design -->\n");
+  const flow = (approved) =>
+    `# Flow: Module 1, check-in\n\n**Approved:** ${approved}\n\n## Screens\n\n### Member list\n\n- **Job:** find a member.\n\n### Check-in\n\n- **Job:** check one in.\n\n## The flow\n\n### not a screen\n`;
+  writeFileSync(join(made.dir, "design", "flows", "module-1.md"), flow("2026-11-02 by the owner."));
+  writeFileSync(join(made.dir, "design", "flows", "module-2.md"), "# Flow: Module 2, payments\n\n**Approved:** not yet\n");
+  return made;
+}
+
+test("the design index lists each module's flow: its approval, its screens, and whether its prototype is open", () => {
+  const { dir, node } = withDesign();
+  const guard = "export default function Layout({ children }) { return children; } // brigade:prototype-guard\n";
+  mkdirSync(join(dir, "app", "(prototype)", "module-1"), { recursive: true });
+  writeFileSync(join(dir, "app", "(prototype)", "layout.tsx"), guard);
+  assert.equal(node("doc-index.mjs").status, 0);
+  const index = readFileSync(join(dir, "design", "README.md"), "utf8");
+  assert.match(index, /- \[module-1\]\(flows\/module-1\.md\) · Flow: Module 1, check-in · approved 2026-11-02 · 2 screens · prototype open/);
+  assert.match(index, /- \[module-2\]\(flows\/module-2\.md\) · Flow: Module 2, payments · not approved · 0 screens · prototype deleted/);
+  const check = node("doc-check.mjs");
+  assert.equal(check.status, 0, check.stderr);
+});
+
+test("a prototype folder without its guard fails the check; no folder yet passes", () => {
+  const { dir, node } = withDesign();
+  node("doc-index.mjs");
+  assert.equal(node("doc-check.mjs").status, 0, "no prototype folder yet");
+  mkdirSync(join(dir, "app", "(prototype)", "module-1"), { recursive: true });
+  writeFileSync(join(dir, "app", "(prototype)", "layout.tsx"), "export default function Layout({ children }) { return children; }\n");
+  node("doc-index.mjs");
+  assert.match(node("doc-check.mjs").stderr, /app\/\(prototype\)\/: the prototype folder has no guard\. .*"brigade:prototype-guard"/);
+  writeFileSync(join(dir, "app", "(prototype)", "module-1", "page.tsx"), "// brigade:prototype-guard\n");
+  assert.match(node("doc-check.mjs").stderr, /has no guard/, "the guard must sit directly in the folder, not in a module's page");
+});

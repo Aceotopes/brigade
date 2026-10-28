@@ -44,6 +44,27 @@ export const LABELS = [
 ];
 const FRONTEND_DEPS = ["react", "next", "vue", "nuxt", "svelte", "@sveltejs/kit", "solid-js", "astro", "@angular/core"];
 const FRONTEND_DIRS = ["app", "pages", "src/app", "src/pages", "src/components", "components"];
+/** The phase-run prompt file a project with screens starts with (its default design review); `phaseRun.prompt` names it. */
+const PROMPT_FILE = "docs/agents/phase-run-prompt.md";
+/** Scaffold files written only for a project with screens. */
+const FRONTEND_ONLY = [PROMPT_FILE];
+
+/**
+ * Where a framework keeps routes, so the prototype folder sits inside the app and uses the real shell:
+ * a route group where the framework has them. null when the framework is unknown or not chosen yet:
+ * the skill asks.
+ */
+export function suggestPrototypeDir(deps, exists) {
+  if (deps.next) {
+    if (exists("src/app")) return "src/app/(prototype)";
+    if (exists("app")) return "app/(prototype)";
+    return null; // the pages router, or no routes yet
+  }
+  if (deps["@sveltejs/kit"]) return "src/routes/(prototype)";
+  if (deps.nuxt) return "pages/prototype";
+  if (deps.react) return "src/prototype";
+  return null;
+}
 /** Top-level folders that are build output, never cited by a doc. */
 const NOT_CODE = ["node_modules", "dist", "build", "out", "coverage", "target", "vendor", "docs", "tools"];
 /** Existing docs that look like they do a job the workflow has a fixed home for (reported in merge mode, never moved). */
@@ -184,6 +205,7 @@ export function detect(dir) {
     typescript: existsSync(join(dir, "tsconfig.json")) || Boolean(deps.typescript),
     prisma: schema ? { provider: schema.match(/datasource\s+\w+\s*\{[^}]*provider\s*=\s*"([^"]+)"/)?.[1] ?? "unknown" } : null,
     frontend,
+    prototypeDir: suggestPrototypeDir(deps, (d) => existsSync(join(dir, d))),
     docs,
     agentFiles: ["CLAUDE.md", "AGENTS.md", ...GLOSSARY_NAMES].filter((f) => existsSync(join(dir, f))),
     // One folder down (a docs/CLAUDE.md): a project's rules, which Claude reads only on demand.
@@ -228,8 +250,9 @@ export function proposeWorkflow(det, plugin = PLUGIN) {
 }
 
 /** The template's doc-config.mjs, pointed at the project's code folders and (merge) its existing docs. */
-export function docConfigText({ pathRoots = [], liveDocs = [] }, plugin = PLUGIN) {
+export function docConfigText({ pathRoots = [], liveDocs = [], prototypeDir = null }, plugin = PLUGIN) {
   let text = readText(join(plugin, "template", "tools", "doc-config.mjs"));
+  if (prototypeDir) text = text.replace(/^export const PROTOTYPE_DIR = null;(?=\r?$)/m, `export const PROTOTYPE_DIR = ${JSON.stringify(prototypeDir)};`);
   const rootsLine = /^export const PATH_ROOTS = (\[.*\]);$/m;
   const roots = unique([...JSON.parse(text.match(rootsLine)[1]), ...pathRoots]);
   text = text.replace(rootsLine, `export const PATH_ROOTS = ${JSON.stringify(roots).replaceAll('","', '", "')};`);
@@ -326,6 +349,8 @@ function rulesFileAfter(mode, path) {
  *   name, summary, date   for the scaffold (date defaults to today)
  *   workflow  the owner's `.claude/workflow.json` (defaults to proposeWorkflow)
  *   pathRoots, liveDocs   for doc-config.mjs (default: the code folders; in merge, the top-level docs)
+ *   frontend  the project has screens (default: detect found a frontend): the design rung's prompt file
+ *   prototypeDir  doc-config's PROTOTYPE_DIR (default: suggested from the framework; null for none yet)
  */
 export function buildPlan(dir, det, answers, plugin = PLUGIN) {
   const mode = answers.mode;
@@ -337,7 +362,10 @@ export function buildPlan(dir, det, answers, plugin = PLUGIN) {
   if (mode !== "new" && det.git.dirty.length) problems.push(`The working tree has changes; commit or put them away first:\n${det.git.dirty.join("\n")}`);
   if (mode !== "new" && !det.git.head) problems.push("The repo has no commits yet; use new mode.");
 
-  const workflow = answers.workflow ?? proposeWorkflow(det, plugin);
+  const frontend = answers.frontend ?? det.frontend.length > 0;
+  let workflow = answers.workflow ?? proposeWorkflow(det, plugin);
+  // A project with screens gets the design review's prompt file, unless it already names its own.
+  if (frontend && !workflow.phaseRun?.prompt) workflow = { ...workflow, phaseRun: { ...workflow.phaseRun, prompt: PROMPT_FILE } };
   const date = answers.date ?? new Date().toISOString().slice(0, 10);
   const values = {
     NAME: answers.name ?? det.name,
@@ -349,12 +377,15 @@ export function buildPlan(dir, det, answers, plugin = PLUGIN) {
   const docConfig = {
     pathRoots: answers.pathRoots ?? det.topFolders,
     liveDocs: answers.liveDocs ?? (mode === "merge" ? det.docs.filter((d) => /^docs\/[^/]+\.md$/.test(d)) : []),
+    prototypeDir: answers.prototypeDir !== undefined ? answers.prototypeDir : (det.prototypeDir ?? null),
   };
 
   // Every file setup writes, before it looks at what is there.
   const wanted = [
     ...templateFiles(plugin).map((path) => ({ path, kind: "template", text: readText(join(plugin, "template", path)) })),
-    ...scaffoldFiles(plugin).map((path) => ({ path, kind: "scaffold", text: render(readText(join(plugin, "scaffold", path)), values) })),
+    ...scaffoldFiles(plugin)
+      .filter((path) => frontend || !FRONTEND_ONLY.includes(path))
+      .map((path) => ({ path, kind: "scaffold", text: render(readText(join(plugin, "scaffold", path)), values) })),
     { path: ".claude/workflow.json", kind: "config", text: `${JSON.stringify(workflow, null, 2)}\n` },
     { path: ".claude/spec-issues.json", kind: "config", text: readText(join(plugin, "template", ".claude", "spec-issues.json")) },
     { path: "tools/doc-config.mjs", kind: "config", text: docConfigText(docConfig, plugin) },

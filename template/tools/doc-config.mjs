@@ -29,6 +29,19 @@ export const GOTCHAS_FILE = "docs/agents/gotchas/{phase}.md";
  * a dated addendum at its top. Its README is the generated index.
  */
 export const DISCOVERY_DIR = "docs/discovery";
+/**
+ * The design rung (a project with screens): each module's flow diagram, `<DESIGN_DIR>/flows/module-N.md`,
+ * whose `**Approved:**` line records its prototype's approval, and its sample data,
+ * `<SAMPLE_DATA_DIR>/module-N.json`, shared by the prototype, the QA seed and the tests.
+ */
+export const DESIGN_DIR = "design";
+export const SAMPLE_DATA_DIR = "design/sample-data";
+/**
+ * Where the prototypes live, inside the app so they use the real shell: one folder per module under
+ * it. Its top-level guard file carries `brigade:prototype-guard` and hides it from a production build;
+ * doc-check refuses the folder without it. null until the project has one (setup asks).
+ */
+export const PROTOTYPE_DIR = null;
 
 /**
  * Files and folders whose claims are read as current: one folder per question
@@ -60,7 +73,7 @@ export const STATUS_DOCS = /^(CLAUDE\.md|GLOSSARY\.md|docs\/(status|guides|refer
  * are read as paths; anything else in a doc is prose. Add the project's own
  * folders ("src", "test", ...) as its docs start citing them.
  */
-export const PATH_ROOTS = ["docs", "tools", ".github", ".claude"];
+export const PATH_ROOTS = ["docs", "design", "tools", ".github", ".claude"];
 export const PATH_EXTENSIONS = ["md", "html", "tsx", "ts", "mjs", "sql", "yml", "json", "sh", "css"];
 
 /**
@@ -99,6 +112,7 @@ export const GENERATED = [
   { name: "doc-map", target: "docs/README.md", dir: "." },
   { name: "adr-index", target: "docs/adr/README.md", dir: "docs/adr" },
   { name: "discovery", target: `${DISCOVERY_DIR}/README.md`, dir: DISCOVERY_DIR },
+  { name: "design", target: `${DESIGN_DIR}/README.md`, dir: `${DESIGN_DIR}/flows` },
   {
     name: "open-items",
     target: "docs/status/open-items.md",

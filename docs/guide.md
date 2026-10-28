@@ -42,6 +42,25 @@ memory:
 Modules are numbered: Module 1, phases 1A and 1B, branches `phase-1a` and `phase-1b`. A project
 without modules names its phases (`phase-checkout`).
 
+**A project with screens adds the design rung**, so screens are designed before their tickets and
+never invented during a build:
+- **Phase 0** builds the app shell (header, navigation, layout, type, colour) with a stand-in page per
+  candidate module, on a first draft of each module's sample data (`design/sample-data/module-N.json`).
+  `DESIGN.md`, the visual system, is written from what was built.
+- **Each module**, after its planning grill and before its tickets: its prototype is built in the
+  real app on its sample data and approved, then drawn as a flow diagram,
+  `design/flows/module-N.md`, whose **Approved:** line records the approval and which holds a
+  screen brief (job, states, must not) for each screen.
+- **`/ticket-check` refuses** a frontend ticket until `DESIGN.md` exists, its module's flow is
+  approved, and its screen is in the flow with a brief. Every frontend ticket then gets one finish
+  review against its brief.
+- **Prototypes never ship.** They live in one folder inside the app that renders only in
+  development; doc-check refuses that folder without its guard, and the project's own test proves
+  a production build hides it. A module's prototype is deleted once its screens are built.
+
+Impeccable, when installed, does the design work with its own commands (`shape`, `live`, its finish
+reviewer and documenter). Without it, Claude does the same steps.
+
 **Discovery docs are records.** Once committed, doc-check refuses a commit that changes one. A later
 fact, or a correction, is a dated addendum under the title, newest first:
 
@@ -72,7 +91,8 @@ The order, from an empty folder to the first phase:
    first test, on branch `phase-0`, merged through its pull request. The runner can't build it,
    because there are no gates to run yet. Afterwards, add its checks to `.claude/workflow.json`:
    ask Claude to run the plugin's `scripts/setup.mjs propose .` and copy in the gates and stop
-   checks it suggests.
+   checks it suggests. A project with screens also builds its app shell, stand-in pages, sample
+   data drafts and prototype guard in Phase 0, and ends it with `DESIGN.md` (the design rung above).
 8. **Every phase after that** follows section 5's path.
 
 Setup first and discovery afterwards also works: discovery docs added later are indexed the same way.
@@ -127,7 +147,7 @@ what it needs, and gets your yes before anything is written.
 | Kind | Files | Who owns them afterwards |
 |---|---|---|
 | **Template** | `tools/doc-*.mjs`, `tools/phase-run/`, `docs/_templates/`, `docs/agents/workflow.md`, `docs/agents/ticket-template.md`, `docs/guides/phase-run.md`, `.github/workflows/doc-check.yml` | The plugin. `/update-workflow` re-copies them. Don't edit them: anything about your project belongs in config |
-| **Scaffold** | `CLAUDE.md`, the devlog with entry #1, the roadmap, the handoff, the issue-tracker page, the generated indexes' heads | You. Written once; an update only tells you when the plugin's starting copy changed |
+| **Scaffold** | `CLAUDE.md`, the devlog with entry #1, the roadmap, the handoff, the issue-tracker page, the generated indexes' heads (docs, discovery, design), and for a project with screens the phase-run prompt file with its design review | You. Written once; an update only tells you when the plugin's starting copy changed |
 | **Config** | `.claude/workflow.json`, `.claude/spec-issues.json`, `tools/doc-config.mjs`, `tools/doc-check-baseline.json`, `.github/workflows/checks.yml` | You. Written once from your stack; never overwritten (a version that changes a format ships a migration) |
 | **Stamp** | `.claude/workflow-version.json` | Setup and update. The plugin version, the mode, and a hash of every template file as copied |
 
@@ -218,7 +238,7 @@ a typo stops the run at preflight instead of quietly turning a rule off.
 | File | What it holds |
 |---|---|
 | `.claude/spec-issues.json` | The spec issue numbers. The guard refuses a closing keyword before one, because you close specs by hand. `/ticket-check` adds to it |
-| `tools/doc-config.mjs` | Where your docs are, for doc-check and the indexes. The settings you are likely to change: `LIVE_DOCS` (the docs the checks read), `PATH_ROOTS` (the folders a cited path may be in; add `src` and the like as your docs cite them), `GOTCHAS_FILE` (flat by default; a project grouping phases into modules names the module folder) |
+| `tools/doc-config.mjs` | Where your docs are, for doc-check and the indexes. The settings you are likely to change: `LIVE_DOCS` (the docs the checks read), `PATH_ROOTS` (the folders a cited path may be in; add `src` and the like as your docs cite them), `GOTCHAS_FILE` (flat by default; a project grouping phases into modules names the module folder), `DISCOVERY_DIR`, and the design rung's `DESIGN_DIR`, `SAMPLE_DATA_DIR` and `PROTOTYPE_DIR` (set by setup from your framework, or `null` until you have one) |
 | `tools/doc-check-baseline.json` | Hits doc-check accepts: lines that quote a stale phrase on purpose, and, after a merge setup, docs still without a header |
 | `.github/workflows/checks.yml` | Your stop-gate checks on every push and pull request, so a green pull request means your own tests ran, not only the docs. Edit it when your checks change |
 

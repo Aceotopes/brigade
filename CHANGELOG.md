@@ -5,8 +5,30 @@ template. Newest first. A version that changes a config file's format says so, a
 migration in `scripts/migrations.mjs`.
 
 ## 0.3.0 — unreleased
-Built so far: phase A, the ladder (planning above a phase). The decisions are in
-`docs/discovery/01-brigade-0.3.0.md`.
+Built so far: phase A, the ladder (planning above a phase), and phase D, the design rung (screens
+designed before their tickets). The decisions are in `docs/discovery/01-brigade-0.3.0.md`.
+
+Phase D:
+- `tools/doc-config.mjs` gains `DESIGN_DIR` (`design`), `SAMPLE_DATA_DIR` (`design/sample-data`) and
+  `PROTOTYPE_DIR` (a folder inside the app, or null), all optional; `design` joins `PATH_ROOTS`.
+- New templates: `docs/_templates/flow.md`, a module's flow diagram (its `**Approved:**` line, a
+  screen brief under each screen, the diagram), and `docs/_templates/design-system.md`, a plain
+  `DESIGN.md` for a project without Impeccable.
+- A generated design index, `design/README.md`: each module's approval, its screens, and whether
+  its prototype is still open.
+- doc-check refuses a prototype folder without its guard (a file directly in it carrying
+  `brigade:prototype-guard`).
+- `/ticket-check` keeps `run-ready` off a frontend ticket while `DESIGN.md` is missing, its module's
+  flow is unapproved, its screen is not in the flow, or the screen has no brief.
+- Setup proposes `PROTOTYPE_DIR` from the framework (a route group where it has them) and asks
+  otherwise. A project with screens gets `docs/agents/phase-run-prompt.md` with a default design
+  review (Impeccable's finish reviewer when installed, a fresh subagent otherwise), named by
+  `phaseRun.prompt`.
+- `workflow.md`'s "The design rung" replaces "Design lead-time", and the ticket template's
+  "Prototype screen" becomes "Screen", naming one of its flow's screens. `workflow.md`'s budget is
+  140 lines (was 130).
+
+Phase A:
 - The glossary is `GLOSSARY.md`, the name `/grill-with-docs` writes, in place of `CONTEXT.md`. A test
   keeps the old name out of the generic files. Setup detects both: overwrite archives an old one and
   offers its terms, and merge reports a `CONTEXT.md` beside the new name.

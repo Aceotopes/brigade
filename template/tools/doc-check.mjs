@@ -3,7 +3,7 @@
 // network, a second or two.
 //
 //   node tools/doc-check.mjs                    stale phrases, missing paths, headers and budgets, stale indexes,
-//                                               a rewritten discovery doc
+//                                               a rewritten discovery doc, an unguarded prototype folder
 //   node tools/doc-check.mjs --head             + the devlog's top entry matches HEAD's commit
 //   node tools/doc-check.mjs --message-file F   + the devlog's top entry matches a commit about to be made
 //   node tools/doc-check.mjs --message TEXT     the same, for a message given inline
@@ -50,6 +50,9 @@ import { ROOT, budgetProblems, citedDevlogNumbers, devlogEntries, git, isMain, p
 const BASELINE_PATH = join(ROOT, "tools", "doc-check-baseline.json");
 /** Optional, since 0.3.0: a config written before then has no DISCOVERY_DIR and gets the default. */
 const DISCOVERY_DIR = docConfig.DISCOVERY_DIR ?? "docs/discovery";
+/** Optional, since 0.3.0: where the prototypes live, or null for a project with none yet. */
+const PROTOTYPE_DIR = docConfig.PROTOTYPE_DIR ?? null;
+const PROTOTYPE_GUARD = "brigade:prototype-guard";
 
 const STALE_PHRASES = [
   "not yet committed",
@@ -277,6 +280,23 @@ function discoveryRewrites(base) {
   return problems;
 }
 
+/**
+ * The prototype folder, when it exists, must hold its guard: a file directly in it carrying the
+ * `brigade:prototype-guard` marker, the code that hides every prototype screen from a production
+ * build. The project's own test proves the guard works; this proves nobody removed it.
+ */
+function prototypeGuardProblems() {
+  if (!PROTOTYPE_DIR || !existsSync(join(ROOT, PROTOTYPE_DIR))) return [];
+  const guarded = readdirSync(join(ROOT, PROTOTYPE_DIR)).some((name) => {
+    const path = join(ROOT, PROTOTYPE_DIR, name);
+    return statSync(path).isFile() && readFileSync(path, "utf8").includes(PROTOTYPE_GUARD);
+  });
+  if (guarded) return [];
+  return [
+    `${PROTOTYPE_DIR}/: the prototype folder has no guard. A file directly in it (its layout) must hide every prototype screen from a production build and carry the marker "${PROTOTYPE_GUARD}" in a comment.`,
+  ];
+}
+
 /** Each budgeted doc's size against its limit, fullest first: the warning before a commit is refused. */
 function healthReport() {
   const rows = [];
@@ -417,6 +437,7 @@ function main() {
   failures.push(...headerProblems(new Set(baseline.headers)));
   failures.push(...staleIndexes());
   failures.push(...discoveryRewrites(flag("--head") ? "HEAD~1" : "HEAD"));
+  failures.push(...prototypeGuardProblems());
 
   const raises = budgetRaises(flag("--head") ? "HEAD~1" : "HEAD");
   if (process.env.PHASE_RUN === "1") {

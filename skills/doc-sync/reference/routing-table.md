@@ -32,6 +32,8 @@ the finish ticket, whatever a row below says.
 | `docs/history/*` archives and snapshots | Never: frozen records. |
 | `docs/research/*.md` | New research only; a re-check is a new dated file. |
 | `docs/discovery/NN-*.md` (doc-config's `DISCOVERY_DIR`) | A new one: discovery rounds finished (from `docs/_templates/discovery.md`, the next number). An existing one: **never rewritten** (doc-check refuses it). When a later fact changes what it says, or a mistake is found, add a dated addendum under its title, newest first: the fact, **Changes:**, **Open:**. The index is generated. |
+| `design/flows/module-N.md` (doc-config's `DESIGN_DIR`) | Written once its module's prototype is approved (from `docs/_templates/flow.md`, the **Approved:** line dated). A ticket that changes a screen's job or states updates its screen brief there. At the module's last phase, updated to match what shipped. The design index is generated. |
+| `design/sample-data/module-N.json` (`SAMPLE_DATA_DIR`) | Drafted in Phase 0, refined at the module's grill. A ticket that needs a new case (a state, a role) adds it here, so the prototype, the QA seed and the tests keep seeing the same data. |
 | `docs/guides/module-N.md`, its **Sources:** line | The module's planning grill writes it: the discovery docs and sections the module came from. A later grill in the module that reads another doc adds it. |
 | `docs/_templates/*.md` | A doc kind's shape changes. Keep `SKILL.md` §1/§3 in step. |
 
@@ -51,7 +53,7 @@ the finish ticket, whatever a row below says.
 
 | File | Touch it when… |
 |---|---|
-| `DESIGN.md` + `.impeccable/design.json` | Per ticket: a short entry for a new reusable component or a changed rule. Phase end: the `impeccable-documenter`'s full pass. Refresh the sidecar with it. A new colour role or cap needs an ADR first. |
+| `DESIGN.md` (+ `.impeccable/design.json` with Impeccable) | Written at Phase 0's finish from the built shell, never before (without Impeccable, from `docs/_templates/design-system.md`). Per ticket: a short entry for a new reusable component or a changed rule. Phase end: brought up to date (with Impeccable, the `impeccable-documenter`'s full pass, the sidecar refreshed with it). A new colour role or cap needs an ADR first. |
 | `PRODUCT.md` | A product-level fact changes. Through `/impeccable init`; keep its `<!-- impeccable:product-schema N -->` marker. |
 | `.impeccable/surfaces/*.md` | A screen family is reshaped past its brief (write the next version), or a target file moves (repath its frontmatter). |
 | `.impeccable/critique/*.md` | Never: point-in-time snapshots. |

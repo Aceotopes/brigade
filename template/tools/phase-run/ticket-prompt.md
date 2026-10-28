@@ -21,12 +21,13 @@ left you is in the code, the gotchas file and the ADRs.
 
 1. `gh issue view {{N}} --json title,body,comments --jq '.title, .body, (.comments[].body)'`, in
    full (a plain `gh issue view` prints nothing in these shells): acceptance criteria, **Not in this
-   ticket**, **Decisions already made**, **Handed forward**, **Areas**, the prototype screen, the
+   ticket**, **Decisions already made**, **Handed forward**, **Areas**, the **Screen**, the
    gotcha blocks it names. If an earlier ticket's implementation log or this ticket's "Handed
    forward" says something is owed to this ticket, it is part of this ticket.
 2. What the ticket names, and only that: the gotcha blocks (`docs/agents/gotchas/README.md` indexes
    every phase's file; read the blocks named by the ticket and any whose files you will touch), the
-   ADRs, and for a `frontend` ticket its prototype screen.
+   ADRs, and for a `frontend` ticket its screen: the prototype of it, and its screen brief in its
+   module's flow diagram (`design/flows/module-N.md`), with `DESIGN.md`.
 3. The code you will change.
 
 {{PROJECT_READ}}
