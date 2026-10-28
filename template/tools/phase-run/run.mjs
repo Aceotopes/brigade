@@ -1087,8 +1087,10 @@ async function runSession(call) {
     const sessionId = result.json?.session_id ?? attempt.sessionId;
     const done = (extra = {}) => ({ ...result, sessionId, cutOffs, ...extra });
     if (result.timedOut) return done();
-    // An untrusted folder refuses every session: stop the run, not this ticket's fix rounds.
-    if (UNTRUSTED.test(`${result.raw ?? ""} ${result.json?.result ?? ""}`)) return done({ gaveUp: TRUST_HELP });
+    // An untrusted folder refuses every session: stop the run, not this ticket's fix rounds. Only a call
+    // that never reached a session (no result, Claude Code's own error) counts: a session's own words
+    // may quote the phrase (from a log it read) without anything being wrong.
+    if (!result.json && UNTRUSTED.test(result.raw ?? "")) return done({ gaveUp: TRUST_HELP });
 
     const limited =
       (result.json?.is_error && LIMIT_PATTERN.test(String(result.json.result ?? ""))) ||

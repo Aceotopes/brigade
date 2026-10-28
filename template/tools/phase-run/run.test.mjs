@@ -48,6 +48,13 @@ test("an untrusted folder stops the run at once: no fix rounds, and the ticket i
   assert.match(result.gaveUp, /does not trust this folder yet[\s\S]*run `claude` once, accept the trust prompt/);
 });
 
+test("a session that merely quotes the trust error (from a log it read) is not stopped", async () => {
+  const quoting = turn('Done: committed #3. The earlier attempt failed with "Workspace not trusted" in run.log; this run is the retry.');
+  const result = await runSession(call(async () => quoting));
+  assert.equal(result.gaveUp, undefined);
+  assert.match(result.json.result, /committed #3/);
+});
+
 test("preflight reads Claude Code's own trust record for the folder", () => {
   const state = { projects: { "D:/HGP/app": { hasTrustDialogAccepted: true }, "D:/HGP/new": { hasTrustDialogAccepted: false } } };
   assert.equal(folderTrusted(state, "D:\\HGP\\app"), true, "the record uses forward slashes; the path may not");
