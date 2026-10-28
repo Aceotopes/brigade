@@ -1,15 +1,24 @@
-// Every relative link in Brigade's own docs (README.md, docs/) points at a file that exists, so a
+// Every relative link in Brigade's own docs (README.md, GLOSSARY.md, docs/ at any depth) points at a file that exists, so a
 // section moved between them cannot leave a dead link behind.
 //
 // Run: node --test tests/*.test.mjs
 import assert from "node:assert/strict";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 
 import { PLUGIN } from "./helpers.mjs";
 
-const DOCS = ["README.md", ...readdirSync(join(PLUGIN, "docs")).filter((name) => name.endsWith(".md")).map((name) => `docs/${name}`)];
+/** Every .md under a folder of the plugin, at any depth. */
+function markdown(rel) {
+  return readdirSync(join(PLUGIN, rel)).flatMap((name) => {
+    const path = `${rel}/${name}`;
+    if (statSync(join(PLUGIN, path)).isDirectory()) return markdown(path);
+    return name.endsWith(".md") ? [path] : [];
+  });
+}
+
+const DOCS = ["README.md", "GLOSSARY.md", ...markdown("docs")];
 
 /** The relative link targets in a Markdown file, code blocks and spans left out. */
 function links(text) {

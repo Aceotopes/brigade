@@ -50,7 +50,7 @@ test("no file outside the pending list names one project", () => {
 
 // Brigade's own docs are for any reader, so they name no project either. They name the plugin's own
 // repo (the install command), so its owner is not banned here.
-const PUBLIC_DOCS = ["README.md", "CHANGELOG.md", "docs"];
+const PUBLIC_DOCS = ["README.md", "CHANGELOG.md", "GLOSSARY.md", "docs"];
 const OWNER = /aceotopes/i.source;
 
 test("the plugin's own docs name no one project", () => {

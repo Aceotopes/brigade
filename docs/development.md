@@ -79,6 +79,14 @@ these steps:
      existing-repo modes.
    - The trials' fixes are 0.2.1 and 0.2.2 in the [CHANGELOG](../CHANGELOG.md).
 
+## Next: 0.3.0 (decided, not built)
+
+Planning above a phase (discovery and modules), the design rung for frontends, a project's stack
+read from discovery, and a roadmap page. The decisions are in the
+[0.3.0 discovery doc](discovery/0.3.0.md), the terms in the [glossary](../GLOSSARY.md), and the two
+lasting choices in [ADR 0001](adr/0001-no-stack-recipes.md) and
+[ADR 0002](adr/0002-roadmap-repo-is-truth.md).
+
 ## Changing the workflow
 
 1. **Is the change for every project, or one?** One project's need goes in that project's config.
