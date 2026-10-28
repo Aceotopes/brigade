@@ -11,9 +11,18 @@ A written record of a product's goals, problems, users, requirements and stack, 
 rounds. Never rewritten: later facts are added as dated addenda.
 _Avoid_: brief, PRD
 
+**Addendum**:
+A dated note at the top of a discovery doc that records a later fact and what it changes. The
+original text below it is never edited.
+_Avoid_: update, revision
+
+**Candidate module**:
+A module a discovery doc proposes. It may later be merged, split or dropped, and becomes a module
+only when its planning grill puts it on the roadmap.
+
 **Module**:
-One area of a product with its own vocabulary and data, built over several phases. Optional for a
-small project.
+One area of a product with its own vocabulary and data, built over several phases, with its row on
+the roadmap. Optional for a small project.
 _Avoid_: epic, feature area
 
 **Phase**:
