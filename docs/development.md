@@ -8,9 +8,9 @@ release a change. Using Brigade in a project is the [guide](guide.md).
 | Folder | What | Where it runs |
 |---|---|---|
 | `.claude-plugin/` | `plugin.json` (the plugin) and `marketplace.json` (so `claude plugin marketplace add` can install it from this repo) | — |
-| `skills/` | `doc-sync`, `ticket-check`, `setup-workflow`, `update-workflow` | From the plugin, in every project |
+| `skills/` | `doc-sync`, `ticket-check`, `setup-workflow`, `update-workflow`, `roadmap` (with `page.html`, the roadmap page's template) | From the plugin, in every project |
 | `hooks/` | `guard-shell.mjs` (PreToolUse) and `stop-gate.mjs` (Stop), wired by `hooks.json`. Both read the project's `.claude/workflow.json` through `workflow-config.mjs` | From the plugin, in every project |
-| `scripts/` | `setup.mjs`, the file work behind the two setup skills (detect, propose, plan, apply, verify, update, automode, labels); `migrations.mjs`, each version's config format changes | From the plugin, run by those skills |
+| `scripts/` | `setup.mjs`, the file work behind the two setup skills (detect, propose, plan, apply, verify, update, refresh, docker, automode, labels); `roadmap.mjs`, the roadmap's GitHub check and its page; `migrations.mjs`, each version's config format changes | From the plugin, run by those skills |
 | `template/` | Files a project keeps **in its own repo**, because CI and `node` run them there: the doc tools, the phase runner, `docs/_templates`, the workflow docs, the doc-check CI job, and blank starting copies of the config | Copied in by `/setup-workflow`, re-copied by `/update-workflow` |
 | `scaffold/` | Files setup writes **once**, which the project then owns: the `CLAUDE.md` skeleton, the devlog with entry #1, the roadmap, the handoff, the issue-tracker page, the generated indexes' heads | Rendered by `/setup-workflow` |
 | `examples/` | A worked example of one real project's config: its `workflow.json` with a full `phaseRun`, its doc-sync rows and its session prose | Never copied; read for reference |
@@ -39,7 +39,8 @@ node --test tools/phase-run/run.test.mjs
 | `tests/env-contract.test.mjs` | The phase-run environment variables, the same in the hooks, doc-check and the runner |
 | `tests/phase-run-config.test.mjs` | The runner's config loader, and that the example holds what the runner once hardcoded |
 | `tests/template.test.mjs` | The template, with the scaffold, passes doc-check on day one |
-| `tests/setup.test.mjs` | Setup in each mode, update, automode, on fixture repos |
+| `tests/setup.test.mjs` | Setup in each mode, the stack, refresh, update, automode, on fixture repos |
+| `tests/roadmap.test.mjs` | `/roadmap`'s script against a stubbed `gh`: the status changes, the rewrite, the page's data and the filled page |
 | `tests/no-project-specifics.test.mjs` | No project's name in the generic half (`skills`, `hooks`, `template`, `scaffold`, `scripts`) or in these docs |
 | `tests/unbound-calls.test.mjs` | No call to a name nothing defines or imports (the 0.2.1 crash) |
 | `tests/docs-links.test.mjs` | Every relative link in `README.md` and `docs/` resolves |

@@ -53,13 +53,16 @@ status into the roadmap, and only when a phase's state changes. New docs start f
   drawn from its implementation logs (expect two to four), numbered on from the last chapter.
 - The module's owner guide (`docs/guides/module-N.md`): the phases table's "What it gives you", traps,
   how-tos, owner-held items. Present tense; no build history.
-- `docs/status/roadmap.md`: the phase's line, and the next phase's.
+- `docs/status/roadmap.md` and the roadmap page: run the `roadmap` skill (`/roadmap`). It proposes
+  the phase's row (and its module's) from GitHub, writes them on the owner's yes, and redraws the
+  page. Run it after the merge too, when the phase's pull request has merged.
 - `docs/status/handoff.md`: where things stand and the next step. Overwrite, don't append (≤120 lines).
 - In a project with screens: `DESIGN.md` brought up to date (with Impeccable, its full
   re-documentation and sidecar by the `impeccable-documenter`), and, when this phase is its
   module's last, the module's prototype folder deleted (under doc-config's `PROTOTYPE_DIR`) and its
   flow diagram updated to match what shipped (`node tools/doc-index.mjs` then shows it deleted).
-- Every Artifact page the project mirrors: `reference/artifact-mirrors.md`.
+- Every other Artifact page the project mirrors: `reference/artifact-mirrors.md` (the roadmap page is
+  `/roadmap`'s, drawn from its template; never hand-built).
 - A pass over the phase's gotcha blocks: retire the ones that no longer bite, collapse the ones a test
   now enforces to "pinned: …". Then close the finished phase's files: its gotchas file and its handbook
   file get `growth: closed` and `max-lines` set to their size, so they can only shrink.

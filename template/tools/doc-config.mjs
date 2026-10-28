@@ -42,6 +42,8 @@ export const SAMPLE_DATA_DIR = "design/sample-data";
  * doc-check refuses the folder without it. null until the project has one (setup asks).
  */
 export const PROTOTYPE_DIR = null;
+/** The roadmap: modules and phases in fixed tables (tools/roadmap-format.mjs), drawn as a page by /roadmap. */
+export const ROADMAP = "docs/status/roadmap.md";
 
 /**
  * Files and folders whose claims are read as current: one folder per question

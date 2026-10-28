@@ -1,5 +1,47 @@
 # Discovery: Brigade 0.3.0, from discovery to a merged first phase
 
+> **Addendum 2026-10-28:** Phase C (the roadmap) was grilled, and its details are decided, not
+> built:
+> 1. **Two tables in `roadmap.md`.**
+>    - Modules: `| # | Module | Depends on | Stands |`. `#` is the build order and the module's
+>      number; Depends on lists module numbers.
+>    - Phases: `| Phase | Module | Spec | Branch | Stands |`. A project without modules leaves
+>      Module empty.
+> 2. **Fixed status words.** A module is planned, building, delivered or blocked; a phase is
+>    planned, building, merged or blocked. `blocked: <why>` carries its reason. doc-check refuses
+>    any other word, inside the roadmap's markers only.
+> 3. **What `/roadmap` reads from GitHub.**
+>    - Each phase's pull request, by its branch: none means planned, open building, merged merged.
+>    - Its spec issue: closed confirms it.
+>    - A module whose phases are all merged is proposed as delivered.
+>    - Parked tickets appear on the page as "waiting on you".
+>
+>    Every `roadmap.md` change is a diff the owner approves.
+> 4. **The page** has one card per module in build order: its phases as coloured chips, "waits on"
+>    for its dependencies, the next thing to build highlighted. Phone width first.
+> 5. **Where it lives.** In the plugin: `skills/roadmap/` (the skill and `page.html`) and
+>    `scripts/roadmap.mjs` (the page's data). Only the format check is in the template's doc-check.
+> 6. **The look** is Brigade's own, light and dark following the viewer, with fixed status colours:
+>    planned grey, building amber, merged and delivered green, blocked red.
+> 7. **Sections.**
+>    - Delivered is derived from the Modules table.
+>    - Noted for later is a fixed `## Noted for later` list in `roadmap.md`.
+>    - Up next comes from the handoff.
+>    - How a phase moves comes from `workflow.md`.
+> 8. **Without the Artifact tool,** `roadmap.md` is still updated, and the page is saved to
+>    `.git/brigade/roadmap.html`.
+> 9. **Claude may run `/roadmap` on its own,** for example at a phase's end. A `roadmap.md` change
+>    still needs the owner's yes, but publishing the page does not, since it starts private.
+> 10. **Term.** "Delivered" joins the glossary.
+> 11. **The trial** is run hands-off in `D:\HGP\brigade-trials\fresh`, with a private throwaway
+>     repo, through every rung, including one phase run and `/roadmap`. The owner says the commits
+>     and the merge.
+> 12. **The release** comes only after the trial passes: `plugin.json` 0.3.0, the CHANGELOG dated,
+>     and the README's new parts, with the yarn/bun limit dropped.
+>
+> **Changes:** "The roadmap" below gains these details. Open questions 2 and 3 are settled, and item
+> 9 replaces the earlier default that the owner types `/roadmap`. **Open:** none for phase C.
+
 > **Addendum 2026-10-28:** Phase B (the stack and setup) was grilled, and its details are decided,
 > not built:
 > 1. **Reading the stack table.** `setup.mjs detect` finds the "Requirements and stack" table in

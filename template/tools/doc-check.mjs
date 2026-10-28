@@ -3,7 +3,8 @@
 // network, a second or two.
 //
 //   node tools/doc-check.mjs                    stale phrases, missing paths, headers and budgets, stale indexes,
-//                                               a rewritten discovery doc, an unguarded prototype folder
+//                                               a rewritten discovery doc, an unguarded prototype folder,
+//                                               a roadmap table out of format
 //   node tools/doc-check.mjs --head             + the devlog's top entry matches HEAD's commit
 //   node tools/doc-check.mjs --message-file F   + the devlog's top entry matches a commit about to be made
 //   node tools/doc-check.mjs --message TEXT     the same, for a message given inline
@@ -45,6 +46,7 @@ import {
 } from "./doc-config.mjs";
 import * as docConfig from "./doc-config.mjs";
 import { staleIndexes } from "./doc-index.mjs";
+import { parseRoadmap } from "./roadmap-format.mjs";
 import { ROOT, budgetProblems, citedDevlogNumbers, devlogEntries, git, isMain, parseFrontmatter, read } from "./doc-lib.mjs";
 
 const BASELINE_PATH = join(ROOT, "tools", "doc-check-baseline.json");
@@ -53,6 +55,8 @@ const DISCOVERY_DIR = docConfig.DISCOVERY_DIR ?? "docs/discovery";
 /** Optional, since 0.3.0: where the prototypes live, or null for a project with none yet. */
 const PROTOTYPE_DIR = docConfig.PROTOTYPE_DIR ?? null;
 const PROTOTYPE_GUARD = "brigade:prototype-guard";
+/** Optional, since 0.3.0: the roadmap, whose tables /roadmap reads (tools/roadmap-format.mjs). */
+const ROADMAP = docConfig.ROADMAP ?? "docs/status/roadmap.md";
 
 const STALE_PHRASES = [
   "not yet committed",
@@ -438,6 +442,8 @@ function main() {
   failures.push(...staleIndexes());
   failures.push(...discoveryRewrites(flag("--head") ? "HEAD~1" : "HEAD"));
   failures.push(...prototypeGuardProblems());
+  // The roadmap's tables, once it has them: the format /roadmap and its page read.
+  if (existsSync(join(ROOT, ROADMAP))) failures.push(...parseRoadmap(read(ROADMAP)).problems.map((problem) => `${ROADMAP}:${problem}`));
 
   const raises = budgetRaises(flag("--head") ? "HEAD~1" : "HEAD");
   if (process.env.PHASE_RUN === "1") {

@@ -6,8 +6,24 @@ migration in `scripts/migrations.mjs`.
 
 ## 0.3.0 — unreleased
 Built so far: phase A, the ladder (planning above a phase), phase D, the design rung (screens
-designed before their tickets), and phase B, the stack and setup. The decisions are in
-`docs/discovery/01-brigade-0.3.0.md`.
+designed before their tickets), phase B, the stack and setup, and phase C, the roadmap. The
+decisions are in `docs/discovery/01-brigade-0.3.0.md`.
+
+Phase C:
+- `docs/status/roadmap.md`'s starting copy has two fixed tables between `<!-- brigade:roadmap -->`
+  markers, Modules (`# | Module | Depends on | Stands`) and Phases
+  (`Phase | Module | Spec | Branch | Stands`), and a `## Noted for later` list. Stands is one word:
+  planned, building, delivered or merged, or `blocked: <why>`.
+- `tools/roadmap-format.mjs` reads the format, and doc-check refuses a table out of it (a status
+  word, a module that isn't in the table, a spec or branch in the wrong shape). A roadmap without
+  the markers is not checked. doc-config gains an optional `ROADMAP`.
+- `/roadmap`, a new skill Claude may run itself: it checks the tables against GitHub (each phase's
+  pull request by its branch, its spec, its parked tickets), proposes the status changes as a diff
+  (only forward, never a blocked row), writes them on a yes, and publishes the roadmap page.
+  `scripts/roadmap.mjs` does the work; `skills/roadmap/page.html` is the page's template. Its link
+  is kept in `.claude/workflow.json`'s `roadmap.artifact`. Without the Artifact tool, the page is
+  saved to `.git/brigade/roadmap.html`. An older roadmap is offered a conversion.
+- doc-sync's phase end runs `/roadmap`.
 
 Phase B:
 - `.claude/workflow.json` gains `stack` (fixed keys, any words; an undecided part left out),

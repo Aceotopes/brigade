@@ -49,6 +49,10 @@ The one record of a project's modules in build order, what each depends on, its 
 status.
 _Avoid_: plan, tracker
 
+**Delivered**:
+A module whose every phase is merged.
+_Avoid_: done, shipped
+
 **Roadmap page**:
 The roadmap's visual view, published as an Artifact and never edited by hand.
 _Avoid_: dashboard

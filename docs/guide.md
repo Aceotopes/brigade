@@ -96,6 +96,17 @@ The order, from an empty folder to the first phase:
    data drafts and prototype guard in Phase 0, and ends it with `DESIGN.md` (the design rung above).
 8. **Every phase after that** follows section 5's path.
 
+**Seeing where it stands: `/roadmap`.** `docs/status/roadmap.md` holds two fixed tables: the
+modules in build order (each with what it depends on) and their phases (each with its spec and
+branch), every row's status one word (planned, building, merged or delivered, `blocked: <why>`).
+`/roadmap` checks the tables against GitHub (a phase is building while its pull request is open,
+merged once it merges, and a module is delivered when every phase is), shows the changes as a diff
+for your yes, and publishes the **roadmap page**: one card per module in build order, its phases as
+coloured chips, the next thing to build lit, and what waits on you. The page is drawn from the file
+and never edited by hand; Claude may run `/roadmap` itself at a phase's end. Without the Artifact
+tool, it saves the page to `.git/brigade/roadmap.html` instead. A roadmap from before 0.3.0 is
+offered a conversion to the tables first.
+
 Setup first and discovery afterwards also works: discovery docs added later are indexed the same way.
 
 ## 3. Setting a repo up

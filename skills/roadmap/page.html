@@ -1,0 +1,225 @@
+<title>Roadmap</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@75..100,500..800&family=Public+Sans:wght@400;500;600&family=JetBrains+Mono:wght@500&display=swap">
+<style>
+  /* Layout: a build sheet. Modules stack in build order like tickets on the pass, their phases as
+     status chips, and the one to build next is lit. Status colours are fixed across every project. */
+  :root {
+    --bg: #f4f6f8;
+    --surface: #ffffff;
+    --ink: #18212c;
+    --muted: #586474;
+    --line: #dce1e7;
+    --accent: #2b55c9;
+    --accent-soft: #e6ecfb;
+    --planned: #7d8796;
+    --building: #b77a06;
+    --merged: #2c8049;
+    --blocked: #c03b27;
+    --display: "Archivo", "Arial Narrow", "Helvetica Neue", Arial, sans-serif;
+    --body: "Public Sans", "Segoe UI", system-ui, -apple-system, sans-serif;
+    --mono: "JetBrains Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+    --radius: 10px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0f1318; --surface: #171d25; --ink: #e5e9ef; --muted: #96a1b0; --line: #29323e;
+      --accent: #86a6f5; --accent-soft: #1c2740; --planned: #8691a1; --building: #e2a73b;
+      --merged: #5cbf7d; --blocked: #ef705b; color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0f1318; --surface: #171d25; --ink: #e5e9ef; --muted: #96a1b0; --line: #29323e;
+    --accent: #86a6f5; --accent-soft: #1c2740; --planned: #8691a1; --building: #e2a73b;
+    --merged: #5cbf7d; --blocked: #ef705b; color-scheme: dark;
+  }
+
+  body { background: var(--bg); color: var(--ink); font: 400 15px/1.55 var(--body); }
+  .page {
+    max-width: 880px; margin: 0 auto;
+    padding-block: 28px 48px;
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
+    display: grid; gap: 28px;
+  }
+  h1, h2, h3 { font-family: var(--display); text-wrap: balance; margin: 0; }
+  h1 { font-size: clamp(28px, 6vw, 40px); font-weight: 800; font-stretch: 82%; letter-spacing: -0.01em; line-height: 1.05; }
+  h2 { font-size: 13px; font-weight: 700; font-stretch: 90%; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+  h3 { font-size: 20px; font-weight: 700; font-stretch: 88%; line-height: 1.2; }
+  a { color: var(--accent); text-underline-offset: 2px; }
+  a:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+  .mono { font-family: var(--mono); font-size: 12.5px; font-variant-numeric: tabular-nums; }
+  .muted { color: var(--muted); }
+
+  .mast { display: grid; gap: 10px; }
+  .eyebrow { font-size: 12px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+  .tally { display: flex; flex-wrap: wrap; gap: 6px 18px; color: var(--muted); font-size: 14px; }
+  .tally b { color: var(--ink); font-variant-numeric: tabular-nums; }
+
+  .next { background: var(--accent-soft); border: 1px solid var(--accent); border-radius: var(--radius); padding: 18px 20px; display: grid; gap: 12px; }
+  .next h3 { font-size: 22px; }
+  .next ul { margin: 0; padding-left: 18px; display: grid; gap: 4px; }
+  .next .cols { display: grid; gap: 14px 28px; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+  .next .cols > * { min-width: 0; }
+  .label { font-size: 12px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); margin-bottom: 4px; }
+
+  .rail { display: grid; gap: 12px; }
+  .ticket { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px 18px; display: grid; gap: 12px; min-width: 0; }
+  .ticket.is-next { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  .ticket-head { display: grid; grid-template-columns: auto 1fr auto; gap: 4px 14px; align-items: center; }
+  .num { font-family: var(--display); font-weight: 800; font-stretch: 75%; font-size: 30px; line-height: 1; color: var(--muted); min-width: 1.4ch; font-variant-numeric: tabular-nums; }
+  .ticket.is-next .num { color: var(--accent); }
+  .meta { grid-column: 2 / -1; font-size: 13.5px; color: var(--muted); }
+
+  .pill { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; padding: 3px 10px; border-radius: 999px; border: 1px solid currentColor; white-space: nowrap; }
+  .pill::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+  .s-planned { color: var(--planned); } .s-building { color: var(--building); }
+  .s-merged, .s-delivered { color: var(--merged); } .s-blocked { color: var(--blocked); }
+  .tag-next { font-size: 11px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--accent); }
+
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; }
+  .chip { display: grid; gap: 2px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); min-width: 0; max-width: 100%; }
+  .chip-top { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 14px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; flex: none; }
+  .chip-name { color: var(--ink); overflow-wrap: anywhere; }
+  .ticket-side { display: flex; gap: 10px; align-items: center; }
+  .chip-sub { font-size: 12.5px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 4px 10px; }
+  .chip.is-next { border-color: var(--accent); }
+  .why { font-size: 13px; color: var(--blocked); }
+
+  .pair { display: grid; gap: 16px 28px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+  .pair > section { min-width: 0; display: grid; gap: 8px; align-content: start; }
+  .plain { margin: 0; padding-left: 18px; display: grid; gap: 4px; }
+  .empty { color: var(--muted); font-size: 14px; }
+
+  details.path { border-top: 1px solid var(--line); padding-top: 14px; }
+  details.path summary { cursor: pointer; font-family: var(--display); font-weight: 700; font-stretch: 90%; font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+  .steps { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0 0; padding: 0; list-style: none; }
+  .steps li { font-size: 13px; padding: 4px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); }
+  footer { font-size: 12.5px; color: var(--muted); }
+  @media (prefers-reduced-motion: no-preference) { .ticket { transition: box-shadow 0.2s; } }
+</style>
+
+<main class="page" id="page">
+  <header class="mast">
+    <div class="eyebrow" id="eyebrow">Roadmap</div>
+    <h1 id="project">Roadmap</h1>
+    <div class="tally" id="tally"></div>
+  </header>
+  <section class="next" id="next" aria-labelledby="next-title" hidden></section>
+  <section class="rail" id="rail" aria-label="Modules in build order"></section>
+  <div class="pair">
+    <section aria-labelledby="delivered-title"><h2 id="delivered-title">Delivered</h2><div id="delivered"></div></section>
+    <section aria-labelledby="later-title"><h2 id="later-title">Noted for later</h2><div id="later"></div></section>
+  </div>
+  <details class="path" id="path-box" hidden><summary>How a phase moves</summary><ol class="steps" id="path"></ol></details>
+  <footer>Drawn from <span class="mono">docs/status/roadmap.md</span> by <span class="mono">/roadmap</span>. Change the file, not this page.</footer>
+</main>
+
+<!-- The example below is replaced by /roadmap with the project's own roadmap. -->
+<script id="roadmap-data" type="application/json">{"project":"Example project","example":true,"generated":"2026-10-28","repo":null,"next":{"module":2,"phase":"2A Stock counts"},"modules":[{"number":1,"name":"Accounts","dependsOn":[],"stands":"delivered","reason":null,"phases":[{"phase":"1A Sign-up","spec":12,"specUrl":null,"branch":"phase-1a","stands":"merged","reason":null,"pr":null},{"phase":"1B Roles","spec":18,"specUrl":null,"branch":"phase-1b","stands":"merged","reason":null,"pr":null}]},{"number":2,"name":"Inventory","dependsOn":[1],"stands":"building","reason":null,"phases":[{"phase":"2A Stock counts","spec":24,"specUrl":null,"branch":"phase-2a","stands":"building","reason":null,"pr":null},{"phase":"2B Suppliers","spec":null,"specUrl":null,"branch":null,"stands":"blocked","reason":"waiting on the supplier price list","pr":null}]},{"number":3,"name":"Payroll","dependsOn":[1,2],"stands":"planned","reason":null,"phases":[]}],"loose":[{"phase":"0 Skeleton","spec":3,"specUrl":null,"branch":"phase-0","stands":"merged","reason":null,"pr":null}],"upNext":{"steps":["Finish 2A's tickets tonight, then hand-test stock counts in the morning."],"waiting":["Send the supplier price list (unblocks 2B)."]},"waitingOnYou":[],"notes":["A loyalty card for regulars."],"phasePath":"/grill-with-docs → prototype + flow diagram → /to-spec → /to-tickets → /ticket-check → the phase run → the finish ticket → merge"}</script>
+<script>
+  (function () {
+    var data = {};
+    try { data = JSON.parse(document.getElementById("roadmap-data").textContent); } catch (e) { data = {}; }
+    var $ = function (id) { return document.getElementById(id); };
+    function el(tag, cls, text) {
+      var node = document.createElement(tag);
+      if (cls) node.className = cls;
+      if (text !== undefined && text !== null) node.textContent = String(text);
+      return node;
+    }
+    function link(href, text) {
+      if (!href) return el("span", "mono", text);
+      var a = el("a", "mono", text); a.href = href; a.target = "_blank"; a.rel = "noopener"; return a;
+    }
+    function pill(stands) { return el("span", "pill s-" + stands, stands); }
+    var modules = data.modules || [], loose = data.loose || [];
+    var next = data.next || null;
+    var byNumber = {}; modules.forEach(function (m) { byNumber[m.number] = m; });
+
+    document.title = (data.project || "Roadmap") + " Roadmap";
+    $("project").textContent = data.project || "Roadmap";
+    $("eyebrow").textContent = (data.example ? "Example roadmap" : "Roadmap") + (data.generated ? " · updated " + data.generated : "");
+    var count = function (s) { return modules.filter(function (m) { return m.stands === s; }).length; };
+    [[modules.length, modules.length === 1 ? "module" : "modules"], [count("delivered"), "delivered"], [count("building"), "building"], [count("blocked"), "blocked"]]
+      .filter(function (pair, i) { return i === 0 || pair[0] > 0; })
+      .forEach(function (pair) { var span = el("span"); span.appendChild(el("b", "", pair[0])); span.appendChild(document.createTextNode(" " + pair[1])); $("tally").appendChild(span); });
+
+    // Up next: the next thing to build, the handoff's next step, and what waits on the owner.
+    var box = $("next");
+    var nextModule = next && next.module !== null ? byNumber[next.module] : null;
+    if (next || (data.upNext && (data.upNext.steps.length || data.upNext.waiting.length)) || (data.waitingOnYou || []).length) {
+      box.hidden = false;
+      box.appendChild(el("h2", "", "Up next")).id = "next-title";
+      if (next) box.appendChild(el("h3", "", (nextModule ? "Module " + nextModule.number + ", " + nextModule.name : "") + (nextModule && next.phase ? ": " : "") + (next.phase || (nextModule ? "" : "Plan the first phase"))));
+      var cols = el("div", "cols");
+      function list(title, items) {
+        if (!items || !items.length) return;
+        var part = el("div"); part.appendChild(el("div", "label", title));
+        var ul = el("ul"); items.forEach(function (item) { ul.appendChild(item.nodeType ? item : el("li", "", item)); });
+        part.appendChild(ul); cols.appendChild(part);
+      }
+      list("Next step", data.upNext && data.upNext.steps);
+      list("Waiting on you", (data.upNext ? data.upNext.waiting : []).map(function (w) { return el("li", "", w); }).concat((data.waitingOnYou || []).map(function (t) {
+        var li = el("li"); li.appendChild(link(t.url, "#" + t.number)); li.appendChild(document.createTextNode(" " + t.title + " (" + t.label + ", " + t.phase + ")")); return li;
+      })));
+      if (cols.childNodes.length) box.appendChild(cols);
+    }
+
+    // The rail: phases without a module first (Phase 0), then each module in build order.
+    function chip(p) {
+      var c = el("div", "chip" + (next && next.phase === p.phase ? " is-next" : ""));
+      var top = el("div", "chip-top s-" + p.stands); top.appendChild(el("span", "dot")); top.appendChild(el("span", "chip-name", p.phase));
+      c.appendChild(top);
+      var sub = el("div", "chip-sub"); sub.appendChild(el("span", "", p.stands));
+      if (p.spec) sub.appendChild(link(p.specUrl, "#" + p.spec));
+      if (p.branch) sub.appendChild(el("span", "mono", p.branch));
+      if (p.pr && p.pr.url) sub.appendChild(link(p.pr.url, "PR #" + p.pr.number));
+      c.appendChild(sub);
+      if (p.reason) c.appendChild(el("div", "why", p.reason));
+      return c;
+    }
+    var rail = $("rail");
+    if (loose.length) {
+      var t = el("article", "ticket" + (next && next.module === null ? " is-next" : ""));
+      var head = el("div", "ticket-head"); head.appendChild(el("span", "num", "·")); head.appendChild(el("h3", "", modules.length ? "Before the modules" : "Phases"));
+      t.appendChild(head); var chips = el("div", "chips"); loose.forEach(function (p) { chips.appendChild(chip(p)); }); t.appendChild(chips); rail.appendChild(t);
+    }
+    modules.forEach(function (m) {
+      var isNext = next && next.module === m.number;
+      var t = el("article", "ticket" + (isNext ? " is-next" : ""));
+      var head = el("div", "ticket-head");
+      head.appendChild(el("span", "num", m.number));
+      head.appendChild(el("h3", "", m.name));
+      var right = el("div", "ticket-side");
+      if (isNext) right.appendChild(el("span", "tag-next", "Next"));
+      right.appendChild(pill(m.stands)); head.appendChild(right);
+      var waits = (m.dependsOn || []).filter(function (d) { return byNumber[d] && byNumber[d].stands !== "delivered"; });
+      var after = (m.dependsOn || []).filter(function (d) { return byNumber[d] && byNumber[d].stands === "delivered"; });
+      var meta = [];
+      if (waits.length) meta.push("Waits on " + waits.map(function (d) { return "Module " + d + ", " + byNumber[d].name; }).join(" and "));
+      else if (after.length) meta.push("After " + after.map(function (d) { return byNumber[d].name; }).join(" and ") + " (delivered)");
+      if (m.reason) meta.push("Blocked: " + m.reason);
+      if (!m.phases.length) meta.push("No phases planned yet: its planning grill adds them.");
+      if (meta.length) head.appendChild(el("div", "meta", meta.join(" · ")));
+      t.appendChild(head);
+      if (m.phases.length) { var chips = el("div", "chips"); m.phases.forEach(function (p) { chips.appendChild(chip(p)); }); t.appendChild(chips); }
+      rail.appendChild(t);
+    });
+    if (!modules.length && !loose.length) rail.appendChild(el("p", "empty", "Nothing planned yet. A module's planning grill puts its row and its phases in docs/status/roadmap.md, and this page shows them."));
+
+    var done = modules.filter(function (m) { return m.stands === "delivered"; });
+    if (done.length) { var ul = el("ul", "plain"); done.forEach(function (m) { ul.appendChild(el("li", "", "Module " + m.number + ", " + m.name + " (" + m.phases.length + (m.phases.length === 1 ? " phase)" : " phases)"))); }); $("delivered").appendChild(ul); }
+    else $("delivered").appendChild(el("p", "empty", "No module delivered yet."));
+    if ((data.notes || []).length) { var ul2 = el("ul", "plain"); data.notes.forEach(function (n) { ul2.appendChild(el("li", "", n)); }); $("later").appendChild(ul2); }
+    else $("later").appendChild(el("p", "empty", "Nothing noted yet."));
+
+    if (data.phasePath) {
+      $("path-box").hidden = false;
+      data.phasePath.split(/\s*→\s*/).forEach(function (step) { $("path").appendChild(el("li", "", step)); });
+    }
+  })();
+</script>

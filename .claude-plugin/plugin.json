@@ -11,6 +11,7 @@
     "./skills/doc-sync",
     "./skills/ticket-check",
     "./skills/setup-workflow",
-    "./skills/update-workflow"
+    "./skills/update-workflow",
+    "./skills/roadmap"
   ]
 }

@@ -13,6 +13,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { planRotation } from "./doc-rotate.mjs";
+import { parseRoadmap } from "./roadmap-format.mjs";
 import { bucketFor, budgetProblems, devlogEntries, parseFrontmatter } from "./doc-lib.mjs";
 
 const TOOLS = dirname(fileURLToPath(import.meta.url));
@@ -105,7 +106,7 @@ export const DEVLOG_TAGGED_FROM = 1;
 function repo() {
   const dir = mkdtempSync(join(tmpdir(), "doc-tools-"));
   mkdirSync(join(dir, "tools"));
-  for (const name of ["doc-check.mjs", "doc-index.mjs", "doc-rotate.mjs", "doc-lib.mjs"]) copyFileSync(join(TOOLS, name), join(dir, "tools", name));
+  for (const name of ["doc-check.mjs", "doc-index.mjs", "doc-rotate.mjs", "doc-lib.mjs", "roadmap-format.mjs"]) copyFileSync(join(TOOLS, name), join(dir, "tools", name));
   writeFileSync(join(dir, "tools", "doc-config.mjs"), CONFIG);
   mkdirSync(join(dir, "docs", "devlog"), { recursive: true });
   writeFileSync(join(dir, "docs", "roadmap.md"), "---\njob: Where things stand.\nkind: living\nmax-lines: 20\n---\n# Roadmap\n");
@@ -399,4 +400,77 @@ test("a prototype folder without its guard fails the check; no folder yet passes
   assert.match(node("doc-check.mjs").stderr, /app\/\(prototype\)\/: the prototype folder has no guard\. .*"brigade:prototype-guard"/);
   writeFileSync(join(dir, "app", "(prototype)", "module-1", "page.tsx"), "// brigade:prototype-guard\n");
   assert.match(node("doc-check.mjs").stderr, /has no guard/, "the guard must sit directly in the folder, not in a module's page");
+});
+
+/** A roadmap in the fixed format: two modules, three phases, one idea for later. */
+const ROADMAP = (modules, phases) =>
+  [
+    "---",
+    "job: Where things stand.",
+    "kind: living",
+    "max-lines: 60",
+    "---",
+    "# Roadmap",
+    "",
+    "<!-- brigade:roadmap -->",
+    "## Modules",
+    "",
+    "| # | Module | Depends on | Stands |",
+    "|---|---|---|---|",
+    ...modules,
+    "",
+    "## Phases",
+    "",
+    "| Phase | Module | Spec | Branch | Stands |",
+    "|---|---|---|---|---|",
+    ...phases,
+    "<!-- /brigade:roadmap -->",
+    "",
+    "## Noted for later",
+    "",
+    "- A loyalty card.",
+    "",
+  ].join("\n");
+const GOOD = ROADMAP(
+  ["| 1 | Accounts | — | delivered |", "| 2 | Inventory | 1 | building |"],
+  ["| 0 Skeleton |  | #3 | phase-0 | merged |", "| 1A Sign-up | 1 | #12 | phase-1a | merged |", "| 2A Stock counts | 2 | #20 | phase-2a | blocked: waiting on the supplier list |"],
+);
+
+test("the roadmap's tables read as modules, phases and ideas, with each phase's module, spec and branch", () => {
+  const roadmap = parseRoadmap(GOOD);
+  assert.deepEqual(roadmap.problems, []);
+  assert.deepEqual(roadmap.modules.map((m) => [m.number, m.name, m.dependsOn, m.stands]), [
+    [1, "Accounts", [], "delivered"],
+    [2, "Inventory", [1], "building"],
+  ]);
+  assert.deepEqual(roadmap.phases.map((p) => [p.phase, p.module, p.spec, p.branch, p.stands, p.reason]), [
+    ["0 Skeleton", null, 3, "phase-0", "merged", null],
+    ["1A Sign-up", 1, 12, "phase-1a", "merged", null],
+    ["2A Stock counts", 2, 20, "phase-2a", "blocked", "waiting on the supplier list"],
+  ]);
+  assert.deepEqual(roadmap.notes, ["A loyalty card."]);
+  assert.equal(parseRoadmap("# Roadmap\n\n| Phase | Stands |\n").converted, false, "no markers: an older roadmap");
+});
+
+test("doc-check refuses a roadmap table out of format, and leaves an unconverted roadmap alone", () => {
+  const { dir, node } = repo();
+  mkdirSync(join(dir, "docs", "status"), { recursive: true });
+  const path = join(dir, "docs", "status", "roadmap.md");
+  writeFileSync(path, GOOD);
+  const clean = node("doc-check.mjs");
+  assert.equal(clean.status, 0, clean.stderr);
+  const cases = [
+    [ROADMAP(["| 1 | Accounts | — | done |"], []), /module 1's Stands: "done" is not one of planned, building, delivered, blocked/],
+    [ROADMAP(["| 1 | Accounts | 3 | planned |"], []), /module 1 depends on "3", which is not a module number/],
+    [ROADMAP(["| 1 | Accounts | — | blocked |"], []), /blocked needs its reason/],
+    [ROADMAP(["| 1 | Accounts | — | planned |"], ["| 1A Sign-up | 2 | #12 | phase-1a | planned |"]), /is in module "2", which is not in the Modules table/],
+    [ROADMAP(["| 1 | Accounts | — | planned |"], ["| 1A Sign-up | 1 | 12 | 1a | planned |"]), /Spec is its issue, like #12[\s\S]*Branch must start with phase-/],
+    [GOOD.replace("<!-- /brigade:roadmap -->\n", ""), /has no closing <!-- \/brigade:roadmap -->/],
+  ];
+  for (const [text, error] of cases) {
+    writeFileSync(path, text);
+    assert.match(node("doc-check.mjs").stderr, error);
+  }
+  writeFileSync(path, "---\njob: Where things stand.\nkind: living\nmax-lines: 60\n---\n# Roadmap\n\n| Phase | Stands |\n|---|---|\n| 2 | almost |\n");
+  assert.equal(node("doc-check.mjs").status, 0, "an older roadmap without the markers is not checked");
 });

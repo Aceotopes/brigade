@@ -12,7 +12,7 @@ the finish ticket, whatever a row below says.
 
 | Where | Touch it when… |
 |---|---|
-| `docs/status/roadmap.md` | A phase starts, merges or is blocked, or a module's state changes. One line per item, ≤200 characters, no history. A ticket does not touch it. |
+| `docs/status/roadmap.md` | A phase starts, merges or is blocked, or a module's state changes: its row in the Modules or Phases table, the Stands one fixed word (`blocked: <why>` with its reason); doc-check checks the tables. A module's planning grill adds its rows. An idea worth keeping goes under Noted for later. No history. A ticket does not touch it. `/roadmap` brings it in step with GitHub and redraws the roadmap page. |
 | `docs/status/handoff.md` | Phase end (overwrite). Outside a phase: a session ends with unfinished work, or a listed blocker closed. |
 | `docs/status/noted-for-later.md` | The owner wants an idea remembered but not filed (what / why not filed / full record), or a ticket's command-center check finds a real signal. An entry leaves only when filed as an issue or the owner drops it; its roadmap line goes with it. |
 | `docs/status/open-items.md` | Never by hand: generated from the domain model's unclosed `OPEN-nn` items, the handoff's "Waiting on the owner" and each guide's "Things only you can settle". Settle an item where it lives. |
