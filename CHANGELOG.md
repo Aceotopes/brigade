@@ -25,6 +25,15 @@ Phase C:
   saved to `.git/brigade/roadmap.html`. An older roadmap is offered a conversion.
 - doc-sync's phase end runs `/roadmap`.
 
+From the fresh-project trial:
+- The phase runner refuses a folder Claude Code has not trusted yet, at preflight (it reads Claude
+  Code's own trust record), and a session that still answers "Workspace not trusted" stops the run
+  at once instead of using up the ticket's fix rounds.
+- Every doc Brigade ships starts at 90% of its line budget or less (a test holds it). `workflow.md`
+  was trimmed from 140 lines to 119, and points at the refresh for Phase 0's gates.
+- Setup's checklist and the guide say to point a project's test script at its own tests: a bare
+  `node --test` also runs Brigade's `tools/*.test.mjs`.
+
 Phase B:
 - `.claude/workflow.json` gains `stack` (fixed keys, any words; an undecided part left out),
   `guard.wrappers` and `roadmap`. **The hooks must be 0.3.0 to read it**: an older plugin refuses

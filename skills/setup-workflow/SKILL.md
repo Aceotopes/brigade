@@ -85,6 +85,9 @@ plugin): you write the config each part needs, from the owner's answers and
   bucket or a dummy value.
 - **framework**: the prototype folder (above), and whether the build is a gate.
 - **other**: each service's live keys stay out of sessions the same way (`sessionEnv`).
+- **the test script**: it names the project's own tests (`node --test test/*.test.js`, `vitest run
+  src`), never a bare `node --test`, which also finds Brigade's `tools/*.test.mjs` and runs them in
+  every gate.
 
 Write the answers to `.git/brigade/answers.json`:
 `{ "mode", "name", "summary", "workflow", "frontend"?, "prototypeDir"?, "pathRoots"?, "liveDocs"? }`.

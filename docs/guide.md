@@ -90,9 +90,10 @@ The order, from an empty folder to the first phase:
    and plans phases directly.
 7. **Phase 0, the skeleton**, built with you there: the app, its test runner, lint, typecheck and a
    first test, on branch `phase-0`, merged through its pull request. The runner can't build it,
-   because there are no gates to run yet. Afterwards, add its checks to `.claude/workflow.json`:
-   ask Claude to run the plugin's `scripts/setup.mjs propose .` and copy in the gates and stop
-   checks it suggests. A project with screens also builds its app shell, stand-in pages, sample
+   because there are no gates to run yet. Point the test script at your own tests
+   (`node --test test/*.test.js`): a bare `node --test` also runs Brigade's `tools/*.test.mjs`.
+   Afterwards, run `/setup-workflow` and pick the **refresh**: it adds the gates, the stop checks
+   and `.github/workflows/checks.yml` from your new scripts. A project with screens also builds its app shell, stand-in pages, sample
    data drafts and prototype guard in Phase 0, and ends it with `DESIGN.md` (the design rung above).
 8. **Every phase after that** follows section 5's path.
 

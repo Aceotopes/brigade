@@ -8,7 +8,7 @@ import { cpSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { render, scaffoldFiles } from "../scripts/setup.mjs";
+import { render, scaffoldFiles, templateFiles } from "../scripts/setup.mjs";
 import { PLUGIN, repo, write } from "./helpers.mjs";
 
 /** The scaffold, rendered as /setup-workflow renders it: the files the template's own docs cite. */
@@ -16,6 +16,19 @@ function scaffold() {
   const values = { NAME: "Test", SUMMARY: "A test project.", DATE: "2026-10-27", MODE: "new mode", COMMANDS: "- `node --test`: the tests" };
   return Object.fromEntries(scaffoldFiles().map((rel) => [rel, render(readFileSync(join(PLUGIN, "scaffold", rel), "utf8"), values)]));
 }
+
+test("every doc Brigade ships starts at 90% of its line budget or less, so a new project is not told to trim on day one", () => {
+  const docs = [
+    ...templateFiles().filter((rel) => rel.endsWith(".md")).map((rel) => [rel, readFileSync(join(PLUGIN, "template", rel), "utf8")]),
+    ...Object.entries(scaffold()).filter(([rel]) => rel.endsWith(".md")),
+  ];
+  const full = docs.flatMap(([rel, text]) => {
+    const limit = Number(text.match(/^max-lines:\s*(\d+)\s*$/m)?.[1]);
+    const lines = text.replace(/\n$/, "").split("\n").length;
+    return limit && lines > limit * 0.9 ? [`${rel}: ${lines} of ${limit} lines (${Math.round((lines / limit) * 100)}%)`] : [];
+  });
+  assert.deepEqual(full, []);
+});
 
 test("the whole template, with the scaffold setup writes, passes doc-check on day one", () => {
   const { dir, git } = repo("brigade-template-");

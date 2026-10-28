@@ -44,6 +44,10 @@ const STATE = join(ROOT, ".phase-run");
 const WINDOWS = process.platform === "win32";
 
 const PARK_LABEL = { question: "needs-info", failure: "ready-for-human" };
+/** What Claude Code answers a background session in a folder nobody has trusted yet. */
+const UNTRUSTED = /Workspace not trusted/i;
+const TRUST_HELP =
+  "Claude Code does not trust this folder yet, so it refuses every background session here. Open a terminal in it, run `claude` once, accept the trust prompt, exit, then start the run again.";
 const READY_LABEL = "run-ready";
 
 /** The project's commands, databases and prose: `phaseRun` in .claude/workflow.json (config.mjs). Set by preflight. */
@@ -395,6 +399,27 @@ function holdReason(ticket, byNumber) {
 
 // ---------------------------------------------------------------- preflight
 
+/** Claude Code's own state file (`~/.claude.json`), or null when it cannot be read. */
+function readClaudeState() {
+  try {
+    return JSON.parse(readFileSync(join(homedir(), ".claude.json"), "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether Claude Code has trusted `root` (its trust prompt accepted): true, false, or null when its
+ * state cannot say. A folder only ever touched by scripts was never shown the prompt, and every
+ * background session there is refused.
+ */
+export function folderTrusted(state, root) {
+  if (!state?.projects) return null;
+  const key = (path) => resolve(path).replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+  const entry = Object.entries(state.projects).find(([path]) => key(path) === key(root))?.[1];
+  return entry?.hasTrustDialogAccepted === true;
+}
+
 async function preflight(options) {
   const problems = [];
   // A broken config refuses even a dry run: the hooks skip this section, so this is where a typo shows.
@@ -439,6 +464,7 @@ async function preflight(options) {
   if (!(await online())) problems.push(`No internet connection (could not reach ${NET_HOSTS.join(" and ")}).`);
   if (!exec("gh", ["auth", "status"]).ok) problems.push("GitHub CLI is not signed in (`gh auth login`).");
   if (!exec("claude", ["--version"]).ok) problems.push("`claude` is not on the PATH.");
+  if (folderTrusted(readClaudeState(), ROOT) === false) problems.push(TRUST_HELP);
   else if (!options.print && listSessions() === null) {
     problems.push(
       "Claude Code would not list its background sessions (`claude agents --json` failed). Open `claude agents` once in a second terminal and start again; " +
@@ -1061,6 +1087,8 @@ async function runSession(call) {
     const sessionId = result.json?.session_id ?? attempt.sessionId;
     const done = (extra = {}) => ({ ...result, sessionId, cutOffs, ...extra });
     if (result.timedOut) return done();
+    // An untrusted folder refuses every session: stop the run, not this ticket's fix rounds.
+    if (UNTRUSTED.test(`${result.raw ?? ""} ${result.json?.result ?? ""}`)) return done({ gaveUp: TRUST_HELP });
 
     const limited =
       (result.json?.is_error && LIMIT_PATTERN.test(String(result.json.result ?? ""))) ||

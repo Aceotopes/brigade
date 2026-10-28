@@ -8,7 +8,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { BROWSER_CHECK, fill, loadRunConfig, parseRunConfig, qaUrl, sessionEnv, targetFingerprint, targetUrl } from "./config.mjs";
-import { QUIET_MS, SETTLE_MS, applyMigrations, gotchasFile, holdReason, loadResults, outsideAreas, projectGates, promptValues, pullRequestBody, recordResult, render, report, runSession, screenshotsSince, sessionSettings, turnOver } from "./run.mjs";
+import { QUIET_MS, SETTLE_MS, applyMigrations, folderTrusted, gotchasFile, holdReason, loadResults, outsideAreas, projectGates, promptValues, pullRequestBody, recordResult, render, report, runSession, screenshotsSince, sessionSettings, turnOver } from "./run.mjs";
 
 const options = { minutes: 120, waitHours: 6, print: true, spec: 179 };
 const call = (claude, extra = {}) => ({ options, prompt: "Build it.", sessionId: "s-1", resume: false, claude, online: async () => true, sleep: async () => {}, ...extra });
@@ -38,6 +38,23 @@ test("a connection that keeps dropping stops resuming after three tries", async 
   const result = await runSession(call(async () => (calls += 1, turn("API Error: Connection lost mid-response", true))));
   assert.equal(calls, 4);
   assert.equal(result.cutOffs, 3);
+});
+
+test("an untrusted folder stops the run at once: no fix rounds, and the ticket is not to blame", async () => {
+  let calls = 0;
+  const refused = { timedOut: false, json: null, raw: "Workspace not trusted. Run `claude` in D:\\x once and accept the trust prompt, then retry." };
+  const result = await runSession(call(async () => (calls += 1, refused)));
+  assert.equal(calls, 1);
+  assert.match(result.gaveUp, /does not trust this folder yet[\s\S]*run `claude` once, accept the trust prompt/);
+});
+
+test("preflight reads Claude Code's own trust record for the folder", () => {
+  const state = { projects: { "D:/HGP/app": { hasTrustDialogAccepted: true }, "D:/HGP/new": { hasTrustDialogAccepted: false } } };
+  assert.equal(folderTrusted(state, "D:\\HGP\\app"), true, "the record uses forward slashes; the path may not");
+  assert.equal(folderTrusted(state, "d:/hgp/APP/"), true);
+  assert.equal(folderTrusted(state, "D:/HGP/new"), false);
+  assert.equal(folderTrusted(state, "D:/HGP/never-opened"), false, "a folder Claude Code never opened was never trusted");
+  assert.equal(folderTrusted(null, "D:/HGP/app"), null, "no state to read: unknown, not refused");
 });
 
 test("an ordinary end of turn is returned at once", async () => {
