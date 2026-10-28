@@ -57,16 +57,40 @@ Brigade has three parts:
 
 ## Install
 
+In a Claude Code session, opened in your project:
+
+```
+/plugin install brigade --marketplace Aceotopes/brigade
+```
+
+Claude Code asks you to confirm adding this repo as a marketplace, shows what Brigade installs,
+then asks where to turn it on:
+
+| Choice | Brigade runs in | Recorded in |
+|---|---|---|
+| **For you (user scope)** | Every repo on this machine | `~/.claude/settings.json` |
+| **For all collaborators on this repository (project scope)** | This repo, for anyone who installs it | `.claude/settings.json`: commit it |
+| **For you, in this repo only (local scope)** | This repo, for you only | `.claude/settings.local.json`, not committed |
+
+With user scope, the guard's own rules (no `--no-verify`, no attribution trailer) apply in every
+repo. A repo's own rules, doc-check and the stop gate only act where setup has written Brigade's
+files. Committing project scope turns Brigade on for collaborators, but each one still runs the
+install once on their own machine.
+
+From a shell, or in a script, the same in one line. With nobody there to answer a prompt, it takes
+the scope as a flag (user scope if left out):
+
+```
+claude plugin install brigade --marketplace Aceotopes/brigade --scope project
+```
+
+Both need Claude Code 2.1.292 or later. On an older version, add the marketplace first, then
+install from it by its catalog name, `argee`:
+
 ```
 claude plugin marketplace add Aceotopes/brigade
 claude plugin install brigade@argee --scope project
 ```
-
-The marketplace is named `argee`. `--scope project` turns Brigade on for the repo you run it in,
-recorded in that repo's `.claude/settings.json`, so commit that change. `--scope user` turns it on
-for every repo you open. There, the guard's own rules (no `--no-verify`, no attribution trailer)
-apply in every repo. A repo's own rules, doc-check and the stop gate only act where setup has
-written Brigade's files.
 
 ## Quick start
 
