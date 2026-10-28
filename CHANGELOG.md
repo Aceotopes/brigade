@@ -4,10 +4,15 @@ What changed in each version, for `/update-workflow` to show a project before it
 template. Newest first. A version that changes a config file's format says so, and ships its
 migration in `scripts/migrations.mjs`.
 
-## 0.3.0 — unreleased
-Built so far: phase A, the ladder (planning above a phase), phase D, the design rung (screens
-designed before their tickets), phase B, the stack and setup, and phase C, the roadmap. The
-decisions are in `docs/discovery/01-brigade-0.3.0.md`.
+## 0.3.0 — 2026-10-28
+Planning above a phase (discovery, modules), the design rung for screens, the stack read from
+discovery with a refresh, and `/roadmap` with its page, in four phases (A, D, B, C), proven by a
+fresh-project trial. The decisions are in `docs/discovery/01-brigade-0.3.0.md`.
+
+**Config:** `.claude/workflow.json` gains `stack`, `guard.wrappers` and `roadmap`, which only 0.3.0's
+hooks accept: update the plugin before (or with) `/update-workflow`. `tools/doc-config.mjs` gains
+optional `DISCOVERY_DIR`, `DESIGN_DIR`, `SAMPLE_DATA_DIR`, `PROTOTYPE_DIR` and `ROADMAP`; a copy
+without them gets the defaults, so no migration.
 
 Phase C:
 - `docs/status/roadmap.md`'s starting copy has two fixed tables between `<!-- brigade:roadmap -->`

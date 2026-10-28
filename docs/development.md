@@ -79,14 +79,17 @@ these steps:
    - Proven on throwaway repos: an empty one end to end, and copies of an existing app in both
      existing-repo modes.
    - The trials' fixes are 0.2.1 and 0.2.2 in the [CHANGELOG](../CHANGELOG.md).
-
-## Next: 0.3.0 (decided, not built)
-
-Planning above a phase (discovery and modules), the design rung for frontends, a project's stack
-read from discovery, and a roadmap page. The decisions are in the
-[0.3.0 discovery doc](discovery/01-brigade-0.3.0.md), the terms in the [glossary](../GLOSSARY.md), and the two
-lasting choices in [ADR 0001](adr/0001-no-stack-recipes.md) and
-[ADR 0002](adr/0002-roadmap-repo-is-truth.md).
+9. **0.3.0, the rungs above a phase** (2026-10-28), planned as Brigade's own discovery doc and
+   built in four phases, each grilled first:
+   - A, the ladder: discovery docs, modules, `GLOSSARY.md`;
+   - D, the design rung: Phase 0's shell, sample data, prototypes, screen briefs;
+   - B, the stack and setup: `stack`, `guard.wrappers`, the refresh, the Docker check;
+   - C, `/roadmap` and its page.
+   - Proven by a fresh-project trial through every rung, which found the runner's folder-trust
+     failure and a doc-budget gap; both are fixed with tests.
+   - The decisions are in the [0.3.0 discovery doc](discovery/01-brigade-0.3.0.md), the terms in
+     the [glossary](../GLOSSARY.md), and the two lasting choices in
+     [ADR 0001](adr/0001-no-stack-recipes.md) and [ADR 0002](adr/0002-roadmap-repo-is-truth.md).
 
 ## Changing the workflow
 

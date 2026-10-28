@@ -1,5 +1,17 @@
 # Discovery: Brigade 0.3.0, from discovery to a merged first phase
 
+> **Addendum 2026-10-28:** 0.3.0 is built and released.
+> - **The trial passed** on a fresh project through every rung: discovery, setup from its stack,
+>   Phase 0, a refresh, a planned module, a real phase run, the finish ticket, the merge, and
+>   `/roadmap` publishing the page. The generated `checks.yml` ran green on GitHub CI.
+> - **It found three bugs, all fixed with tests:** the runner in a folder Claude Code had not
+>   trusted; that fix's false alarm on a session quoting the error; and docs shipped at their
+>   budget, so a 90% headroom rule now applies.
+> - **It also showed** that a pushed change reaches installed projects only with a version bump.
+>
+> **Changes:** Goals 1, 2 and 4 are met. Goal 3 (frontends) is built but has not yet run on a real
+> project with screens. **Open:** try the design rung on the first project with screens.
+
 > **Addendum 2026-10-28:** Phase C (the roadmap) was grilled, and its details are decided, not
 > built:
 > 1. **Two tables in `roadmap.md`.**

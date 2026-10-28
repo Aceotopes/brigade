@@ -20,17 +20,24 @@ one with a script, not a reminder in a prompt:
 | A session says "done" while the tests fail | The **`stop-gate`** hook runs the project's checks before a session may stop. The phase runner then runs every gate again itself, trusting no session's word |
 | A ticket built at night stops on a question, and nobody is awake to answer it | **`/ticket-check`** reads the spec, every ticket and the code before the run, and asks you every open question in one sitting |
 | Docs drift from the code, or bloat until nobody reads them | **`doc-check`** fails a commit on stale phrases, paths that no longer exist, missing headers, docs over their line budget, and out-of-date indexes. The **`doc-sync`** skill keeps each doc to one job |
-| Setting all this up by hand in every repo | **`/setup-workflow`** detects the stack and writes everything: new repos and existing ones |
+| Big work gets planned from memory, one feature at a time | **The ladder**: discovery docs for the whole product, modules for each area, phases sized to test in a morning, tickets sized for one session. Each grill names its sources |
+| Frontends get redone, each screen inventing its own look | **The design rung**: the app shell and visual system come first, each module's screens are prototyped in the real app and approved before its tickets, and `/ticket-check` refuses a screen ticket until they are |
+| Setting all this up by hand in every repo | **`/setup-workflow`** reads your discovery doc's stack and your files, and writes everything: new repos and existing ones. Its **refresh** keeps the config in step when the stack changes |
 | A copied workflow goes stale when the plugin improves | **`/update-workflow`** re-copies the plugin's files, using a version stamp to tell your edits from untouched files |
+| Nobody can see where the project stands | **`/roadmap`** checks the roadmap's tables against GitHub and publishes the **roadmap page**: modules in build order, their phases, and what comes next |
 
 ## How it works
 
 ```
-/grill-with-docs → prototype (if there are screens) → /to-spec → /to-tickets → /ticket-check
-      → the phase run (unattended, a night at a time) → the finish ticket → you merge
+discovery → /setup-workflow → Phase 0 (the skeleton) → a module's planning grill → for each phase:
+  /grill-with-docs → prototype + flow (if screens) → /to-spec → /to-tickets → /ticket-check
+      → the phase run (unattended, a night at a time) → the finish ticket → you merge → /roadmap
 ```
 
-A **phase** is one piece of work: a spec issue on GitHub and its tickets. The **phase runner**
+**Discovery docs** (`docs/discovery/`) record what the product is for and its stack, and are never
+rewritten: a later fact is a dated addendum. A **module** is one area of the product, planned by a
+grill that puts its phases on the roadmap. A **phase** is one piece of work: a spec issue on GitHub
+and its tickets. The **phase runner**
 (`tools/phase-run/run.mjs`) builds each `run-ready` ticket in dependency order on a `phase-*`
 branch, in a fresh Claude Code session each. After each session it runs the gates itself, sends a
 failure back for up to three fix rounds, then pushes the branch or parks the ticket with a reason.
@@ -40,7 +47,7 @@ Brigade has three parts:
 
 | Part | What it is | Where it lives |
 |---|---|---|
-| **The plugin** | The two hooks and four skills | Installed into Claude Code; updated with the plugin |
+| **The plugin** | The two hooks, five skills, and the scripts behind setup and `/roadmap` (with the roadmap page's template) | Installed into Claude Code; updated with the plugin |
 | **The template** | The doc tools, the phase runner, the workflow docs and the doc-check CI job | Copied into your repo by setup, because CI and `node` run them there; re-copied by `/update-workflow` |
 | **Your config** | `.claude/workflow.json` (your rules, checks and gates), the doc-check settings, the CI checks | Written once by setup from your stack; yours from then on, and never overwritten |
 
@@ -96,15 +103,21 @@ claude plugin install brigade@argee --scope project
 
 In a Claude Code session opened in your project folder:
 
-1. **`/setup-workflow`**. A new repo is set up directly. For an existing repo it asks whether to
-   **merge** (keep everything, add the workflow beside it) or **overwrite** (start clean on a
-   branch, with old docs archived, not deleted). It shows every file before writing and runs the
-   checks. It never commits: you commit.
-2. **`/grill-with-docs <what the phase is>`**. Answer until Claude has no questions left.
-3. For a phase with screens, ask for the flow diagram and a clickable prototype, and approve it.
-4. **`/to-spec`**, then **`/to-tickets`**. The spec becomes a GitHub issue (say `#12`), and the
-   tickets follow it.
-5. **`/ticket-check 12`**. Answer its batch of questions; ready tickets get the `run-ready` label.
+1. **Discovery** (a new project): save your discovery rounds as `docs/discovery/01-<topic>.md`, with
+   a "Requirements and stack" table (any part may be "undecided").
+2. **`/setup-workflow`**. A new repo (or one holding only discovery docs) is set up directly, from
+   the stack table. For an existing repo it asks whether to **merge** (keep everything, add the
+   workflow beside it) or **overwrite** (start clean on a branch, with old docs archived, not
+   deleted). It shows every file before writing and runs the checks. It never commits: you commit.
+3. **Phase 0**, built with you there: the app's skeleton and its first test (and for an app with
+   screens, its shell and `DESIGN.md`). Then `/setup-workflow` again and pick the **refresh**, which
+   adds its checks as gates and CI.
+4. **A module's planning grill**, then for each phase **`/grill-with-docs <the phase>`**. Answer
+   until Claude has no questions left. A phase with screens gets its prototype and flow diagram
+   approved first.
+5. **`/to-spec`**, then **`/to-tickets`**. The spec becomes a GitHub issue (say `#12`), and the
+   tickets follow it. **`/ticket-check 12`** asks its batch of questions; ready tickets get the
+   `run-ready` label.
 6. In a terminal, on `main`, with everything committed and pushed:
    ```
    node tools/phase-run/run.mjs --spec 12 --branch phase-checkout --dry-run
@@ -117,18 +130,21 @@ In a Claude Code session opened in your project folder:
    and test the branch by hand. Run the same command again the next night for the tickets left.
 8. **Finish:** do the finish ticket in an attended session on the branch, then merge the pull
    request with **Create a merge commit** (never squash), and close the spec issue yourself.
+   **`/roadmap`** then marks the phase merged and redraws the roadmap page.
 
 The full walkthrough, with every option, is in the [guide](docs/guide.md).
 
 ## Commands
 
-**Brigade's slash commands.** You type these; Claude never starts them by itself.
+**Brigade's slash commands.** You type these; only `/roadmap` and `doc-sync` may also be started by
+Claude itself.
 
 | Command | What it does |
 |---|---|
-| `/setup-workflow [--settings <path>]` | Set a repo up: new, merge or overwrite. Detects the stack, proposes the config, shows the plan, writes after a yes, and runs the checks. Also offers the GitHub labels, Impeccable for a frontend, and your auto-mode lines |
+| `/setup-workflow [--settings <path>]` | Set a repo up: new, merge or overwrite. Reads the stack from your discovery doc and your files, proposes the config, shows the plan, writes after a yes, and runs the checks. Also offers the GitHub labels, Impeccable for a frontend, a Docker check, and your auto-mode lines. On a repo already set up, it offers the **refresh** |
 | `/update-workflow` | After a plugin update: shows what changed since your stamp and re-copies the template files you never edited. Never touches your config |
-| `/ticket-check <spec>` | The readiness check before a run: one batch of questions, answers written into the tickets, `run-ready` on each ready one |
+| `/ticket-check <spec>` | The readiness check before a run: one batch of questions, answers written into the tickets, `run-ready` on each ready one. It refuses a screen ticket until its design is approved |
+| `/roadmap` | Checks the roadmap's tables against GitHub (pull requests, specs, parked tickets), shows each status change as a diff for your yes, and publishes the roadmap page |
 | `doc-sync` | Claude uses it by itself after a verified change and before a commit, so each doc keeps telling the truth |
 
 **The phase runner**, `node tools/phase-run/run.mjs`:
@@ -155,7 +171,7 @@ opens one to watch.
 
 | Command | What it does |
 |---|---|
-| `node tools/doc-check.mjs` | Stale phrases, missing paths, headers and line budgets, stale indexes. Runs before every `git commit` |
+| `node tools/doc-check.mjs` | Stale phrases, missing paths, headers and line budgets, stale indexes, a rewritten discovery doc, an unguarded prototype folder, a roadmap table out of format. Runs before every `git commit` |
 | `… --head`, `… --message-file F`, `… --message TEXT` | Also check that the devlog's top entry matches HEAD, or the commit about to be made |
 | `… --report` | Each budgeted doc's size against its limit, fullest first |
 | `… --update-baseline` | Accept today's stale-phrase and missing-path hits (attended sessions only) |
@@ -177,8 +193,10 @@ opens one to watch.
 - no closing an issue or opening a pull request by hand;
 - no printing `.env`.
 
-The stop gate runs your `stopGate.checks` once each time a session tries to stop. It is a guard
-rail on the command text, not a sandbox, so the runner checks the result again.
+A rule holds however the command is wrapped: the guard strips your package manager's wrappers
+(`pnpm exec`, `npx`, `bunx`, `yarn dlx`…, from `guard.wrappers`) before testing it. The stop gate
+runs your `stopGate.checks` once each time a session tries to stop. It is a guard rail on the
+command text, not a sandbox, so the runner checks the result again.
 
 ## Configuration
 
@@ -187,30 +205,37 @@ Your rules live in `.claude/workflow.json`, written by setup from your stack:
 ```json
 {
   "version": 1,
-  "guard": { "block": [{ "when": "always", "command": "prettier .*--write", "message": "Format only the lines you changed." }] },
+  "guard": { "block": [{ "when": "always", "command": "prettier .*--write", "message": "Format only the lines you changed." }], "wrappers": ["pnpm exec", "pnpm dlx", "pnpm", "npx"] },
   "stopGate": { "checks": [{ "label": "Typecheck", "run": "pnpm exec tsc --noEmit" }] },
-  "phaseRun": { "gates": [{ "label": "Tests", "run": "pnpm test" }] }
+  "phaseRun": { "gates": [{ "label": "Tests", "run": "pnpm test" }] },
+  "stack": { "language": "TypeScript", "framework": "Next.js", "packageManager": "pnpm", "database": "Postgres" }
 }
 ```
 
-`phaseRun` also holds what must be running before a run, ports, a QA database, migrations, a
-browser check and the prose each session is given. Every key is described in the
+`stack` is what the project is built with: setup records it, `CLAUDE.md` shows it, and the refresh
+changes it. `phaseRun` also holds what must be running before a run, ports, a QA database,
+migrations, a browser check and the prose each session is given. Every key is described in the
 [guide](docs/guide.md#6-configuring). A typo fails loudly instead of quietly turning a rule off.
 
 ## Status
 
-Version **0.2.2** (see [CHANGELOG.md](CHANGELOG.md)). It has been proven on throwaway repos:
-- an empty repo, end to end: setup, a real overnight run, its pull request, an update, the finish
-  ticket and the merge;
-- a copy of an existing app, in both merge and overwrite mode.
+Version **0.3.0** (see [CHANGELOG.md](CHANGELOG.md)). It has been proven on throwaway repos:
+- **a fresh project, every rung** (0.3.0): a discovery doc with a stack, the one-command install
+  from GitHub, setup reading the stack, Phase 0, a refresh, a planned module, a real unattended
+  phase run, the finish ticket, the merge, and `/roadmap` publishing the page. The generated
+  `checks.yml` ran green on GitHub CI;
+- an empty repo, end to end (0.2.x): setup, a real overnight run, its pull request, an update, the
+  finish ticket and the merge;
+- a copy of an existing app, in both merge and overwrite mode (0.2.x).
 
 Known limits:
-- The guard's command parsing knows the `pnpm` and `npx` wrappers, not `yarn` or `bun`. It does not
-  follow `gh --repo` or paths passed as arguments.
+- The design rung (Phase 0's shell, prototypes, screen briefs and their checks) is built and
+  tested, but has not yet run on a real project with screens.
+- The guard does not follow `gh --repo` or paths passed as arguments.
 - In merge mode, when your docs and the workflow's do the same job (two roadmaps), both are kept
   and listed; nothing is merged for you.
-- A generated `.github/workflows/checks.yml` is tested here, but has not been seen running on
-  GitHub yet.
+- Claude Code runs the phase run's sessions only in a folder you have opened in it once and
+  trusted; the runner checks before it starts.
 
 ## More
 

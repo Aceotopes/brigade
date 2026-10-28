@@ -1,6 +1,6 @@
 {
   "name": "brigade",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "Argee's phase workflow: docs that hold a budget, guard hooks, ticket readiness checks and the unattended phase run.",
   "author": {
     "name": "Argee Vizcarra"
