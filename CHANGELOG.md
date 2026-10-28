@@ -35,10 +35,10 @@ Fixes from the first trial run (an empty repo, one ticket).
 ## 0.2.0 — 2026-10-27
 - `/setup-workflow` and `/update-workflow`: set a project up (new, overwrite or merge) and keep its
   template files current. Each project carries a stamp, `.claude/workflow-version.json`.
-- The phase runner reads the project's `phaseRun` section of `.claude/workflow.json` (README step 7).
+- The phase runner reads the project's `phaseRun` section of `.claude/workflow.json` (build step 7, docs/development.md).
 - doc-check: the baseline can list docs accepted without a header (`headers`), written once by
   `--adopt`; `--update-baseline` only shrinks that list.
 
 ## 0.1.0 — 2026-10-27
 - The workflow lifted from its first project: the hooks, the doc tools, `doc-sync`, `ticket-check`
-  and the phase runner, made generic (README steps 1–6).
+  and the phase runner, made generic (build steps 1–6, docs/development.md).

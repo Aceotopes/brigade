@@ -1,0 +1,194 @@
+# The Brigade guide
+
+How to set a repo up, take a phase from idea to merge, configure the rules, keep the workflow
+current, and get out of trouble. The README has the short version and the command tables; this
+guide has the reasons and the options.
+
+- [1. Setting a repo up](#1-setting-a-repo-up)
+- [2. What your repo gets](#2-what-your-repo-gets)
+- [3. A phase, start to finish](#3-a-phase-start-to-finish)
+- [4. Configuring](#4-configuring)
+- [5. Updating](#5-updating)
+- [6. Troubleshooting](#6-troubleshooting)
+
+## 1. Setting a repo up
+
+Install Brigade first (README, "Install") and commit the `.claude/settings.json` change. Then type
+`/setup-workflow` in a Claude Code session in the project folder. Setup has the same file work to do
+every time, so a tested script does it (`scripts/setup.mjs`). The skill does the talking: it asks
+what it needs, and gets your yes before anything is written.
+
+**The steps it takes:**
+
+1. **Look.** It needs a git repo (it offers `git init -b main`). It stops if the repo is already set
+   up (use `/update-workflow`), or if Brigade is not enabled in this repo.
+2. **Pick a mode.** An empty repo is **new**, with nothing to ask. Any other repo asks:
+   - **Merge** keeps everything. It never overwrites a file: the workflow's files are added beside
+     yours. `CLAUDE.md` gets the workflow's sections appended and `.gitignore` gets `.phase-run/`,
+     each shown as a diff first. Today's docs are accepted as they are: doc-check's baseline lists
+     the ones without a header, and that list can only shrink.
+   - **Overwrite** gives a clean slate. On a new branch, `adopt-workflow`, it moves `docs/`,
+     `CLAUDE.md`, `AGENTS.md`, `CONTEXT.md` and a customised `.claude/settings.json` into
+     `docs/history/pre-workflow/` (moved with `git mv`, never deleted), then writes the workflow's
+     files fresh. Afterwards it reads your old `CLAUDE.md` and asks, rule by rule, which to carry
+     into the new one.
+
+   Either existing mode refuses a working tree with uncommitted changes, so the setup is one clean
+   diff you can read and undo.
+3. **Confirm the stack and config.** It shows what it detected:
+   - the package manager and lockfile;
+   - TypeScript;
+   - the `package.json` scripts;
+   - a database (for example Prisma's provider);
+   - a frontend.
+
+   From that it proposes the checks and gates. You confirm the project's name and summary, the
+   gates, an optional migration target (off unless you name a shared development database, never
+   production) and an optional browser check.
+4. **Show the plan, then write.** Every file it would add, change, move or leave alone, with real
+   diffs for the changed ones. After your yes it writes them, then stages them.
+5. **The extras**, each asked separately:
+   - the four GitHub labels the runner reads;
+   - Impeccable, for a frontend;
+   - your **auto-mode lines**, which describe this project in `~/.claude/settings.json` so
+     Claude Code's auto mode knows what is routine here. Only this project's lines are added, as
+     a diff you approve.
+6. **Check, and stop.** It runs `setup.mjs verify` (doc-check, the template's two test suites, both
+   config loaders), shows `git status`, and drafts the commit message. **Setup never commits.**
+
+## 2. What your repo gets
+
+| Kind | Files | Who owns them afterwards |
+|---|---|---|
+| **Template** | `tools/doc-*.mjs`, `tools/phase-run/`, `docs/_templates/`, `docs/agents/workflow.md`, `docs/agents/ticket-template.md`, `docs/guides/phase-run.md`, `.github/workflows/doc-check.yml` | The plugin. `/update-workflow` re-copies them. Don't edit them: anything about your project belongs in config |
+| **Scaffold** | `CLAUDE.md`, the devlog with entry #1, the roadmap, the handoff, the issue-tracker page, the generated indexes' heads | You. Written once; an update only tells you when the plugin's starting copy changed |
+| **Config** | `.claude/workflow.json`, `.claude/spec-issues.json`, `tools/doc-config.mjs`, `tools/doc-check-baseline.json`, `.github/workflows/checks.yml` | You. Written once from your stack; never overwritten (a version that changes a format ships a migration) |
+| **Stamp** | `.claude/workflow-version.json` | Setup and update. The plugin version, the mode, and a hash of every template file as copied |
+
+The stamp is how an update tells a template file you edited from one you left alone.
+
+Two guides arrive with the template and are the reference for daily use:
+- [`docs/agents/workflow.md`](../template/docs/agents/workflow.md): which skill to use when;
+- [`docs/guides/phase-run.md`](../template/docs/guides/phase-run.md): the phase run's evening and
+  morning checklists, undoing a ticket, and a symptom → fix table.
+
+## 3. A phase, start to finish
+
+| # | Step | Who | Command |
+|---|---|---|---|
+| 1 | Grill: every question a ticket could stop on is answered now | You and Claude | `/grill-with-docs <the phase>` |
+| 2 | Flow diagram and clickable prototype (skipped when there are no screens) | Claude builds, you approve | Ask in plain words |
+| 3 | Spec and tickets, as GitHub issues | You start, Claude writes | `/to-spec`, then `/to-tickets` |
+| 4 | Readiness check | You and Claude | `/ticket-check <spec>` |
+| 5 | The phase run | Claude alone | `node tools/phase-run/run.mjs --spec <N> --branch phase-<name>` |
+| 6 | The morning: the report, parked questions, testing by hand | You | Read the pull request |
+| 7 | The finish ticket: the phase-end docs and the whole-phase review | You and Claude | An attended session on the branch |
+| 8 | Merge, with a merge commit | You | GitHub's **Create a merge commit** |
+
+Keep steps 1 to 3 in one conversation. A merge commit, not a squash, keeps each ticket's commit
+message, which closes its devlog entry.
+
+**What the runner does per ticket:**
+1. It starts a fresh background session and hands it the ticket's prompt
+   (`tools/phase-run/ticket-prompt.md`, plus your project's prose).
+2. The session posts its plan on the issue, builds test-first, writes the per-ticket docs, commits
+   once and reviews its own commit.
+3. The runner then checks the result itself:
+   - one commit, a clean tree, the implementation log;
+   - your gates, in order;
+   - doc-check;
+   - then any migration.
+4. A failure goes back to the same session, up to `--fix-rounds` times.
+5. A pass pushes the branch and updates the draft pull request.
+
+**When a ticket can't go on, it is parked with a label:**
+
+| Label | Meaning | What you do |
+|---|---|---|
+| `run-ready` | `/ticket-check` found nothing open; a run may build it | Nothing |
+| `needs-info` | Parked on a question only you can answer (money, privacy, permissions, a hard-to-undo schema choice) | Answer on the issue, remove `needs-info`, add `run-ready` |
+| `ready-for-human` | Parked after its gates kept failing | Read the report, fix it by hand or re-ticket it |
+| `frontend` | Changes a screen: the browser check and the design review apply | Nothing |
+
+Small choices are made and listed under "Assumptions made" for you to confirm. Tickets that depend
+on a parked one wait, and the run moves on to the rest.
+
+## 4. Configuring
+
+### `.claude/workflow.json`
+
+**`guard.block`**: commands the guard refuses. Each rule has:
+
+| Key | Meaning |
+|---|---|
+| `command` or `text` | A regex, tested on each simple command (`command`) or on the whole command line (`text`) |
+| `with` | Optional: a regex the same simple command must also match |
+| `unless` | Optional: a regex on the whole command line that lets it through |
+| `when` | `always`, or `phase-run` (only inside a phase run) |
+| `message` | What the session is told when the rule blocks it |
+
+**`stopGate.checks`**: `{ "label", "run" }` pairs, run in order each time a phase-run session
+tries to stop. In `run`, `{base}` is the run's base commit, for example
+`vitest run --changed {base}`.
+
+**`phaseRun`**: what the runner checks and pins. The phase-run guide's
+"[What your config sets](../template/docs/guides/phase-run.md#what-your-config-sets)" section has
+every key; in short:
+- `gates`: the runner's own checks, in order; one with `when` runs only if the ticket touched
+  matching files;
+- `preflight` and `ports`: what must be running, and what must be free, before a run;
+- `qa`, `sessionEnv`, `migrations`: the QA database, values pinned in each session, and where
+  migrations are applied after every check passes;
+- `browserCheck`: screenshots for a ticket that changes a screen;
+- `permissions`: extra commands a session may run;
+- `prompt`: a Markdown file of your own instructions for each session, with `## Read`, `## Build`,
+  `## Browser check`, `## Review` and `## Fix` sections.
+
+A `note` key is allowed anywhere, since JSON has no comments. Any other unknown key is an error, so
+a typo stops the run at preflight instead of quietly turning a rule off.
+
+### The other config files
+
+| File | What it holds |
+|---|---|
+| `.claude/spec-issues.json` | The spec issue numbers. The guard refuses a closing keyword before one, because you close specs by hand. `/ticket-check` adds to it |
+| `tools/doc-config.mjs` | Where your docs are, for doc-check and the indexes. The settings you are likely to change: `LIVE_DOCS` (the docs the checks read), `PATH_ROOTS` (the folders a cited path may be in; add `src` and the like as your docs cite them), `GOTCHAS_FILE` (flat by default; a project grouping phases into modules names the module folder) |
+| `tools/doc-check-baseline.json` | Hits doc-check accepts: lines that quote a stale phrase on purpose, and, after a merge setup, docs still without a header |
+| `.github/workflows/checks.yml` | Your stop-gate checks on every push and pull request, so a green pull request means your own tests ran, not only the docs. Edit it when your checks change |
+
+## 5. Updating
+
+A plugin update brings new hooks and skills by itself, but not the template files already copied
+into your repo:
+
+```
+claude plugin marketplace update argee
+claude plugin update brigade@argee
+```
+
+Then `/update-workflow` in the project. It lists what changed since your stamp, with the
+changelog, and writes nothing until you say yes:
+
+| It says | Meaning |
+|---|---|
+| `replace` / `add` | A template file you never edited, rewritten or added |
+| `conflict` | A template file you edited. It is left alone, with the diff shown; the fix is to move your change into config and take the plugin's file |
+| `gone` | A file the plugin no longer ships. Kept unless you say remove |
+| `review` | A scaffold file whose plugin copy changed. You own your copy, so it is only shown |
+| `notes`, `migrations` | Anything else worth knowing, and the config format changes it makes |
+
+Then it runs the checks, drafts the devlog entry and commit message, and stops for your commit.
+
+## 6. Troubleshooting
+
+| You see | What to do |
+|---|---|
+| "The working tree has changes; commit or put them away first" | Commit or `git stash` them, then run setup again. The plugin install's own `.claude/settings.json` change doesn't count |
+| "This project is already set up" | Use `/update-workflow` |
+| Brigade is not enabled here | `claude plugin install brigade@argee --scope project`, then commit the settings change |
+| "The repo changed since this plan was made" | Setup plans again and shows you the new plan |
+| Setup stopped partway through writing | The tree was clean before it began, so `git reset --hard` and `git clean -fd` undo it (overwrite mode: also switch back and delete `adopt-workflow`). Commit the plugin install first, because `git clean` would remove it |
+| The runner says the repo has no GitHub remote | Add one (`gh repo create`, or `git remote add origin …`) and push `main`. Tickets are read from GitHub |
+| A commit is refused by doc-check | Fix what it names: a stale phrase, a path that no longer exists, a missing header, a doc over budget, or run `node tools/doc-index.mjs`. Never loosen the check to pass |
+| A ticket came back `needs-info` or `ready-for-human` | See the labels table above; the morning report says why |
+| Anything else during a run | The phase-run guide's "Symptom → fix" table ([phase-run.md](../template/docs/guides/phase-run.md#symptom--fix)) |

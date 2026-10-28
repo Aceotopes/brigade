@@ -1,7 +1,7 @@
 # Steak To Juan's doc-sync rows
 
-What Brigade's `doc-sync` skill took out when it went generic (README step 6): the rows only Steak To
-Juan has, copied unchanged from its `.claude/skills/doc-sync/` at `905e2d8`. At README step 9 this
+What Brigade's `doc-sync` skill took out when it went generic (Brigade's build step 6): the rows only Steak To
+Juan has, copied unchanged from its `.claude/skills/doc-sync/` at `905e2d8`. When Steak To Juan switches onto Brigade, this
 file becomes Steak To Juan's `docs/agents/doc-sync-rows.md`, the slot the skill reads first. Give it
 a header (`job` / `kind` / budget) then, since every doc under `docs/` needs one.
 

@@ -1,112 +1,197 @@
 # Brigade
 
-A Claude Code plugin that runs a team of AI agents through grill → spec → tickets → an unattended
-overnight build, with hooks that enforce the rules and docs that hold a budget. Named after the
-kitchen brigade: the head chef sets the menu, the line cooks execute, and nothing leaves the pass
-unchecked. Built while making software for a restaurant (Steak To Juan), and lifted out of it so a
-new or existing project gets the workflow without hand setup.
+**A Claude Code plugin that turns "build this feature" into a planned, checked, overnight build
+that ends in one pull request for you to merge.**
 
-**Source:** copied from `Aceotopes/SteakToJuan` at `main` = `905e2d8` (2026-10-27), after the
-docs restructure (PR #224, devlog #339–#345). Until Steak To Juan switches onto this plugin, the
-two copies can drift: a workflow fix made there after `905e2d8` has to be carried here by hand.
+Named after the kitchen brigade: the head chef sets the menu, the line cooks execute, and nothing
+leaves the pass unchecked. In Brigade you are the head chef. You and Claude settle every question
+up front, Claude sessions build the tickets one by one while nobody watches, and scripts check
+every plate before it goes out. Brigade grew out of the workflow of one real app. It was then made
+generic, so any repo can adopt it with one command.
 
-> 🚨 **Do not install this plugin yet.** Steak To Juan already runs its own copies of both hooks, so
-> installing it there would run every check twice. Install at project scope only, once step 8's
-> throwaway-repo trial passes (the hooks read `CLAUDE_PROJECT_DIR` since step 2, and the phase
-> runner reads its project's config since step 7).
+## What it solves
 
-## Layout
+Letting an AI agent build software unattended goes wrong in predictable ways. Brigade answers each
+one with a script, not a reminder in a prompt:
 
-| Folder | What | Where it runs |
+| The problem | What Brigade does |
+|---|---|
+| A session forgets the repo's rules (it runs a formatter over every file, skips a hook with `--no-verify`, pushes to `main`) | The **`guard-shell`** hook reads every shell command before it runs and blocks the ones the rules forbid |
+| A session says "done" while the tests fail | The **`stop-gate`** hook runs the project's checks before a session may stop. The phase runner then runs every gate again itself, trusting no session's word |
+| A ticket built at night stops on a question, and nobody is awake to answer it | **`/ticket-check`** reads the spec, every ticket and the code before the run, and asks you every open question in one sitting |
+| Docs drift from the code, or bloat until nobody reads them | **`doc-check`** fails a commit on stale phrases, paths that no longer exist, missing headers, docs over their line budget, and out-of-date indexes. The **`doc-sync`** skill keeps each doc to one job |
+| Setting all this up by hand in every repo | **`/setup-workflow`** detects the stack and writes everything: new repos and existing ones |
+| A copied workflow goes stale when the plugin improves | **`/update-workflow`** re-copies the plugin's files, using a version stamp to tell your edits from untouched files |
+
+## How it works
+
+```
+/grill-with-docs → prototype (if there are screens) → /to-spec → /to-tickets → /ticket-check
+      → the phase run (unattended, a night at a time) → the finish ticket → you merge
+```
+
+A **phase** is one piece of work: a spec issue on GitHub and its tickets. The **phase runner**
+(`tools/phase-run/run.mjs`) builds each `run-ready` ticket in dependency order on a `phase-*`
+branch, in a fresh Claude Code session each. After each session it runs the gates itself, sends a
+failure back for up to three fix rounds, then pushes the branch or parks the ticket with a reason.
+It never touches `main`: merging the one draft pull request is your go-ahead.
+
+Brigade has three parts:
+
+| Part | What it is | Where it lives |
 |---|---|---|
-| `.claude-plugin/` | `plugin.json` (the plugin), `marketplace.json` (so `/plugin marketplace add` can install it from a git repo) | — |
-| `skills/` | `doc-sync`, `ticket-check`, `setup-workflow`, `update-workflow` | from the plugin, in every project |
-| `scripts/` | `setup.mjs`, the file work behind the two setup skills (detect, plan, apply, update, the autoMode lines), and `migrations.mjs`, each version's config format changes | from the plugin, run by those skills |
-| `hooks/` | `guard-shell.mjs` (PreToolUse), `stop-gate.mjs` (Stop), wired by `hooks.json`; both read the project's `.claude/workflow.json` through `workflow-config.mjs` | from the plugin, in every project |
-| `template/` | files a project keeps **in its own repo**, because CI and `node` run them there: the doc tools, the phase runner, `docs/_templates`, the workflow docs, the doc-check CI job, and blank starting copies of the project's config (`.claude/workflow.json`, `.claude/spec-issues.json`, `tools/doc-config.mjs`, `tools/doc-check-baseline.json`) | copied in by `/setup-workflow` |
-| `scaffold/` | files setup writes **once**, which the project then owns and update never touches: the `CLAUDE.md` skeleton, the devlog with entry #1, the roadmap, the handoff, the issue-tracker page, the generated indexes' heads | rendered by `/setup-workflow` |
-| `CHANGELOG.md` | what each version changed, which `/update-workflow` shows a project before it re-copies the template | — |
-| `examples/steak-to-juan/` | Steak To Juan's own rows, moved out of the generic files (its `workflow.json` with its `phaseRun` section, its doc-sync rows, its part of the session prompt, its phase-run history), and what step 9 needs | never copied; read at step 9 |
-| `tests/` | the plugin's own tests: the hooks, the env contract, the runner config as shipped, the template on day one, setup in each mode, no project's name in the generic half | `node --test tests/*.test.mjs`, from here |
+| **The plugin** | The two hooks and four skills | Installed into Claude Code; updated with the plugin |
+| **The template** | The doc tools, the phase runner, the workflow docs and the doc-check CI job | Copied into your repo by setup, because CI and `node` run them there; re-copied by `/update-workflow` |
+| **Your config** | `.claude/workflow.json` (your rules, checks and gates), the doc-check settings, the CI checks | Written once by setup from your stack; yours from then on, and never overwritten |
 
-The template's tests run from `template/`: `node --test tools/doc-tools.test.mjs` and
-`node --test tools/phase-run/run.test.mjs`.
+## Requirements
 
-## Done (2026-10-27)
+- [Claude Code](https://claude.com/claude-code)
+- Node.js 22 (the generated CI uses 22) and git
+- The GitHub CLI, [`gh`](https://cli.github.com/), logged in: tickets are GitHub issues, and the runner opens the pull request
+- A GitHub repo for the project
+- The **mattpocock-skills** plugin, for the planning and building skills the workflow calls
+  (`/grill-with-docs`, `/to-spec`, `/to-tickets`, `tdd`, `code-review`):
+  `claude plugin install mattpocock-skills@claude-plugins-official`
+- Optional, for a frontend: **Impeccable**, a design plugin. Setup offers to install it.
 
-1. ✅ **One generic env contract**: `PHASE_RUN`, `PHASE_RUN_TICKET`, `PHASE_RUN_BASE`,
-   `PHASE_RUN_SPEC`, `PHASE_RUN_NET_HOSTS`, in the hooks, doc-check and run.mjs together.
-   `tests/env-contract.test.mjs` keeps the two halves in step.
-2. ✅ **Hooks find the project, not themselves**: the project is `CLAUDE_PROJECT_DIR`. guard-shell
-   resolves the folder each command is aimed at (`cd`, `Set-Location`, `pushd`, git's `-C`, quoted
-   and Git Bash paths); the project's rules pass a command aimed at another repo, the owner's rules
-   (no `--no-verify`, no trailer) hold everywhere, and inside a phase run every rule holds for every
-   command. A folder the shell computes (`cd $X`) keeps the project's rules on. No
-   `tools/doc-check.mjs` in the project, no doc-check. Not resolved: `gh --repo`, paths passed as
-   arguments.
-3. ✅ **Hook rules in `.claude/workflow.json`**: block rules (`command` or `text`, optional `with`
-   and `unless`, `when: always | phase-run`) and the stop gate's checks (`{base}` filled in). A
-   broken file fails closed. The spec list stays its own file, now `.claude/spec-issues.json`.
-   Steak To Juan's rows are in `examples/steak-to-juan/workflow.json`. Still a habit in code: the
-   wrapper stripping knows `pnpm` and `npx`, not `yarn` or `bun`.
-4. ✅ **doc-check's folder list** is `PATH_ROOTS` / `PATH_EXTENSIONS` in `doc-config.mjs`.
-5. ✅ **Blank starting copies**: `doc-config.mjs` holds the workflow's own layout only,
-   `DEVLOG_TAGGED_FROM = 1`; the baseline holds only the template's own two lines; no specs.
-   `tests/template.test.mjs` proves the template passes doc-check on day one, given the files
-   setup must write (its `SETUP_WRITES` list is step 8's contract).
-6. ✅ **Skills**: ticket-check reads the repo from `gh api repos/{owner}/{repo}/…`; doc-sync reads a
-   project's `docs/agents/doc-sync-rows.md` first; Impeccable rows are conditional; Steak To Juan's
-   rows are in `examples/steak-to-juan/doc-sync-rows.md`. `tests/no-project-specifics.test.mjs`
-   bans its names from the generic half.
-7. ✅ **The phase runner reads its project's config**: `phaseRun` in `.claude/workflow.json`, loaded
-   and checked by `template/tools/phase-run/config.mjs` (preflight rows, ports, the QA database,
-   pinned session env, the stray test process, gates in order with `when`/`env`/`alone`, the
-   browser check, migrations with a target, always-in-scope files, extra permissions, and a prompt
-   file whose `## ` sections are spliced into the session's prompt). Each placeholder is allowed
-   only where it makes sense, so a gate cannot reach the migration target. A mistake there stops
-   the run at preflight, dry runs too (the hooks skip that section). `settings.json` holds only
-   the rules every project needs; a session may not edit the config, the spec list or the prompt
-   file. Steak To Juan's values, prompt prose and guide history are in `examples/steak-to-juan/`,
-   and `tests/phase-run-config.test.mjs` proves its example holds what run.mjs hardcoded.
-8. ✅ **`/setup-workflow` and `/update-workflow`** (0.2.2): `scripts/setup.mjs` does the file work
-   (detect → plan → apply; update; the autoMode lines) and the skills do the talking. New, overwrite
-   (on branch `adopt-workflow`, old files archived under `docs/history/pre-workflow/`) and merge (never
-   overwrites; a doc-check `headers` baseline that only shrinks). `template/` is re-copied by update,
-   `scaffold/` is written once and only reported when it changes, config is never touched; the stamp is
-   `.claude/workflow-version.json`. Setup never commits. Trials on 2026-10-27, in
-   `D:\HGP\brigade-trials\`: an empty repo end to end (setup, a real phase run, its pull request,
-   an update, the attended finish, the merge) and block23-gym clones in overwrite and merge, run
-   again on fresh clones under 0.2.2. Their fixes are 0.2.1 and 0.2.2 in CHANGELOG.md. Not yet seen:
-   a generated `checks.yml` running on GitHub.
-   **Until step 9, install at project scope only**: a user-scope install would also run in Steak To
-   Juan, whose own hook copies would then run every check twice.
+## Install
 
-## To do, in order
+```
+claude plugin marketplace add Aceotopes/brigade
+claude plugin install brigade@argee --scope project
+```
 
-9. **Switch Steak To Juan onto the plugin** (after 6G merges, between phases): delete its hook and
-   skill copies, install this, copy in `examples/steak-to-juan/`'s files as its README says (the
-   config, the prompt prose, the history, the doc-config exports, the renamed run-state files),
-   re-run `test:docs`, `test:runner` and a dry-run phase run.
-   **Impeccable too, in the same switch.** Steak To Juan never installed Impeccable as a plugin:
-   its files were copied by hand into `.claude/skills/impeccable/` and
-   `.claude/agents/impeccable-*.md` on 2026-09-05 (devlog #086) and sit at **4.2.0**, while the
-   real plugin (installed for HubsteriaBrew) is **4.5.0**. Delete those copies, install Impeccable
-   at project scope (`impeccable@impeccable`), then run `/impeccable doctor` to report and repair
-   what 4.2 → 4.5 changed. Its project files (`PRODUCT.md`, `DESIGN.md`, `.impeccable/`) belong to
-   the app and stay. Steak To Juan's `phaseRun.permissions` (its example `workflow.json`) has six allow-rules naming
-   `.claude/skills/impeccable/scripts/…`: point them at wherever the plugin keeps that script, or
-   a night run's session gets a permission prompt nobody is awake to answer. After 6G only: its frontend tickets use Impeccable.
+The marketplace is named `argee`. `--scope project` turns Brigade on for the repo you run it in,
+recorded in that repo's `.claude/settings.json`, so commit that change. `--scope user` turns it on
+for every repo you open. There, the guard's own rules (no `--no-verify`, no attribution trailer)
+apply in every repo. A repo's own rules, doc-check and the stop gate only act where setup has
+written Brigade's files.
 
-## Changing the workflow later
+## Quick start
 
-1. Is the change for every project, or only one? One project's need goes in that project's config;
-   only a change every project would want comes here.
-2. Make it here (never in a project's copy of a template file), with its test.
-3. Bump `version` in `.claude-plugin/plugin.json` (installed plugins are cached per version, so an
-   unbumped change may never reach a project), commit, push.
-4. In each project: update the plugin (skills and hooks follow), then run `/update-workflow` if
-   `template/` changed.
+In a Claude Code session opened in your project folder:
 
-Not part of this plugin: Impeccable (someone else's plugin with its own versions; `/setup-workflow`
-should detect a frontend project and offer to install it, never carry a copy) and the mattpocock skills
-(already a user-level plugin; their setup skill covers labels and `issue-tracker.md`).
+1. **`/setup-workflow`**. A new repo is set up directly. For an existing repo it asks whether to
+   **merge** (keep everything, add the workflow beside it) or **overwrite** (start clean on a
+   branch, with old docs archived, not deleted). It shows every file before writing and runs the
+   checks. It never commits: you commit.
+2. **`/grill-with-docs <what the phase is>`**. Answer until Claude has no questions left.
+3. For a phase with screens, ask for the flow diagram and a clickable prototype, and approve it.
+4. **`/to-spec`**, then **`/to-tickets`**. The spec becomes a GitHub issue (say `#12`), and the
+   tickets follow it.
+5. **`/ticket-check 12`**. Answer its batch of questions; ready tickets get the `run-ready` label.
+6. In a terminal, on `main`, with everything committed and pushed:
+   ```
+   node tools/phase-run/run.mjs --spec 12 --branch phase-checkout --dry-run
+   node tools/phase-run/run.mjs --only 13 --branch phase-checkout
+   node tools/phase-run/run.mjs --spec 12 --branch phase-checkout --max 4
+   ```
+   The dry run lists what would be built. Build the first ticket while you are awake, then leave
+   the night run going.
+7. **The morning:** read the report on the pull request, answer any parked question on its issue,
+   and test the branch by hand. Run the same command again the next night for the tickets left.
+8. **Finish:** do the finish ticket in an attended session on the branch, then merge the pull
+   request with **Create a merge commit** (never squash), and close the spec issue yourself.
+
+The full walkthrough, with every option, is in the [guide](docs/guide.md).
+
+## Commands
+
+**Brigade's slash commands.** You type these; Claude never starts them by itself.
+
+| Command | What it does |
+|---|---|
+| `/setup-workflow [--settings <path>]` | Set a repo up: new, merge or overwrite. Detects the stack, proposes the config, shows the plan, writes after a yes, and runs the checks. Also offers the GitHub labels, Impeccable for a frontend, and your auto-mode lines |
+| `/update-workflow` | After a plugin update: shows what changed since your stamp and re-copies the template files you never edited. Never touches your config |
+| `/ticket-check <spec>` | The readiness check before a run: one batch of questions, answers written into the tickets, `run-ready` on each ready one |
+| `doc-sync` | Claude uses it by itself after a verified change and before a commit, so each doc keeps telling the truth |
+
+**The phase runner**, `node tools/phase-run/run.mjs`:
+
+| Flag | Meaning | Default |
+|---|---|---|
+| `--spec <N>` | Build the `run-ready` tickets of spec issue `#N`, in dependency order | — |
+| `--only <N>` | Build one ticket only | — |
+| `--until <N>` | With `--spec`: stop after ticket `#N` (no nightly cap, unless `--max` is given) | — |
+| `--branch phase-<name>` | The phase branch; created on the first night, continued after | required |
+| `--max <n>` | At most this many tickets in one run | 4 |
+| `--fix-rounds <n>` | Times a failed gate goes back to the session | 3 |
+| `--minutes <n>` | Time limit for one ticket's session | 120 |
+| `--wait-hours <n>` | How long to wait for a usage limit to lift before giving up | 6 |
+| `--permission-mode <mode>` | The permission mode of `--print` sessions (background sessions always refuse what they would have to ask about) | `acceptEdits` |
+| `--model <name>` | The sessions' model | Claude Code's |
+| `--print` | Hidden `claude -p` sessions instead of background sessions you can watch | off |
+| `--dry-run` | List what would be built and check preflight; build nothing | off |
+
+While a run goes, `claude agents` in a second terminal lists its sessions, and `claude attach <id>`
+opens one to watch.
+
+**The doc tools**, from the project root:
+
+| Command | What it does |
+|---|---|
+| `node tools/doc-check.mjs` | Stale phrases, missing paths, headers and line budgets, stale indexes. Runs before every `git commit` |
+| `… --head`, `… --message-file F`, `… --message TEXT` | Also check that the devlog's top entry matches HEAD, or the commit about to be made |
+| `… --report` | Each budgeted doc's size against its limit, fullest first |
+| `… --update-baseline` | Accept today's stale-phrase and missing-path hits (attended sessions only) |
+| `node tools/doc-index.mjs [--check]` | Rewrite the generated indexes, or only check that they are current |
+| `node tools/doc-rotate.mjs --phase <id> --label "<name>" [--dry-run]` | At a phase's end, move the devlog's closed entries into that phase's archive |
+
+## What the hooks enforce
+
+**Always**, in a repo with Brigade:
+- your own block rules from `.claude/workflow.json`;
+- no `--no-verify`;
+- no attribution trailer on a commit or pull request;
+- no closing keyword before a spec issue's number;
+- doc-check before every `git commit`.
+
+**Inside a phase run**, also:
+- no push, since only the runner pushes;
+- no commit off the `phase-*` branch, no branch switching, merge or rebase;
+- no closing an issue or opening a pull request by hand;
+- no printing `.env`.
+
+The stop gate runs your `stopGate.checks` once each time a session tries to stop. It is a guard
+rail on the command text, not a sandbox, so the runner checks the result again.
+
+## Configuration
+
+Your rules live in `.claude/workflow.json`, written by setup from your stack:
+
+```json
+{
+  "version": 1,
+  "guard": { "block": [{ "when": "always", "command": "prettier .*--write", "message": "Format only the lines you changed." }] },
+  "stopGate": { "checks": [{ "label": "Typecheck", "run": "pnpm exec tsc --noEmit" }] },
+  "phaseRun": { "gates": [{ "label": "Tests", "run": "pnpm test" }] }
+}
+```
+
+`phaseRun` also holds what must be running before a run, ports, a QA database, migrations, a
+browser check and the prose each session is given. Every key is described in the
+[guide](docs/guide.md#4-configuring). A typo fails loudly instead of quietly turning a rule off.
+
+## Status
+
+Version **0.2.2** (see [CHANGELOG.md](CHANGELOG.md)). It has been proven on throwaway repos:
+- an empty repo, end to end: setup, a real overnight run, its pull request, an update, the finish
+  ticket and the merge;
+- a copy of an existing app, in both merge and overwrite mode.
+
+Known limits:
+- The guard's command parsing knows the `pnpm` and `npx` wrappers, not `yarn` or `bun`. It does not
+  follow `gh --repo` or paths passed as arguments.
+- In merge mode, when your docs and the workflow's do the same job (two roadmaps), both are kept
+  and listed; nothing is merged for you.
+- A generated `.github/workflows/checks.yml` is tested here, but has not been seen running on
+  GitHub yet.
+
+## More
+
+- [docs/guide.md](docs/guide.md): the full guide (setup modes, a phase start to finish,
+  configuration, updating, troubleshooting)
+- [docs/development.md](docs/development.md): working on Brigade itself (layout, tests, how it was
+  built, releasing)
+- [CHANGELOG.md](CHANGELOG.md): what each version changed

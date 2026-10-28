@@ -5,7 +5,7 @@ kind: record
 # The phase run's history in Steak To Juan
 
 Moved unchanged out of the owner's guide (`docs/guides/phase-run.md`) when Brigade made the guide
-generic (README step 7, 2026-10-27). At step 9 it becomes a frozen record in Steak To Juan's
+generic (Brigade's build step 7, 2026-10-27). When Steak To Juan switches onto Brigade, it becomes a frozen record in Steak To Juan's
 `docs/history/`. The `#` numbers are Steak To Juan's issues; devlog numbers are its devlog's.
 
 ## What it costs, for scale

@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "note": "Steak To Juan's rows, exactly what its own guard-shell.mjs and stop-gate.mjs hardcoded at 905e2d8. Copied into its .claude/workflow.json at README step 9.",
+  "note": "Steak To Juan's rows, exactly what its own guard-shell.mjs and stop-gate.mjs hardcoded at 905e2d8. Copied into its .claude/workflow.json when it switches onto Brigade.",
   "guard": {
     "block": [
       {
@@ -45,7 +45,7 @@
     ]
   },
   "phaseRun": {
-    "note": "Steak To Juan's phase runner, exactly what run.mjs hardcoded at 905e2d8 (README step 7). The prose a session is given is examples/steak-to-juan/phase-run-prompt.md.",
+    "note": "Steak To Juan's phase runner, exactly what run.mjs hardcoded at 905e2d8 (Brigade's build step 7). The prose a session is given is examples/steak-to-juan/phase-run-prompt.md.",
     "prompt": "docs/agents/phase-run-prompt.md",
     "preflight": [
       {

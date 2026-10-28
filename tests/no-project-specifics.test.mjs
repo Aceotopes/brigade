@@ -4,7 +4,7 @@
 //
 // BANNED names one project's systems, not its domain words: its name, repo, database, vendors,
 // hosting, module numbering and published pages. PENDING is the files a piece of work still has
-// to make generic: empty since README step 7 finished (2026-10-27). A file goes on it only while
+// to make generic: empty since build step 7 finished (2026-10-27, docs/development.md). A file goes on it only while
 // it is being made generic, and leaves it the moment it is clean (the second test fails until it
 // does), so the list only shrinks.
 //
@@ -46,6 +46,16 @@ const ALL = SCANNED.flatMap(files);
 
 test("no file outside the pending list names one project", () => {
   assert.deepEqual(ALL.filter((rel) => !PENDING.includes(rel)).flatMap(hits), []);
+});
+
+// Brigade's own docs are for any reader, so they name no project either. They name the plugin's own
+// repo (the install command), so its owner is not banned here.
+const PUBLIC_DOCS = ["README.md", "CHANGELOG.md", "docs"];
+const OWNER = /aceotopes/i.source;
+
+test("the plugin's own docs name no one project", () => {
+  const found = PUBLIC_DOCS.flatMap(files).flatMap(hits).filter((hit) => !hit.includes(OWNER));
+  assert.deepEqual(found, []);
 });
 
 test("every pending file still needs its step 7 work: a clean one leaves the list", () => {

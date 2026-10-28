@@ -7,7 +7,7 @@ max-lines: 120
 
 Read by `tools/phase-run/run.mjs` (`phaseRun.prompt` in `.claude/workflow.json`): each `## ` section
 below is spliced into the generic prompt at its place. Moved here from the runner's prompt at
-`905e2d8` (Brigade README step 7), less the sentences the generic prompt now says itself (the
+`905e2d8` (Brigade's build step 7), less the sentences the generic prompt now says itself (the
 `CLAUDE.md` pointer, never migrating the target, never printing `.env`).
 
 ## Read
