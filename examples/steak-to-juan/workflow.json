@@ -40,13 +40,21 @@
       {
         "label": "The tests your changes touch",
         "run": "pnpm exec vitest run --changed {base} --passWithNoTests",
-        "note": "--passWithNoTests: a ticket that changes no tested file (docs, a workflow) is not a failure."
+        "receipt": true,
+        "quiet": {
+          "totals": "^\\s*(Test Files|Tests|Duration|Errors)\\s",
+          "failures": "Failed Tests|Unhandled Errors?|^\\s*FAIL\\s"
+        },
+        "note": "--passWithNoTests: a ticket that changes no tested file (docs, a workflow) is not a failure. The receipt: a session runs this through tools/phase-run/stop-tests.mjs, and the stop check skips it on code that already passed."
       }
     ]
   },
   "phaseRun": {
     "note": "Steak To Juan's phase runner, exactly what run.mjs hardcoded at 905e2d8 (Brigade's build step 7). The prose a session is given is examples/steak-to-juan/phase-run-prompt.md.",
     "prompt": "docs/agents/phase-run-prompt.md",
+    "steps": [
+      { "kind": "browser", "match": "walks/|qa-cast|next build", "note": "its browser walks and the QA cast's server, for the report's time split" }
+    ],
     "preflight": [
       {
         "label": "The Docker test database",

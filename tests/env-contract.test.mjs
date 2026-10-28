@@ -12,9 +12,17 @@ import { fileURLToPath } from "node:url";
 
 const PLUGIN = join(dirname(fileURLToPath(import.meta.url)), "..");
 const RUNNER = "template/tools/phase-run/run.mjs";
-const READERS = ["hooks/guard-shell.mjs", "hooks/stop-gate.mjs", "template/tools/doc-check.mjs"];
+const READERS = [
+  "hooks/guard-shell.mjs",
+  "hooks/stop-gate.mjs",
+  "template/tools/doc-check.mjs",
+  // What a session runs, under the runner's variables.
+  "template/tools/phase-run/stop-tests.mjs",
+  "template/tools/phase-run/wait-subagents.mjs",
+  "template/tools/phase-run/display.mjs",
+];
 /** Set by the owner when starting a run, not by the runner. */
-const OWNER_SET = ["PHASE_RUN_NET_HOSTS"];
+const OWNER_SET = ["PHASE_RUN_NET_HOSTS", "PHASE_RUN_NOTIFY"];
 
 const NAME = /\bPHASE_RUN(?:_[A-Z]+)*\b/g;
 

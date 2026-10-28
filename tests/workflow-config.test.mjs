@@ -33,6 +33,7 @@ test("both shipped configs load: the blank template and Steak To Juan's example"
 
 test("a config with a mistake names it: version, a typo'd key, a bad when, a bad pattern, both match kinds", () => {
   const rule = (extra) => ({ version: 1, guard: { block: [{ when: "always", command: "^x", message: "m", ...extra }] } });
+  const check = (extra) => ({ version: 1, stopGate: { checks: [{ label: "Tests", run: "npm test", ...extra }] } });
   const cases = [
     [{ version: 2 }, /"version" must be 1/],
     [rule({ unles: "y" }), /unknown key\(s\) unles/],
@@ -46,6 +47,10 @@ test("a config with a mistake names it: version, a typo'd key, a bad when, a bad
     [{ version: 1, stack: { other: "Stripe" } }, /stack\.other must be a list of texts/],
     [{ version: 1, guard: { wrappers: ["bunx", ""] } }, /guard\.wrappers must be a list of command prefixes/],
     [{ version: 1, roadmap: { url: "x" } }, /roadmap has unknown key\(s\) url/],
+    [check({ receipt: "yes" }), /checks\[0\]\.receipt must be true or false/],
+    [check({ quiet: { totals: "x", failures: "y" } }), /quiet belongs on the tests' row/],
+    [check({ receipt: true, quiet: { totals: "(", failures: "y" } }), /quiet\.totals is not a valid pattern/],
+    [check({ receipt: true, quiet: { totals: "x" } }), /quiet\.failures is missing/],
   ];
   for (const [data, error] of cases) assert.throws(() => parseWorkflowConfig(data), error);
 });

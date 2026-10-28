@@ -67,7 +67,9 @@ test("Steak To Juan's prompt, rendered from the example, still says everything i
   // Each of the old prompt's Steak To Juan instructions, as a session now reads it.
   for (const phrase of [
     "surface brief in `.impeccable/surfaces/`",
-    "`pnpm exec vitest run --changed abc --passWithNoTests`",
+    // Its changed tests, now run through the receipt (0.4.0): the stop check skips them on code that passed.
+    "`node tools/phase-run/stop-tests.mjs` (the tests)",
+    "`node tools/phase-run/wait-url.mjs http://localhost:8400/`",
     "**Do not run the full suite (`pnpm test`)**",
     "`impeccable craft <the ticket's screen>",
     "a hand-built actor sets `payrollRestricted`",

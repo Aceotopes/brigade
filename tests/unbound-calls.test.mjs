@@ -111,7 +111,9 @@ export function unboundCalls(src) {
         `:\\s*${e}\\s*[,}=]`, // { key: name } in a destructure
         `\\b${e}\\s*=>`, // name => …
         `\\bimport\\s+(\\*\\s+as\\s+)?${e}\\b`, // import name from, import * as name
+        `^\\s*(static\\s+|async\\s+)*${e}\\s*\\(.*\\)\\s*\\{\\s*$`, // a class's method: name(args) {
       ].join("|"),
+      "m",
     );
     return !binds.test(code) && !new RegExp(`\\b${e}\\b`).test(imports);
   });
@@ -126,7 +128,12 @@ test("the scanner: a call to a name nothing defines is caught, and only that", (
     "// renamed(x) in a comment does not count",
     'const text = "renamed(x) in a string" + `${helper(1)} and gone(2) in template text`;',
     "const re = /missing\\(/g;",
-    "helper(); arrow(1); joinPath(); readFileSync(); setTimeout(); Number(1); renamed();",
+    "class Screen {",
+    "  draw(now = Date.now()) {",
+    "    return now;",
+    "  }",
+    "}",
+    "helper(); arrow(1); joinPath(); readFileSync(); setTimeout(); Number(1); renamed(); draw();",
   ].join("\n");
   assert.deepEqual(unboundCalls(src), ["renamed"]);
 });

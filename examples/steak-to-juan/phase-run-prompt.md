@@ -40,7 +40,8 @@ On the local `stj_cast` database only, never dev Neon:
 1. Start `node --env-file=.env --import tsx scripts/qa-cast.ts --serve` with the shell tool's
    **background option**, exactly as written: no `&`, no redirect, no `cd`. It resets and seeds the
    cast, builds, and serves the app on `http://localhost:8400`; cookies land in
-   `scripts/qa-cast.json`. Never pass `--open`: no window may open.
+   `scripts/qa-cast.json`. Never pass `--open`: no window may open. Then run
+   `node tools/phase-run/wait-url.mjs http://localhost:8400/`, which returns as soon as the cast answers.
 2. With **headless** Playwright, signed in as each cast member the ticket matters to, walk every
    acceptance criterion. Fail the check on a console error or a failed request. At 390px wide,
    `document.documentElement.scrollWidth - innerWidth` must be 0. A walk that clicks must **wait for

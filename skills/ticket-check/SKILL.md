@@ -21,6 +21,11 @@ Argument: the spec's issue number. With none, ask for it.
    or under doc-config's `DESIGN_DIR`), the screen's brief there (with Impeccable, also its surface
    brief) and `DESIGN.md`.
 4. `docs/agents/ticket-template.md`, the shape each ticket must have.
+5. `node tools/phase-run/ticket-size.mjs --spec <spec>`: each ticket's criteria, Areas and words
+   against the size budget (`phaseRun.ticketSize` in `.claude/workflow.json`, else Brigade's
+   defaults). A ticket over a limit may be two sessions' work, and a long session costs more per
+   step. A warning is a lead, not a verdict: weigh it under "a ticket too large for one session"
+   below, and name any you would split in the batch.
 
 A phase of a dozen tickets is a lot to hold. Read ticket by ticket and write findings down as you
 go; do not ask anything until every ticket has been read.

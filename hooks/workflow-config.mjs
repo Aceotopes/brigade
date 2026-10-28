@@ -9,7 +9,9 @@
 //         "unless": "<optional regex on the whole command line that lets it through>",
 //         "message": "<what the session is told>" } ],
 //       "wrappers": ["pnpm exec", "pnpm dlx", "pnpm", "npx"] },   prefixes stripped before a rule is tested
-//     "stopGate": { "checks": [ { "label": "Typecheck", "run": "pnpm typecheck" } ] },
+//     "stopGate": { "checks": [ { "label": "Typecheck", "run": "pnpm typecheck" },
+//       { "label": "Tests", "run": "pnpm test", "receipt": true,     the tests: skipped while their receipt holds
+//         "quiet": { "totals": "<regex>", "failures": "<regex>" } } ] },   what stop-tests.mjs prints of them
 //     "stack": { "language", "framework", "packageManager", "database", "migrations", "testDatabase",
 //                "storage": "<any text>", "other": ["<any text>"] },   what the project is built with
 //     "roadmap": { "artifact": "<the roadmap page's link>" }
@@ -28,7 +30,7 @@ export const CONFIG_PATH = join(".claude", "workflow.json");
 
 const WHEN = ["always", "phase-run"];
 const RULE_KEYS = ["when", "command", "text", "with", "unless", "message", "note"];
-const CHECK_KEYS = ["label", "run", "note"];
+const CHECK_KEYS = ["label", "run", "receipt", "quiet", "note"];
 /** The stack's parts, in the order the discovery template's table lists them. */
 export const STACK_KEYS = ["language", "framework", "packageManager", "database", "migrations", "testDatabase", "storage", "other"];
 /** What the guard strips before a rule is tested, when the project names none: the wrappers it always knew. */
@@ -87,7 +89,16 @@ export function parseWorkflowConfig(data) {
     for (const key of ["label", "run"]) {
       if (typeof check[key] !== "string" || !check[key].trim()) throw new Error(`${where}.${key} is missing.`);
     }
-    return { label: check.label, run: check.run };
+    if (check.receipt !== undefined && typeof check.receipt !== "boolean") throw new Error(`${where}.receipt must be true or false.`);
+    if (check.quiet !== undefined) {
+      if (check.receipt !== true) throw new Error(`${where}.quiet belongs on the tests' row, the one with "receipt": true.`);
+      onlyKeys(check.quiet, ["totals", "failures", "note"], `${where}.quiet`);
+      for (const key of ["totals", "failures"]) {
+        if (check.quiet[key] === undefined) throw new Error(`${where}.quiet.${key} is missing.`);
+        pattern(check.quiet[key], `${where}.quiet.${key}`);
+      }
+    }
+    return { label: check.label, run: check.run, receipt: check.receipt === true };
   });
   return { rules, checks, wrappers: wrappers.map((w) => w.trim()) };
 }

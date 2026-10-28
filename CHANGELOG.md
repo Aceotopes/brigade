@@ -4,6 +4,35 @@ What changed in each version, for `/update-workflow` to show a project before it
 template. Newest first. A version that changes a config file's format says so, and ships its
 migration in `scripts/migrations.mjs`.
 
+## 0.4.0 — unreleased
+The phase runner measures each ticket, shows the run as a table, and stops repeating work: a port
+of the upgrades one real project made after profiling a 14-ticket night. The decisions are in
+`docs/discovery/02-brigade-0.4.0.md`.
+
+**Config:** a `stopGate.checks` row gains `receipt` and `quiet`, which only 0.4.0's hooks accept:
+update the plugin before (or with) `/update-workflow`. `phaseRun` gains optional `steps` and
+`ticketSize`. No migration: every new key is optional. To use the receipt in a project set up
+before 0.4.0, add `"receipt": true` to its tests' stop check row; to run the new tests, add
+`tools/phase-run/measure.test.mjs` to its `test:runner` script.
+
+- **Each ticket measured** (`tools/phase-run/metrics.mjs`, `prices.json`): its cost at API rates,
+  peak context, and minutes split into Claude, tests, checks, browser, slept, reviews, the stop
+  hook and the gates, from its transcript. Kept in `results.json`; the report opens with a
+  Scoreboard. `phaseRun.steps` rows name a project's own commands for the split.
+- **The run as a table** on a terminal (`display.mjs`): a row per finished ticket with dim detail
+  lines, a live "6 of 10 · done ≈" line and ticket row, colours (none under `NO_COLOR`), the tab's
+  title, an end-of-run scoreboard, and a Windows notification when the run ends or a ticket fails
+  or parks (`PHASE_RUN_NOTIFY=0` turns it off). Off a terminal it prints plain lines as before.
+  `node tools/phase-run/status.mjs [ticket]` prints it from any terminal.
+- **Tests once per state of the code** (`receipt.mjs`, `stop-tests.mjs`, ADR 0003): a session runs
+  the `receipt` row through `stop-tests.mjs`, which records a receipt on a pass, and the stop hook
+  skips that row while the code still matches. The runner's gates trust no receipt. Setup marks
+  a new project's tests row. A row's `quiet` patterns pick the lines a session reads.
+- **Waiting on things, not the clock:** `wait-subagents.mjs` and `wait-url.mjs`; the ticket prompt
+  forbids fixed-length pauses and says to read large files in parts.
+- **A ticket size budget** (`ticket-size.mjs`, `phaseRun.ticketSize`), a warning in `/ticket-check`.
+- The unbound-calls test reads a class's methods as definitions.
+
 ## 0.3.0 — 2026-10-28
 Planning above a phase (discovery, modules), the design rung for screens, the stack read from
 discovery with a refresh, and `/roadmap` with its page, in four phases (A, D, B, C), proven by a

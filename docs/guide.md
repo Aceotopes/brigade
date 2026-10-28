@@ -233,7 +233,10 @@ them, `pnpm exec`, `pnpm dlx`, `pnpm` and `npx`.
 
 **`stopGate.checks`**: `{ "label", "run" }` pairs, run in order each time a phase-run session
 tries to stop. In `run`, `{base}` is the run's base commit, for example
-`vitest run --changed {base}`.
+`vitest run --changed {base}`. Mark the tests' row `"receipt": true` (setup does): a session then
+runs it through `tools/phase-run/stop-tests.mjs`, and the stop check skips it on code that already
+passed. An optional `"quiet": { "totals", "failures" }` pair of patterns there trims what the
+session reads of the output; the phase-run guide has a vitest example.
 
 **`stack`**: what the project is built with, from your discovery doc at setup: `language`,
 `framework`, `packageManager`, `database`, `migrations`, `testDatabase`, `storage`, and `other` (a
@@ -252,7 +255,9 @@ every key; in short:
 - `browserCheck`: screenshots for a ticket that changes a screen;
 - `permissions`: extra commands a session may run;
 - `prompt`: a Markdown file of your own instructions for each session, with `## Read`, `## Build`,
-  `## Browser check`, `## Review` and `## Fix` sections.
+  `## Browser check`, `## Review` and `## Fix` sections;
+- `steps` and `ticketSize`: what your own commands count as in the report's time split, and the
+  size budget `/ticket-check` warns on.
 
 A `note` key is allowed anywhere, since JSON has no comments. Any other unknown key is an error, so
 a typo stops the run at preflight instead of quietly turning a rule off.

@@ -16,6 +16,10 @@
 //     "migrations": { "added", "target": { "name", "urlFrom", "direct"? }, "apply", "rollBack"?, "destructive"? },
 //     "alwaysInScope": ["<regex>"],                  never "outside the ticket's areas"
 //     "permissions": { "allow"?: [], "deny"?: [] }   added to tools/phase-run/settings.json's rules
+//     "steps": [{ "kind", "match" }],                what a session's shell command was, for the time split
+//                                                   (metrics.mjs); tested before Brigade's own rows
+//     "ticketSize": [{ "key", "kind", "section"?, "max", "label" }]   the size budget /ticket-check warns on
+//                                                   (ticket-size.mjs); left out, Brigade's defaults
 //   }
 //
 // Placeholders, each allowed only where it makes sense (a gate cannot reach the migration target):
@@ -29,11 +33,14 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
+import { STEP_KINDS } from "./metrics.mjs";
+import { RULE_KINDS } from "./ticket-size.mjs";
+
 export const CONFIG_PATH = ".claude/workflow.json";
 export const BROWSER_CHECK = "browser-check";
 
 const KEYS = {
-  phaseRun: ["prompt", "preflight", "ports", "qa", "sessionEnv", "strayProcess", "gates", "browserCheck", "migrations", "alwaysInScope", "permissions"],
+  phaseRun: ["prompt", "preflight", "ports", "qa", "sessionEnv", "strayProcess", "gates", "browserCheck", "migrations", "alwaysInScope", "permissions", "steps", "ticketSize"],
   preflight: ["label", "run", "hint"],
   port: ["port", "what", "freeAfterEachTicket"],
   qa: ["name", "url"],
@@ -44,6 +51,8 @@ const KEYS = {
   target: ["name", "urlFrom", "direct"],
   command: ["run", "env"],
   permissions: ["allow", "deny"],
+  step: ["kind", "match"],
+  sizeRule: ["key", "kind", "section", "max", "label"],
 };
 
 /** Which placeholders each kind of value may use. */
@@ -106,8 +115,38 @@ export function parseRunConfig(data) {
     migrations: run.migrations === undefined ? null : parseMigrations(run.migrations, `${where}.migrations`),
     alwaysInScope: list(run.alwaysInScope, `${where}.alwaysInScope`).map((source, i) => pattern(source, `${where}.alwaysInScope[${i}]`)),
     permissions: parsePermissions(run.permissions ?? {}, `${where}.permissions`),
-    stopChecks: list(data?.stopGate?.checks, "stopGate.checks").map((check) => ({ label: String(check.label), run: String(check.run) })),
+    steps: list(run.steps, `${where}.steps`).map((row, i) => parseStep(row, `${where}.steps[${i}]`)),
+    ticketSize: run.ticketSize === undefined ? null : list(run.ticketSize, `${where}.ticketSize`).map((row, i) => parseSizeRule(row, `${where}.ticketSize[${i}]`)),
+    // The hooks check stopGate (hooks/workflow-config.mjs); a bad pattern here only falls back to the plain tail.
+    stopChecks: list(data?.stopGate?.checks, "stopGate.checks").map((check) => ({
+      label: String(check.label),
+      run: String(check.run),
+      receipt: check.receipt === true,
+      quiet: quietPair(check.quiet),
+    })),
   };
+}
+
+function parseStep(row, at) {
+  keys(row, KEYS.step, at);
+  if (!STEP_KINDS.includes(row.kind)) throw new Error(`${at}.kind must be one of ${STEP_KINDS.join(", ")}.`);
+  return { kind: row.kind, match: pattern(row.match, `${at}.match`) };
+}
+
+function parseSizeRule(row, at) {
+  keys(row, KEYS.sizeRule, at);
+  if (!RULE_KINDS.includes(row.kind)) throw new Error(`${at}.kind must be one of ${RULE_KINDS.join(", ")}.`);
+  if (row.kind !== "words") text(row.section, `${at}.section`);
+  if (!Number.isInteger(row.max) || row.max < 1) throw new Error(`${at}.max must be a whole number, 1 or more.`);
+  return { key: text(row.key, `${at}.key`), kind: row.kind, section: row.section ?? null, max: row.max, label: text(row.label, `${at}.label`) };
+}
+
+function quietPair(quiet) {
+  try {
+    return quiet ? { totals: new RegExp(quiet.totals), failures: new RegExp(quiet.failures) } : null;
+  } catch {
+    return null;
+  }
 }
 
 function parseGate(gate, at) {

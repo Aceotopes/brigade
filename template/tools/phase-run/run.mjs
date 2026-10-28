@@ -36,6 +36,9 @@ import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { BROWSER_CHECK, fill, fillEnv, loadRunConfig, qaUrl, sessionEnv as pinnedEnv, targetFingerprint, targetUrl } from "./config.mjs";
+import { Screen, notify, ticketMinutes } from "./display.mjs";
+import { hookTime, loadPrices, stepKind, stepRules, ticketMetrics } from "./metrics.mjs";
+import { DEFAULT_RULES as DEFAULT_SIZE, measureTicket as ticketSize } from "./ticket-size.mjs";
 import * as docConfig from "../doc-config.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -98,15 +101,39 @@ function parseArgs(argv) {
 // ------------------------------------------------------------------ helpers
 
 let logFile = null;
+// The terminal (display.mjs) and what it shows: set by main(), null in tests.
+let screen = null;
+let progress = null;
+let liveFile = null;
 
 function stamp() {
   return new Date().toTimeString().slice(0, 8);
 }
 
-function log(message) {
+/**
+ * One line of the run's story: always to run.log, plain. On a terminal a
+ * `routine` line (a ticket starting, a heartbeat, the gates, a ticket built)
+ * shows only through the table and its live row; anywhere else every line
+ * prints as before.
+ */
+function log(message, { routine = false } = {}) {
   const line = `[${stamp()}] ${message}`;
-  console.log(line);
   if (logFile) appendFileSync(logFile, `${line}\n`);
+  if (screen?.tty) {
+    if (!routine) screen.note(line);
+  } else console.log(line);
+}
+
+/** Redraws the live row and saves what status.mjs reads (live.json). */
+function showProgress() {
+  if (!progress) return;
+  screen?.update(progress);
+  if (liveFile) writeFileSync(liveFile, `${JSON.stringify(progress)}\n`);
+}
+
+/** The ticket being built, as the live row shows it. */
+function setCurrent(changes) {
+  if (progress?.current) Object.assign(progress.current, changes);
 }
 
 function die(message) {
@@ -576,7 +603,13 @@ function promptValues(project, prose, ticket) {
     PROJECT_REVIEW: spliced.PROJECT_REVIEW || "This project names no design review: skip this section.",
     QA: project.qa ? `\`${project.qa.name}\`` : "local data",
     TARGET: target ?? "a shared database",
-    STOP_CHECKS: project.stopChecks.length ? project.stopChecks.map((c) => `\`${c.run.replaceAll("{base}", base)}\``).join(", ") : "nothing, as this project names no stop checks",
+    // The tests (a `receipt` row) are run through stop-tests.mjs, so their pass leaves the receipt the stop check reads.
+    STOP_CHECKS: project.stopChecks.length
+      ? project.stopChecks.map((c) => (c.receipt ? "`node tools/phase-run/stop-tests.mjs` (the tests)" : `\`${c.run.replaceAll("{base}", base)}\``)).join(", ")
+      : "nothing, as this project names no stop checks",
+    RECEIPT: project.stopChecks.some((c) => c.receipt)
+      ? " Run the tests through `node tools/phase-run/stop-tests.mjs`, never by hand: it prints a short summary (the failures and the totals), and on a pass records a receipt, so a second run on the same code (or the stop check) skips them. Any edit since makes them run again."
+      : "",
     MIGRATIONS: target
       ? `never apply a migration to ${target} yourself; the runner applies it after your checks pass`
       : "this project's runner applies none, so never apply one to a shared database",
@@ -690,6 +723,7 @@ function runPrint({ prompt, sessionId, resume, options, env, settings, transcrip
 
 const POLL_MS = 10_000;
 const BEAT_MS = 5 * 60_000;
+const LOOK_MS = 60_000;
 // Not working, no stop check running, yet no end of turn written: how long before that is taken as the end.
 const QUIET_MS = 3 * 60_000;
 // The Stop hook's own time limit (`"timeout": 1800` in .claude/settings.json). A marker older than that is a dead check's.
@@ -970,12 +1004,21 @@ async function runBackground({ prompt, sessionId, resume, options, settings, nam
     }
   }
   liveBackground = id;
-  log(`#${number}: session ${id} is working. Watch it: claude attach ${id}   (or: claude agents)`);
+  log(`#${number}: session ${id} is working. Watch it: claude attach ${id}   (or: claude agents)`, { routine: true });
+  setCurrent({ attach: id, stage: "reading" });
+  showProgress();
 
   const startedAt = Date.now();
   const deadline = startedAt + options.minutes * 60_000;
+  const rules = stepRules(config);
+  // "Bash node tools/x.mjs" → the plain word for that step.
+  const stageOf = (lastStep) => {
+    const [tool = "", ...rest] = lastStep.split(" ");
+    return lastStep ? stepKind(tool, rest.join(" "), rules) : "reading";
+  };
   let timedOut = false;
   let lastBeat = startedAt;
+  let lastLook = startedAt;
   let quietSince = null;
   let endedSince = null;
   for (;;) {
@@ -1011,10 +1054,19 @@ async function runBackground({ prompt, sessionId, resume, options, settings, nam
       if (over === "ended, still listed as working") log(`#${number}: the turn is over and its verdict written, but the session is still listed as working; stopping what it left running.`);
       break;
     }
+    // The live row's step count and stage word, every minute; run.log's heartbeat, every five.
+    if (stopCheck) setCurrent({ stage: "stop hook" });
+    else if (Date.now() - lastLook >= LOOK_MS) {
+      lastLook = Date.now();
+      const sofar = readTurn(sessionId, fromLine);
+      setCurrent({ steps: sofar.steps, stage: stageOf(sofar.lastStep) });
+    }
+    showProgress();
     if (Date.now() - lastBeat >= BEAT_MS) {
       lastBeat = Date.now();
       const sofar = readTurn(sessionId, fromLine);
-      log(`#${number}: ${Math.round((lastBeat - startedAt) / 60_000)} min in, ${sofar.steps} steps. Last: ${sofar.lastStep || "(nothing yet)"}`);
+      const stage = stopCheck ? "stop hook" : stageOf(sofar.lastStep);
+      log(`#${number}: ${Math.round((lastBeat - startedAt) / 60_000)} min in, ${sofar.steps} steps, ${stage}. Last: ${sofar.lastStep || "(nothing yet)"}`, { routine: true });
     }
   }
   stopBackground(id);
@@ -1476,9 +1528,23 @@ async function finishBuilt(ticket, base, options, run, session) {
     session,
   };
   if (!push.ok) result.notes.push(`The push failed: ${tail(push.stderr, 400)}`);
-  recordResult(run, result);
+  const stamped = recordResult(run, result);
   if (push.ok) run.pullRequest = ensurePullRequest(run, options);
-  log(`#${ticket.number} built: ${hash} (${stat || "no diff"}).`);
+  log(`#${ticket.number} built: ${hash} (${stat || "no diff"}).`, { routine: true });
+  ticketFinished(stamped);
+}
+
+/** A ticket is over: its row goes into the table, the live row moves on, and a failure or a park says so on the desktop. */
+function ticketFinished(result) {
+  if (progress) {
+    progress.done += 1;
+    progress.current = null;
+    progress.finished.push(ticketMinutes(result) ?? progress.avgMinutes);
+    progress.avgMinutes = Math.round(progress.finished.reduce((a, b) => a + b, 0) / progress.finished.length);
+  }
+  screen?.ticketDone(result);
+  showProgress();
+  if (result.status !== "built") notify(`#${result.number} ${result.status}`, `${result.title}${result.status === "parked" ? ": it needs your answer." : ": read the report."}`);
 }
 
 async function park(ticket, base, kind, detail, run, session) {
@@ -1515,7 +1581,7 @@ async function park(ticket, base, kind, detail, run, session) {
 
   // Applied to the target, but its file went with the reset: the target holds what the branch does not.
   const leftOnTarget = [...run.migrationsApplied].filter((name) => migrationFiles.has(name) && !existsSync(join(ROOT, migrationFiles.get(name))));
-  recordResult(run, {
+  const stamped = recordResult(run, {
     number: n,
     title: ticket.title,
     status: kind === "question" ? "parked" : "failed",
@@ -1525,7 +1591,30 @@ async function park(ticket, base, kind, detail, run, session) {
     notPosted: !(commented && labelled),
     session,
   });
-  log(`#${n} ${kind === "question" ? "parked (needs the owner)" : "failed"}${keptOn ? `, kept on ${keptOn}` : ""}.`);
+  log(`#${n} ${kind === "question" ? "parked (needs the owner)" : "failed"}${keptOn ? `, kept on ${keptOn}` : ""}.`, { routine: true });
+  ticketFinished(stamped);
+}
+
+/**
+ * A ticket's cost, time split and size (metrics.mjs, ticket-size.mjs), for
+ * its result. A measure that cannot be taken is left out: it never stops the run.
+ */
+function measureTicketRun(ticket, startedAt, sessionId, gatesMs) {
+  try {
+    const metrics = ticketMetrics({
+      transcript: transcriptPath(sessionId),
+      startedAt,
+      endedAt: Date.now(),
+      gatesMs,
+      hookMs: hookTime(join(STATE, "stop-check-log.jsonl"), ticket.number, startedAt),
+      prices: loadPrices(),
+      rules: stepRules(config),
+    });
+    const size = Object.fromEntries(ticketSize(ticket.body ?? "", config.ticketSize ?? DEFAULT_SIZE).map((m) => [m.key, m.value]));
+    return { ...metrics, size };
+  } catch (error) {
+    return { error: String(error.message ?? error) };
+  }
 }
 
 function sessionFacts(result, previous) {
@@ -1580,7 +1669,12 @@ async function runTicket(ticket, options, run) {
   };
   Object.assign(values, promptValues(config, projectProse, values));
 
-  log(`#${n} ${ticket.title}: starting${options.print ? ` (session ${sessionId})` : ""}.`);
+  log(`#${n} ${ticket.title}: starting${options.print ? ` (session ${sessionId})` : ""}.`, { routine: true });
+  if (progress) progress.current = { number: n, title: ticket.title, startedAt, steps: 0, stage: "starting", attach: null };
+  showProgress();
+  // Its cost and where its time went, kept with its result (metrics.mjs).
+  let gatesMs = 0;
+  const measured = (facts) => ({ ...facts, metrics: measureTicketRun(ticket, startedAt, sessionId, gatesMs) });
   let call = await runSession({
     ...session,
     prompt: render(readFileSync(join(HERE, "ticket-prompt.md"), "utf8"), values),
@@ -1593,16 +1687,16 @@ async function runTicket(ticket, options, run) {
   for (let round = 0; ; round += 1) {
     sessionId = call.sessionId ?? sessionId;
     if (call.gaveUp) {
-      await park(ticket, base, "failure", `${call.gaveUp} Nothing is wrong with the ticket itself; the run stopped here.`, run, facts);
+      await park(ticket, base, "failure", `${call.gaveUp} Nothing is wrong with the ticket itself; the run stopped here.`, run, measured(facts));
       return "stop";
     }
     if (call.timedOut) {
-      await park(ticket, base, "failure", `The session ran past the ${options.minutes}-minute cap and was stopped.`, run, facts);
+      await park(ticket, base, "failure", `The session ran past the ${options.minutes}-minute cap and was stopped.`, run, measured(facts));
       return "continue";
     }
     const verdict = readVerdict(n);
     if (verdict?.status === "parked") {
-      await park(ticket, base, "question", verdict.question ?? "(The session parked the ticket without writing its question.)", run, facts);
+      await park(ticket, base, "question", verdict.question ?? "(The session parked the ticket without writing its question.)", run, measured(facts));
       return "continue";
     }
     // The last gate may migrate a shared database, and a pass is followed by a push: both need the connection.
@@ -1613,15 +1707,19 @@ async function runTicket(ticket, options, run) {
         "failure",
         `The internet connection did not come back within ${options.waitHours} hours, so the ticket's checks never ran. Nothing is known to be wrong with the ticket itself; the run stopped here.`,
         run,
-        facts,
+        measured(facts),
       );
       return "stop";
     }
-    log(`#${n}: running the gates${round ? ` (after fix round ${round})` : ""}.`);
+    log(`#${n}: running the gates${round ? ` (after fix round ${round})` : ""}.`, { routine: true });
+    setCurrent({ stage: "gates" });
+    showProgress();
+    const gatesFrom = Date.now();
     const gates = await runGates(ticket, base, options, run, startedAt);
+    gatesMs += Date.now() - gatesFrom;
     if (gates.ok) {
       await freeTicketPorts();
-      await finishBuilt(ticket, base, options, run, facts);
+      await finishBuilt(ticket, base, options, run, measured(facts));
       return "continue";
     }
     if (round >= options.fixRounds) {
@@ -1631,11 +1729,13 @@ async function runTicket(ticket, options, run) {
         "failure",
         `The **${gates.gate}** check still failed after ${options.fixRounds} fix rounds. The end of its output:\n\n\`\`\`\n${tail(gates.output, 3000)}\n\`\`\``,
         run,
-        facts,
+        measured(facts),
       );
       return "continue";
     }
     log(`#${n}: ${gates.gate} failed. Fix round ${round + 1} of ${options.fixRounds}.`);
+    setCurrent({ stage: `fix round ${round + 1}`, steps: 0 });
+    showProgress();
     call = await runSession({
       prompt: render(readFileSync(join(HERE, "fix-prompt.md"), "utf8"), {
         ...values,
@@ -1685,6 +1785,32 @@ function docHealthSection(table) {
   return out;
 }
 
+/**
+ * The report's scoreboard: each ticket's minutes (Claude is the remainder
+ * after everything measured), its cost at API rates (prices.json), its peak
+ * context and its size. Size beside cost is what the size budget
+ * (phaseRun.ticketSize) is retuned from.
+ */
+function scoreboardSection(results) {
+  const out = ["### Scoreboard", ""];
+  out.push("| # | Ticket | Result | Min | Claude | Tests | Checks | Browser | Slept | Reviews | Hook | Gates | Cost | Peak | Criteria | Areas | Words |");
+  out.push("|---|---|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|");
+  const cell = (value) => (value == null ? "—" : String(value));
+  for (const r of results) {
+    const m = r.session?.metrics ?? {};
+    const t = m.minutes ?? {};
+    const fixes = Math.max(0, (r.session?.calls ?? 1) - 1);
+    const result = r.status === "built" ? `built${fixes ? `, ${fixes} fix` : ""}` : r.status;
+    out.push(
+      `| ${r.number} | ${r.title.replace(/\|/g, "/").slice(0, 48)} | ${result} | ${cell(ticketMinutes(r))} | ${cell(t.claude)} | ${cell(t.tests)} | ${cell(t.checks)} | ${cell(t.browser)} | ${cell(t.waiting)} | ${cell(t.reviewing)} | ${cell(t.hook)} | ${cell(t.gates)} | ${m.costUsd == null ? "—" : `$${m.costUsd.toFixed(2)}`} | ${m.peakContext ? `${Math.round(m.peakContext / 1000)}K` : "—"} | ${cell(m.size?.criteria)} | ${cell(m.size?.areas)} | ${cell(m.size?.words)} |`,
+    );
+  }
+  const costs = results.map((r) => r.session?.metrics?.costUsd).filter((c) => c != null);
+  const minutes = results.reduce((sum, r) => sum + (ticketMinutes(r) ?? 0), 0);
+  out.push("", `${results.length} ticket(s), ${minutes} min${costs.length ? `, $${costs.reduce((a, b) => a + b, 0).toFixed(2)} at API rates (a usage gauge: a subscription plan is not billed per token)` : ""}. "Claude" is what is left after every measured wait: mostly the model thinking and writing.`, "");
+  return out;
+}
+
 function report(run, options, remaining, { final = true } = {}) {
   const built = run.results.filter((r) => r.status === "built");
   const parked = run.results.filter((r) => r.status === "parked");
@@ -1692,17 +1818,20 @@ function report(run, options, remaining, { final = true } = {}) {
   const out = [];
   const thousands = (tokens) => `${Math.round(tokens / 1000)}K`;
   const money = (facts) =>
-    facts?.costUsd != null
-      ? ` · $${facts.costUsd.toFixed(2)} at list price`
-      : facts?.outputTokens
-        ? ` · ${thousands(facts.outputTokens)} tokens written, context up to ${thousands(facts.peakContext)}`
-        : "";
+    facts?.metrics?.costUsd != null
+      ? ` · $${facts.metrics.costUsd.toFixed(2)} at API rates, context up to ${thousands(facts.metrics.peakContext)}`
+      : facts?.costUsd != null
+        ? ` · $${facts.costUsd.toFixed(2)} at list price`
+        : facts?.outputTokens
+          ? ` · ${thousands(facts.outputTokens)} tokens written, context up to ${thousands(facts.peakContext)}`
+          : "";
   const effort = (facts) => (facts ? `${facts.minutes} min · ${facts.turns} turns · ${facts.calls} session call(s)${money(facts)}` : "");
 
   out.push(`## Phase run report: ${run.branch}`, "");
   out.push(`${new Date().toISOString().slice(0, 16).replace("T", " ")} UTC · built ${built.length} · parked ${parked.length} · failed ${failed.length}`, "");
   if (!final) out.push("🕒 **In progress.** This file is rewritten after each ticket; the run had not finished when it was saved. If no later version exists, the run stopped here.", "");
   if (run.stopped) out.push(`🚨 **The run stopped early.** ${run.stopped}`, "");
+  if (run.results.length) out.push(...scoreboardSection(run.results));
 
   // A ticket this run built again is reported once, under this run's own sections.
   const carried = (run.carried ?? []).filter((c) => !run.results.some((r) => r.number === c.number));
@@ -1825,6 +1954,7 @@ async function main() {
   writeFileSync(lock, `pid ${process.pid}, started ${new Date().toISOString()}, branch ${branch}\n`);
   const release = () => rmSync(lock, { force: true });
   process.on("exit", release);
+  process.on("exit", () => screen?.clearLive()); // a run stopped mid-ticket leaves no half-drawn live row
   // A background session outlives this script (it belongs to Claude Code's
   // background service), so a run that ends for any reason stops its own.
   process.on("exit", () => {
@@ -1863,13 +1993,36 @@ async function main() {
   const reportFile = join(run.dir, `report-${run.runId.slice(0, 16).replace(/[:T]/g, "-")}.md`);
   mkdirSync(join(STATE, "tmp"), { recursive: true }); // where a session keeps its scratch files
   logFile = join(run.dir, "run.log");
+  liveFile = join(run.dir, "live.json");
   const appliedFile = join(run.dir, "migrations-applied.json");
   if (existsSync(appliedFile)) for (const name of JSON.parse(readFileSync(appliedFile, "utf8"))) run.migrationsApplied.add(name);
+
+  // "6 of 10": the tickets this run can reach (ready now, or waiting only on
+  // another ticket), up to --max. The time per ticket starts at the branch's
+  // own average, then follows this run's.
+  const reachable = inScope.filter((ticket) => {
+    const reason = holdReason(ticket, byNumber);
+    return reason === null || reason.startsWith("waiting on #");
+  });
+  const earlier = run.all.map(ticketMinutes).filter((minutes) => minutes != null);
+  screen = new Screen();
+  progress = {
+    label: `${branch.replace(/^phase-/, "").toUpperCase()} phase run`,
+    done: 0,
+    total: Math.min(options.max, reachable.length),
+    startedAt: Date.now(),
+    avgMinutes: earlier.length ? Math.round(earlier.reduce((a, b) => a + b, 0) / earlier.length) : 80,
+    finished: [],
+    current: null,
+  };
+  screen.begin(progress);
 
   log(
     `Run started on ${branch}: ${limit} ticket(s)${options.until ? `, stopping after #${options.until}` : ""}, ` +
       `${options.minutes} min each, ${options.fixRounds} fix rounds.`,
+    { routine: true },
   );
+  showProgress();
 
   let outcome = "continue";
   while (outcome === "continue" && run.results.length < options.max) {
@@ -1884,7 +2037,7 @@ async function main() {
       outcome = await runTicket(next, options, run);
     } catch (error) {
       log(`#${next.number}: the runner itself hit an error and stopped: ${error.message}`);
-      recordResult(run, { number: next.number, title: next.title, status: "failed", detail: `The runner stopped on an error of its own:\n\n\`\`\`\n${error.stack ?? error.message}\n\`\`\`\n\nThe branch was left as it was. Look before running again.`, keptOn: null, session: null });
+      ticketFinished(recordResult(run, { number: next.number, title: next.title, status: "failed", detail: `The runner stopped on an error of its own:\n\n\`\`\`\n${error.stack ?? error.message}\n\`\`\`\n\nThe branch was left as it was. Look before running again.`, keptOn: null, session: null }));
       outcome = "stop";
     }
     writeFileSync(appliedFile, JSON.stringify([...run.migrationsApplied], null, 2));
@@ -1911,7 +2064,11 @@ async function main() {
   saveResults(run);
   if (run.pullRequest) exec("gh", ["pr", "comment", branch, "--body-file", reportFile]);
   log(`Run finished. Report: ${reportFile}${run.pullRequest ? ` · pull request: ${run.pullRequest}` : ""}`);
-  console.log(`\n${text}`);
+  rmSync(liveFile, { force: true });
+  const counts = ["built", "parked", "failed"].map((status) => `${status} ${run.results.filter((r) => r.status === status).length}`).join(" · ");
+  notify(`${progress.label} finished`, `${counts}. The report is in ${relative(ROOT, reportFile)}.`);
+  if (screen.tty) screen.end(run.results);
+  else console.log(`\n${text}`);
 }
 
 // Exported so these can be tested without starting a run.

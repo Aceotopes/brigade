@@ -262,8 +262,17 @@ test("a mistake in the run config is named: a typo'd key, a bad pattern, a port,
     [{ gates: [{ builtin: "browser-check" }] }, /there is no phaseRun\.browserCheck section/],
     [{ ports: [{ port: 99999, what: "x" }] }, /ports\[0\]\.port must be a port number/],
     [{ migrations: { added: "^db/[^/]+\\.sql$", target: { name: "t", urlFrom: "X" }, apply: { run: "migrate" } } }, /added needs a group/],
+    [{ steps: [{ kind: "sleeping", match: "x" }] }, /steps\[0\]\.kind must be one of testing, checking/],
+    [{ steps: [{ kind: "browser", match: "(" }] }, /steps\[0\]\.match is not a valid pattern/],
+    [{ ticketSize: [{ key: "k", kind: "lines", max: 5, label: "lines" }] }, /ticketSize\[0\]\.kind must be one of checkboxes, bullets, words/],
+    [{ ticketSize: [{ key: "k", kind: "bullets", max: 5, label: "Areas" }] }, /ticketSize\[0\]\.section is missing/],
+    [{ ticketSize: [{ key: "k", kind: "words", max: 0, label: "words" }] }, /ticketSize\[0\]\.max must be a whole number/],
   ];
   for (const [phaseRun, error] of cases) assert.throws(() => runConfig(phaseRun), error);
+  const sized = runConfig({ steps: [{ kind: "browser", match: "walks/" }], ticketSize: [{ key: "words", kind: "words", max: 600, label: "words" }] });
+  assert.equal(sized.steps[0].match.test("node walks/1.mjs"), true);
+  assert.deepEqual(sized.ticketSize, [{ key: "words", kind: "words", section: null, max: 600, label: "words" }]);
+  assert.equal(runConfig({}).ticketSize, null);
   const broken = mkdtempSync(join(tmpdir(), "phase-config-"));
   mkdirSync(join(broken, ".claude"));
   writeFileSync(join(broken, ".claude", "workflow.json"), '{ "version": 1, "phaseRun": { "gates": [ ');

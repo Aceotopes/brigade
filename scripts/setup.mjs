@@ -37,6 +37,8 @@ export const ARCHIVE = "docs/history/pre-workflow";
 export const BRANCH = "adopt-workflow";
 /** The project's own settings: written once from its stack, never re-copied. */
 export const CONFIG_FILES = [".claude/workflow.json", ".claude/spec-issues.json", "tools/doc-config.mjs", "tools/doc-check-baseline.json", ".github/workflows/checks.yml"];
+/** The phase runner's own test files, as a project runs them (its `test:runner` script). */
+const RUNNER_TESTS = "tools/phase-run/run.test.mjs tools/phase-run/measure.test.mjs";
 /** Settings keys a project-scope plugin install writes: a change to only these is not a dirty tree. */
 const INSTALL_KEYS = ["enabledPlugins", "extraKnownMarketplaces"];
 /** What the runner and /ticket-check read (tools/phase-run/run.mjs: READY_LABEL, PARK_LABEL; the browser check). */
@@ -263,7 +265,8 @@ export function stackChecks(det) {
 export function proposeWorkflow(det, plugin = PLUGIN, { stack } = {}) {
   const config = JSON.parse(readText(join(plugin, "template", ".claude", "workflow.json")));
   const checks = stackChecks(det);
-  config.stopGate.checks = checks.filter((c) => c.key !== "build").map(({ label, run }) => ({ label, run }));
+  // The tests row carries the receipt (tools/phase-run/stop-tests.mjs): the stop check skips it on code that already passed.
+  config.stopGate.checks = checks.filter((c) => c.key !== "build").map(({ key, label, run }) => ({ label, run, ...(key === "test" ? { receipt: true } : {}) }));
   config.phaseRun.gates = checks.map(({ key, label, run }) => ({ label: label.toLowerCase(), run, ...(key === "test" ? { alone: true } : {}) }));
   const chosen = orderStack(stack ?? { ...(det.stackFromFiles ?? {}), ...(det.discoveryStack?.stack ?? {}) });
   if (Object.keys(chosen).length) config.stack = chosen;
@@ -398,7 +401,7 @@ function commandLines(det, workflow) {
   }
   lines.push(
     `- \`${pm ? RUN[pm]("test:docs") : "node --test tools/doc-tools.test.mjs"}\`: the doc tools' own tests`,
-    `- \`${pm ? RUN[pm]("test:runner") : "node --test tools/phase-run/run.test.mjs"}\`: the phase runner's own tests`,
+    `- \`${pm ? RUN[pm]("test:runner") : `node --test ${RUNNER_TESTS}`}\`: the phase runner's own tests`,
     "- `node tools/doc-check.mjs`: the docs' checks (a hook runs it before every commit)",
   );
   return lines.join("\n");
@@ -581,7 +584,7 @@ export function buildPlan(dir, det, answers, plugin = PLUGIN) {
   if (det.packageJson && !gone("package.json")) {
     const text = readText(join(dir, "package.json"));
     const data = JSON.parse(text);
-    const want = { "test:docs": "node --test tools/doc-tools.test.mjs", "test:runner": "node --test tools/phase-run/run.test.mjs" };
+    const want = { "test:docs": "node --test tools/doc-tools.test.mjs", "test:runner": `node --test ${RUNNER_TESTS}` };
     const missing = Object.entries(want).filter(([key]) => !data.scripts?.[key]);
     if (missing.length) {
       const indent = text.match(/^\{\r?\n([ \t]+)"/)?.[1] ?? "  ";
@@ -992,7 +995,7 @@ export async function verify(dir) {
   };
   run("doc-check", "tools/doc-check.mjs");
   run("the doc tools' tests", "--test", "tools/doc-tools.test.mjs");
-  run("the phase runner's tests", "--test", "tools/phase-run/run.test.mjs");
+  run("the phase runner's tests", "--test", ...RUNNER_TESTS.split(" "));
   const { loadWorkflowConfig } = await import(pathToFileURL(join(PLUGIN, "hooks", "workflow-config.mjs")).href);
   const hooks = loadWorkflowConfig(dir);
   results.push({ label: "the hooks' config", ok: !hooks.error, output: hooks.error ?? "" });

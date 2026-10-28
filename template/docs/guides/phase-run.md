@@ -159,7 +159,15 @@ The runner knows only the workflow. Everything about your project is in `.claude
 (the format is in `tools/phase-run/config.mjs`), and a session is refused any edit to it:
 
 - `stopGate.checks`: what a session must pass each time it stops (typecheck, lint, the tests its
-  changes touch).
+  changes touch). The tests' row carries `"receipt": true`: a session runs it through
+  `node tools/phase-run/stop-tests.mjs`, and the stop check skips it while the code is still what
+  passed. An optional `"quiet": { "totals", "failures" }` pair of patterns on that row says which
+  lines of the test output a session needs (for vitest, `^\s*(Test Files|Tests|Duration)\s` and
+  `^\s*FAIL\s`); without it the session sees the last lines of a pass and the tail of a failure.
+- `phaseRun.steps`: `{ "kind", "match" }` rows that name what a session's commands were (your
+  browser walks as `browser`, say), for the report's time split.
+- `phaseRun.ticketSize`: the size budget `/ticket-check` warns on (`checkboxes` or `bullets` under a
+  section, or `words`); left out, 8 criteria, 8 Areas entries and 800 words.
 - `phaseRun.gates`: the checks the runner itself makes, in order, after a session finishes; a gate
   with `when` runs only if the ticket touched matching files.
 - `phaseRun.preflight` and `phaseRun.ports`: what must be running, and what must be free, before a
@@ -196,6 +204,17 @@ Claude Code session that runs without a window. The run prints a line like
 A finished ticket's session is stopped, not deleted, so in the morning `claude attach <id>` still
 opens it to read back from the top (the report gives each id). `claude rm <id>` removes one you
 no longer want listed.
+
+**The run's own terminal is a table.** One row per finished ticket (its minutes, its cost at API
+rates, its commit, any fix rounds) with dim lines under it: where its time went, its size, and
+anything left for you. Green is built, yellow built after a fix round, red failed or parked. At the
+bottom, redrawn in place: "6 of 10 · 4 after this · 7h31m in · done ≈ 04:20", and the ticket being
+built with a plain word for what it is doing (reading, writing, testing, browser, reviewing,
+waiting, stop hook, gates). The terminal tab's title follows it, and Windows shows a notification
+when the run ends or a ticket fails or parks (`PHASE_RUN_NOTIFY=0` before the command turns that
+off). Piped to a file, or with `NO_COLOR`, the run prints plain lines instead. `run.log` is always
+plain and keeps every five-minute line. From any other terminal, `node tools/phase-run/status.mjs`
+prints the same table, and `status.mjs <ticket>` one ticket's full card.
 
 ## Before the first night of a phase
 
@@ -245,8 +264,9 @@ Useful options:
 5. The ticket's docs and **one commit**, then a code review of that commit; what the review finds
    is fixed and folded into the same commit. Each time the session stops, a **stop check** runs
    first (`stopGate.checks`; a slow one can take ten minutes when the ticket changed a file most
-   of the app imports) and sends the session back once if one fails. The script waits for that
-   check to end before it does anything of its own.
+   of the app imports) and sends the session back once if one fails. Tests that already passed on
+   exactly this code (their receipt) are not run again. The script waits for that check to end
+   before it does anything of its own, and its own checks trust no receipt.
 6. The script itself then checks, in order: exactly one commit, nothing left uncommitted, an
    implementation log; then your project's gates (`phaseRun.gates`: typically typecheck, lint, a
    build when the ticket touched what it compiles, the browser check's screenshots, the whole test
@@ -442,10 +462,14 @@ it blindly: ask in a normal session what it holds.
 
 ## What it costs
 
-Each ticket is a long Claude session, and a night is several. The report shows each ticket's
-minutes, its steps, how many tokens the session wrote and how large its conversation grew. A
-background session reports no dollar figure; only a `--print` run shows one ("at list price":
-what the same work would cost on the pay-as-you-go API, which a subscription does not bill). What
-you do spend is your plan's usage allowance, and a long night can reach its limit. When that
+Each ticket is a long Claude session, and a night is several. The report opens with a
+**Scoreboard**: each ticket's minutes split into Claude (the model's own work, what is left after
+every measured wait), tests, checks, browser, slept, reviews, the stop hook and the gates; its cost
+at API rates; its peak context; and its size. The cost is read from the session's transcript and
+priced with `tools/phase-run/prices.json`: what the same tokens would cost on the pay-as-you-go
+API, a gauge of your plan's allowance, not a bill. Most of a ticket's cost is the model re-reading
+its own growing conversation, so a long ticket costs more per step. "Slept" should stay near zero;
+size beside cost is what you retune `phaseRun.ticketSize` from. What you do spend is your plan's
+usage allowance, and a long night can reach its limit. When that
 happens the run is meant to wait and resume by itself, up to `--wait-hours`; that has never
 happened in a real run, so treat it as unproven.

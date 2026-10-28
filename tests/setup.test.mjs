@@ -108,6 +108,8 @@ test("the runner's own loader accepts the config setup proposes from a stack", a
   assert.equal(error, null);
   assert.deepEqual(config.gates.map((g) => g.label), ["typecheck", "lint", "build", "tests"]);
   assert.equal(JSON.parse(read(target, ".claude/workflow.json")).stopGate.checks[0].run, "pnpm exec tsc --noEmit");
+  // The tests row, and only it, carries the receipt that lets the stop check skip a passed run.
+  assert.deepEqual(config.stopChecks.filter((c) => c.receipt).map((c) => c.label), ["Tests"]);
 });
 
 test("the prototype folder is a route group where the framework has them, and unknown otherwise", () => {

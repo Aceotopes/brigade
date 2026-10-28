@@ -29,12 +29,13 @@ From `template/`:
 
 ```
 node --test tools/doc-tools.test.mjs
-node --test tools/phase-run/run.test.mjs
+node --test tools/phase-run/run.test.mjs tools/phase-run/measure.test.mjs
 ```
 
 | Test file | What it holds in place |
 |---|---|
-| `tests/guard-shell.test.mjs`, `tests/stop-gate.test.mjs` | The hooks' rules, and which folder a command is aimed at |
+| `tests/guard-shell.test.mjs`, `tests/stop-gate.test.mjs` | The hooks' rules, which folder a command is aimed at, the stop check's receipt skip, and its log row as the runner reads it |
+| `template/tools/phase-run/measure.test.mjs` | The runner's measuring and its night-run table: cost and time split, the receipt, quiet test output, the waits, the size budget, and a prompt that never pauses for a fixed time |
 | `tests/workflow-config.test.mjs` | The `.claude/workflow.json` format: every key checked, a broken file fails closed |
 | `tests/env-contract.test.mjs` | The phase-run environment variables, the same in the hooks, doc-check and the runner |
 | `tests/phase-run-config.test.mjs` | The runner's config loader, and that the example holds what the runner once hardcoded |
@@ -90,6 +91,12 @@ these steps:
    - The decisions are in the [0.3.0 discovery doc](discovery/01-brigade-0.3.0.md), the terms in
      the [glossary](../GLOSSARY.md), and the two lasting choices in
      [ADR 0001](adr/0001-no-stack-recipes.md) and [ADR 0002](adr/0002-roadmap-repo-is-truth.md).
+10. **0.4.0, the runner's night** (2026-10-28, unreleased): a port of the runner upgrades one real
+    project built after profiling a 14-ticket night. Each ticket is measured (cost at API rates,
+    the time split), the run's terminal is a table, the stop check trusts a tests-passed receipt,
+    sessions wait on things instead of the clock, and tickets get a size budget. The decisions
+    are in the [0.4.0 discovery doc](discovery/02-brigade-0.4.0.md), the receipt's trust in
+    [ADR 0003](adr/0003-stop-check-trusts-a-receipt.md).
 
 ## Changing the workflow
 

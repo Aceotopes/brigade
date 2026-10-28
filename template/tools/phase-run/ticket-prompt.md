@@ -30,6 +30,11 @@ left you is in the code, the gotchas file and the ADRs.
    module's flow diagram (`design/flows/module-N.md`), with `DESIGN.md`.
 3. The code you will change.
 
+**Read in parts.** Everything you read stays in your context and is read again on every later
+step: on one measured phase a session's context grew past 500k tokens, and re-reading it was over
+half of each ticket's cost. Grep for what you need first, then read that part (the Read tool's
+offset and limit); read a file over ~400 lines whole only when you need all of it.
+
 {{PROJECT_READ}}
 
 Do not read `docs/status/handoff.md`, `docs/handbook/`, the devlog's archive (`docs/history/devlog/`)
@@ -42,11 +47,18 @@ on past nights the same few shapes were refused over and over:
   file with the Write tool. Run a command from the project folder as it is.
 - **A long-running server** (a QA server) runs with the shell tool's background option, as written
   in §5, never with `&` or a redirect.
-- **Waiting.** For a subagent (a reviewer), wait for the notice that it finished; never poll its
-  output file, which can stay empty to the end (one did). Any other wait is a `node` script
-  under `.phase-run/tmp/` with its own deadline (shell `if` and `[` tests are refused here), never
-  an open-ended `until … sleep` loop in the background: one session's two kept running after its
-  work was done, and the finished ticket was parked at the cap.
+- **Waiting: never a fixed-length pause.** No `sleep`, no `setTimeout` pause script, no "wait N
+  minutes": sessions once slept 1.6 hours of one phase that way, mostly after what they waited for
+  had finished. Wait on the thing itself, with the scripts made for it:
+  - for subagents (a design reviewer, the `code-review` skill's reviewers):
+    `node tools/phase-run/wait-subagents.mjs`, which returns the moment every subagent you started
+    has finished. Never poll a subagent's output file, which can stay empty to the end (one did).
+  - for a server you started: `node tools/phase-run/wait-url.mjs <its URL>`, which returns as
+    soon as it answers.
+  - anything else: a `node` script under `.phase-run/tmp/` that checks its condition every few
+    seconds, returns as soon as it holds, and has its own deadline (shell `if` and `[` tests are
+    refused here). Never an open-ended `until … sleep` loop in the background: one session's two
+    kept running after its work was done, and the finished ticket was parked at the cap.
 - **Deleting a file**: under `.phase-run/tmp/`, `rm .phase-run/tmp/<file>` (or `Remove-Item
   .phase-run/tmp/<file>`); a file you created anywhere else, `node -e "require('fs').rmSync('<path>')"`.
 - **Never `git stash`.** Work hidden in a stash passes the clean-tree check and is lost to the
@@ -78,8 +90,9 @@ Never guess a big one to keep moving, and never park a small one to be safe.
 ## 4. Build
 
 - **Test-first.** Use the `tdd` skill at the seams the ticket names. Run the checks and single test
-  files as you go, and before you stop, what the stop check runs: {{STOP_CHECKS}}. The runner runs
-  the project's full checks itself, after you stop, and sends any failure back to you to fix.
+  files as you go, and before you stop, what the stop check runs: {{STOP_CHECKS}}.{{RECEIPT}} The
+  runner runs the project's full checks itself, after you stop, and sends any failure back to you
+  to fix.
 - **A test never reads the real clock.** Pass a fixed `at` (or a fixed date) to what you test;
   never `new Date()`, `Date.now()` or "today" inside a test's expectations. A test that read the
   real clock once expired and failed a whole phase's suite.
@@ -105,6 +118,9 @@ A backend-only ticket skips this section and says so in the implementation log.
 ## 6. One design review (`frontend` tickets only)
 
 {{PROJECT_REVIEW}}
+
+A reviewer that runs as a subagent: when you need its findings, run
+`node tools/phase-run/wait-subagents.mjs`.
 
 ## 7. Docs, then one commit
 
@@ -134,7 +150,8 @@ Then commit **once**:
 
 The `code-review` skill reads committed work, so it runs after the commit. Use it with
 `{{BASE}}` as the fixed point (its diff is `git diff {{BASE}}...HEAD`, which is exactly this
-ticket) and issue #{{N}} as the spec. Fix what is real, re-run the tests the fix touches, and
+ticket) and issue #{{N}} as the spec. Its reviewers run as subagents: wait for them with
+`node tools/phase-run/wait-subagents.mjs`. Fix what is real, re-run the tests the fix touches, and
 **amend** the commit. A finding you turn down goes in the implementation log's "Alternatives turned
 down", with the reason, in the same amend.
 
@@ -172,4 +189,5 @@ or, when parked:
 ```
 
 Use empty lists when there is nothing to report. Then stop. When you stop, the stop check runs
-automatically ({{STOP_CHECKS}}); if one fails you are sent back once to fix it.
+automatically ({{STOP_CHECKS}}; tests whose receipt still matches the code are skipped); if one
+fails you are sent back once to fix it.
