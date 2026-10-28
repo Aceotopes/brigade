@@ -1322,7 +1322,7 @@ function ticketAreas(body) {
  * its shared registries (the ones nearly every ticket touches, which would
  * otherwise teach the owner to ignore the ⚠ line) as phaseRun.alwaysInScope.
  */
-const ALWAYS_IN_SCOPE = [/^docs\//, /^CLAUDE\.md$/, /^CONTEXT\.md$/];
+const ALWAYS_IN_SCOPE = [/^docs\//, /^CLAUDE\.md$/, /^GLOSSARY\.md$/];
 
 function outsideAreas(files, areas, alwaysInScope = []) {
   if (!areas) return [];

@@ -14,6 +14,30 @@ The `mattpocock-skills` named below (`/grill-with-docs`, `/to-spec`, `/to-ticket
 and this repo's `/ticket-check` are **user-invoked only**: Claude can recommend one, but the owner
 types the command.
 
+## Before the first phase: discovery, modules, Phase 0
+
+The ladder, each rung with one job: **discovery** (the whole product) → **modules** (one area each,
+with its own words and data; optional for a small project) → **phases** (a slice tested in one
+morning, one pull request) → **tickets** (one session, one commit).
+
+1. **Discovery.** Rounds with Claude (in chat or here), saved as `docs/discovery/NN-<topic>.md`
+   from [`discovery.md`](../_templates/discovery.md); listed in
+   [the discovery index](../discovery/README.md). Never rewritten: a later fact is a dated addendum
+   under the title. Its "Requirements and stack" table is what setup reads.
+2. **A module's planning grill**: `/grill-with-docs Module N, <name>: plan its phases. Sources: <the
+   discovery docs and sections>`. It produces the module's line and its phases' lines in the
+   roadmap, and `docs/guides/module-N.md` from its template, which opens with **Sources:**. Modules
+   are numbered (Module 1; phases 1A, 1B; branches `phase-1a`, `phase-1b`). A small project skips
+   modules and names its phases (`phase-checkout`). A candidate module from discovery becomes a
+   module only here.
+3. **Phase 0**, the skeleton: the app, its test runner, lint and typecheck, a first test. Grilled
+   like any phase, then built **attended** on branch `phase-0` (the runner has no gates to run yet)
+   and merged through its pull request. Then its checks become the gates and stop checks in
+   `.claude/workflow.json`: the plugin's `scripts/setup.mjs propose .` suggests them.
+
+Every grill after that names its sources the same way: the module guide's **Sources:** say which
+discovery docs to read.
+
 ## The path of a phase (since 2026-10-07)
 
 ```
@@ -23,7 +47,7 @@ types the command.
 
 | # | Step | Who | What happens |
 |---|---|---|---|
-| 1 | **Grill** — `/grill-with-docs` | Owner + Claude, one sitting | Every question a ticket would otherwise stop on is answered now. Settled terms and decisions go into `CONTEXT.md` / `docs/adr/` as it goes. After it, only the outcome is written; the owner runs the next commands |
+| 1 | **Grill** — `/grill-with-docs` | Owner + Claude, one sitting | Every question a ticket would otherwise stop on is answered now. Settled terms and decisions go into `GLOSSARY.md` / `docs/adr/` as it goes. After it, only the outcome is written; the owner runs the next commands |
 | 2 | **Flow diagram + prototype** | Claude builds, owner reviews | A Mermaid flow diagram, then a clickable prototype in the app's real colours with fake data (through Impeccable, in a project that uses it). Polish here for as long as it takes: a change costs minutes here and days later. With Impeccable, a surface brief is written at approval per new screen family (`.impeccable/surfaces/`). A backend-only phase skips this step |
 | 3 | **Spec and tickets** — `/to-spec`, `/to-tickets` | Owner starts, Claude writes | Tickets follow [`ticket-template.md`](ticket-template.md): each stands alone, names its prototype screen, its decisions and its areas |
 | 4 | **Readiness check** — `/ticket-check <spec>` | Owner + Claude, one sitting | Claude reads the spec, every ticket and the code, and asks every open question in one batch. Answers are written into the tickets; ready ones get the `run-ready` label |

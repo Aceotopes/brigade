@@ -80,7 +80,7 @@ The end-to-end behaviour this ticket makes work, from the person's side. Not a l
   ticket is attached to its spec as a sub-issue. The runner reads both; the text is for people.
 - **Areas** are folders, not file lists. The morning report flags a changed file outside them, so a
   missing area produces a false flag and an over-wide one hides over-building. `docs/`,
-  `CLAUDE.md` and `CONTEXT.md` are always in scope, and so is whatever the project lists in
+  `CLAUDE.md` and `GLOSSARY.md` are always in scope, and so is whatever the project lists in
   `phaseRun.alwaysInScope` (`.claude/workflow.json`): its tests, its design files, and the shared
   registries nearly every ticket touches.
 - **Handed forward** is written when the tickets are drafted, from what each ticket's "Not in this

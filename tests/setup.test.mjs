@@ -4,7 +4,7 @@
 // Run: node --test tests/*.test.mjs
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { cpSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -86,6 +86,20 @@ test("new mode on an empty repo: the whole workflow, clean on day one, staged an
   assert.equal(node(dir, "tools/doc-check.mjs", "--head").status, 0);
 });
 
+test("discovery first: a repo holding only discovery docs is still new, and setup lists them in its index", () => {
+  const { dir } = repo("brigade-discovery-");
+  const doc = "# Discovery: the gym desk\n\n**Rounds:** 2026-10-20, in Claude chat.\n\n## Goals\n\n1. Check members in.\n";
+  write(dir, { "docs/discovery/01-gym-desk.md": doc });
+  assert.equal(detect(dir).empty, true);
+  write(dir, { "docs/notes.md": "# Notes\n" });
+  assert.equal(detect(dir).empty, false, "any other doc makes it an existing repo");
+  rmSync(join(dir, "docs/notes.md"));
+  const result = apply(dir, runPlan(dir, { mode: "new" }));
+  assert.equal(result.docCheck.status, 0, result.docCheck.output);
+  assert.equal(read(dir, "docs/discovery/01-gym-desk.md"), doc, "setup never touches a discovery doc");
+  assert.match(read(dir, "docs/discovery/README.md"), /- \[01\]\(01-gym-desk\.md\) · Discovery: the gym desk · 2026-10-20 · no addendum/);
+});
+
 test("the runner's own loader accepts the config setup proposes from a stack", async () => {
   const { dir: target } = existing();
   apply(target, runPlan(target, { mode: "merge" }));
@@ -160,6 +174,30 @@ test("a CLAUDE.md one folder down: merge points the new CLAUDE.md at it, overwri
   assert.deepEqual(result.oldRules, [`${ARCHIVE}/docs/CLAUDE.md`]);
   assert.match(read(over, result.oldRules[0]), /Never push to main/);
   assert.doesNotMatch(read(over, "CLAUDE.md"), /Read `docs\/CLAUDE\.md`/, "its archived copy is read once, not pointed at");
+});
+
+test("a glossary under its old name, CONTEXT.md: merge reports it beside GLOSSARY.md, overwrite archives it for carrying over", () => {
+  const withOld = () => {
+    const made = existing();
+    write(made.dir, { "CONTEXT.md": "# Gym\n\n**Member**:\nA person with a paid plan.\n" });
+    made.git("add", "-A");
+    made.git("commit", "-q", "-m", "a glossary");
+    return made;
+  };
+  const { dir } = withOld();
+  assert.ok(detect(dir).agentFiles.includes("CONTEXT.md"));
+  const merged = runPlan(dir, { mode: "merge" });
+  assert.ok(merged.sameJob.some((s) => s.theirs === "CONTEXT.md" && s.ours.startsWith("GLOSSARY.md")), JSON.stringify(merged.sameJob));
+  assert.deepEqual(merged.oldGlossary, []);
+  assert.deepEqual(merged.oldRules, [], "a glossary is not a rules file");
+  const { dir: over } = withOld();
+  const p = runPlan(over, { mode: "overwrite" });
+  assert.deepEqual(p.oldGlossary, [`${ARCHIVE}/CONTEXT.md`]);
+  assert.ok(!p.oldRules.some((f) => f.endsWith("CONTEXT.md")));
+  const result = apply(over, p);
+  assert.deepEqual(result.oldGlossary, [`${ARCHIVE}/CONTEXT.md`]);
+  assert.match(read(over, result.oldGlossary[0]), /A person with a paid plan/);
+  assert.ok(!existsSync(join(over, "CONTEXT.md")));
 });
 
 test("the command line: plan previews the changed files, apply writes, verify passes every check", () => {

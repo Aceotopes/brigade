@@ -53,7 +53,10 @@ const SAME_JOB = [
   [/(^|\/)(devlog|changelog)[^/]*\.md$/i, "docs/history/devlog.md"],
   [/^docs\/(logs?|journal)\/[^/]+\.md$/i, "docs/history/implementation-log/"],
   [/(^|\/)(adrs?|decisions)\/(?!\d{4}-)[^/]+\.md$/i, "docs/adr/ (named NNNN-<slug>.md)"],
+  [/^CONTEXT\.md$/, "GLOSSARY.md, the workflow's name for the glossary since 0.3.0: rename it when you like"],
 ];
+/** The glossary's name, then the name it had before 0.3.0. */
+const GLOSSARY_NAMES = ["GLOSSARY.md", "CONTEXT.md"];
 
 const lf = (text) => text.replace(/\r\n/g, "\n");
 export const hash = (text) => createHash("sha256").update(lf(text)).digest("hex").slice(0, 16);
@@ -132,7 +135,10 @@ export function detect(dir) {
   const files = isRepo
     ? (git("ls-files", "--cached", "--others", "--exclude-standard") ?? "").split("\n").filter(Boolean)
     : walk(dir);
-  const meaningful = files.filter((f) => !/^(README(\.md)?|LICENSE(\..+)?|\.gitignore|\.gitattributes|\.claude\/settings\.json)$/i.test(f));
+  // Discovery docs come before setup (docs/agents/workflow.md), so a repo holding only them is still new.
+  const meaningful = files.filter(
+    (f) => !/^(README(\.md)?|LICENSE(\..+)?|\.gitignore|\.gitattributes|\.claude\/settings\.json)$/i.test(f) && !/^docs\/discovery\/[^/]+\.md$/.test(f),
+  );
 
   const json = (rel) => {
     try {
@@ -179,7 +185,7 @@ export function detect(dir) {
     prisma: schema ? { provider: schema.match(/datasource\s+\w+\s*\{[^}]*provider\s*=\s*"([^"]+)"/)?.[1] ?? "unknown" } : null,
     frontend,
     docs,
-    agentFiles: ["CLAUDE.md", "AGENTS.md", "CONTEXT.md"].filter((f) => existsSync(join(dir, f))),
+    agentFiles: ["CLAUDE.md", "AGENTS.md", ...GLOSSARY_NAMES].filter((f) => existsSync(join(dir, f))),
     // One folder down (a docs/CLAUDE.md): a project's rules, which Claude reads only on demand.
     nestedAgentFiles: files.filter((f) => /^[^./][^/]*\/(CLAUDE|AGENTS)\.md$/.test(f)),
     topFolders,
@@ -361,8 +367,10 @@ export function buildPlan(dir, det, answers, plugin = PLUGIN) {
   // The project's own rules files. Overwrite archives the top-level ones and those in docs/, and the
   // skill reads each from there (oldRules); one left in place gets a line in the new CLAUDE.md, as
   // Claude reads a nested CLAUDE.md only when it works in that folder.
-  const rulesFiles = [...det.agentFiles.filter((f) => f !== "CONTEXT.md"), ...(det.nestedAgentFiles ?? [])];
+  const rulesFiles = [...det.agentFiles.filter((f) => !GLOSSARY_NAMES.includes(f)), ...(det.nestedAgentFiles ?? [])];
   const oldRules = mode === "overwrite" ? rulesFiles.map((f) => rulesFileAfter(mode, f)).filter((f) => f.startsWith(`${ARCHIVE}/`)) : [];
+  // An old glossary is archived too, and the skill offers its terms for GLOSSARY.md.
+  const oldGlossary = mode === "overwrite" ? det.agentFiles.filter((f) => GLOSSARY_NAMES.includes(f)).map((f) => `${ARCHIVE}/${f}`) : [];
   const pointers = (det.nestedAgentFiles ?? [])
     .filter((f) => rulesFileAfter(mode, f) === f)
     .map((f) => `- **Read \`${f}\` before any work**: the project's own context and rules, from before the workflow. Where it and this file differ, ask.`);
@@ -435,7 +443,7 @@ export function buildPlan(dir, det, answers, plugin = PLUGIN) {
   }
 
   const sameJob = mode === "merge" ? sameJobPairs(det.docs) : [];
-  return { mode, head: det.git.head, problems, answers: { ...answers, date }, actions, sameJob, oldRules };
+  return { mode, head: det.git.head, problems, answers: { ...answers, date }, actions, sameJob, oldRules, oldGlossary };
 }
 
 /** The workflow's CLAUDE.md sections (its commands on) after the project's own text, and a header on top if it had none. */
@@ -529,6 +537,7 @@ export function apply(dir, saved, plugin = PLUGIN) {
     manual: fresh.actions.filter((a) => a.op === "manual").map((a) => `${a.path}: ${a.note}`),
     sameJob: fresh.sameJob,
     oldRules: fresh.oldRules,
+    oldGlossary: fresh.oldGlossary,
     docCheck: { status: check.status, output: `${check.stdout}${check.stderr}`.trim() },
   };
 }
@@ -684,6 +693,7 @@ function summarize(p) {
   }
   if (p.sameJob.length) out.push("", "Docs of yours that look like they do a job the workflow keeps elsewhere (nothing moved):", ...p.sameJob.map((s) => `  ${s.theirs}  ~  ${s.ours}`));
   if (p.oldRules.length) out.push("", "The project's old rules, to carry into CLAUDE.md after apply (read from):", ...p.oldRules.map((f) => `  ${f}`));
+  if (p.oldGlossary?.length) out.push("", "The project's old glossary, its terms to carry into GLOSSARY.md after apply (read from):", ...p.oldGlossary.map((f) => `  ${f}`));
   return out.join("\n");
 }
 

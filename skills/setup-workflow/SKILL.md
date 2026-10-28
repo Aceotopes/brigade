@@ -30,7 +30,7 @@ never in `git status`. `<dir>` below is the project's root (`CLAUDE_PROJECT_DIR`
     `.phase-run/` to `.gitignore`, each shown as a diff first; accepts today's docs as they are
     (`doc-check --adopt` lists those without a header, and the list only shrinks).
   - **Overwrite** (a clean slate): on a new branch `adopt-workflow`, moves `docs/`, `CLAUDE.md`,
-    `AGENTS.md`, `CONTEXT.md` and a `.claude/settings.json` with more than the plugin keys into
+    `AGENTS.md`, `GLOSSARY.md` (or its older name, `CONTEXT.md`) and a `.claude/settings.json` with more than the plugin keys into
     `docs/history/pre-workflow/` (moved, never deleted), then writes the workflow's files fresh.
 - A dirty tree (`git.dirty` not empty) blocks either: list the files and stop until the owner
   commits or stashes them. The plugin install's own `.claude/settings.json` change does not count.
@@ -85,6 +85,10 @@ one folder down, at their archived paths (a `docs/CLAUDE.md` is at
 an "always", a command that must be used, a fact a session must know). Ask about them a few at a
 time (AskUserQuestion, up to 4 per call: keep as is, reword, drop), and write the kept ones under
 `CLAUDE.md`'s "This project's rules", one line each. Never drop one without asking.
+
+An old glossary (`oldGlossary`: a `GLOSSARY.md`, or a `CONTEXT.md` from before 0.3.0) is handled the
+same way: list its terms, ask which to keep, and write the kept ones into a new `GLOSSARY.md` in
+the `domain-modeling` skill's format.
 
 ## 6. The rest of the setup
 

@@ -21,7 +21,7 @@ the finish ticket, whatever a row below says.
 | `docs/guides/<tool>.md` | The tool it covers changes: a new error mode, a changed command, a retired resource. |
 | `docs/reference/domain-model.md` | A table or column changes, or an `OPEN-nn` item is resolved: mark it `✅ CLOSED`, link the ADR, "Recommendation" becomes "Decided". |
 | `docs/reference/tech-stack.md` | A technology is added, replaced or dropped; keep `CLAUDE.md`'s summary in step. |
-| `CONTEXT.md` | A domain term appears or its definition sharpens (`mattpocock-skills:domain-modeling`'s format: one term, one word, rejects under `_Avoid_`). The why goes in an ADR. |
+| `GLOSSARY.md` | A domain term appears or its definition sharpens (`mattpocock-skills:domain-modeling`'s format: one term, one word, rejects under `_Avoid_`). The why goes in an ADR. |
 | `CLAUDE.md` | A rule, the stack, the working agreement, or a gotcha that bites every session changes. Never status. |
 | `docs/agents/*.md` | The process, the ticket shape, the issue tracker, the labels or the domain-doc layout changes; keep `CLAUDE.md`'s "Agent skills" block in step. |
 | `docs/agents/gotchas/<phase>.md` (doc-config's `GOTCHAS_FILE`) | A ticket adds, changes or retires a trap (`SKILL.md` §1). A rule that bites every session goes in `CLAUDE.md` instead. |
@@ -31,6 +31,8 @@ the finish ticket, whatever a row below says.
 | `docs/history/implementation-log/NNN-*.md` | Every ticket or real code change (`SKILL.md` §1), before the commit go-ahead is asked for. Numbered on from the last file, independent of other numbers. |
 | `docs/history/*` archives and snapshots | Never: frozen records. |
 | `docs/research/*.md` | New research only; a re-check is a new dated file. |
+| `docs/discovery/NN-*.md` (doc-config's `DISCOVERY_DIR`) | A new one: discovery rounds finished (from `docs/_templates/discovery.md`, the next number). An existing one: **never rewritten** (doc-check refuses it). When a later fact changes what it says, or a mistake is found, add a dated addendum under its title, newest first: the fact, **Changes:**, **Open:**. The index is generated. |
+| `docs/guides/module-N.md`, its **Sources:** line | The module's planning grill writes it: the discovery docs and sections the module came from. A later grill in the module that reads another doc adds it. |
 | `docs/_templates/*.md` | A doc kind's shape changes. Keep `SKILL.md` §1/§3 in step. |
 
 ## Outside `docs/`

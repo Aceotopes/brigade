@@ -9,6 +9,7 @@ reads the header at every commit. The kinds and rules are in [`docs/README.md`](
 
 | Template | For | Lands in |
 |---|---|---|
+| [`discovery.md`](discovery.md) | What the product is for: goals, problems, the stack, candidate modules. Never rewritten; later facts are addenda | `docs/discovery/NN-<topic>.md` |
 | [`adr.md`](adr.md) | A decision that is hard to reverse, surprising without context, and a real trade-off | `docs/adr/NNNN-<slug>.md` |
 | [`devlog-entry.md`](devlog-entry.md) | One commit's entry (at most 15 lines) | the top of `docs/history/devlog.md` |
 | [`implementation-log.md`](implementation-log.md) | One ticket's learning walkthrough | `docs/history/implementation-log/NNN-<slug>.md` |

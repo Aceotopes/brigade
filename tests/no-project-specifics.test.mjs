@@ -48,6 +48,21 @@ test("no file outside the pending list names one project", () => {
   assert.deepEqual(ALL.filter((rel) => !PENDING.includes(rel)).flatMap(hits), []);
 });
 
+// A name the workflow has dropped, so it cannot creep back into the generic half. Only the files that
+// detect the old name, to archive or report it, may say it.
+const RENAMED = [
+  { term: /\bCONTEXT\.md\b/, now: "GLOSSARY.md", since: "0.3.0", allowedIn: ["scripts/setup.mjs", "skills/setup-workflow/SKILL.md"] },
+];
+
+test("no file in the generic half uses a renamed file's old name", () => {
+  const found = RENAMED.flatMap(({ term, now, since, allowedIn }) =>
+    ALL.filter((rel) => !allowedIn.includes(rel) && term.test(readFileSync(join(PLUGIN, rel), "utf8"))).map(
+      (rel) => `${rel}: ${term} was renamed to ${now} in ${since}`,
+    ),
+  );
+  assert.deepEqual(found, []);
+});
+
 // Brigade's own docs are for any reader, so they name no project either. They name the plugin's own
 // repo (the install command), so its owner is not banned here.
 const PUBLIC_DOCS = ["README.md", "CHANGELOG.md", "GLOSSARY.md", "docs"];

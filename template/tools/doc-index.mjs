@@ -160,6 +160,23 @@ function adrIndex({ target, dir }) {
     .join("\n");
 }
 
+/**
+ * One line per discovery doc, in number order: its title, when its rounds were held (its `**Rounds:**`
+ * or `**Date:**` line), and its newest addendum's date, so a reader sees which docs changed since.
+ */
+function discovery({ target, dir }) {
+  return markdownFiles(dir)
+    .filter((f) => posix.basename(f) !== "README.md")
+    .map((file) => {
+      const text = read(file);
+      const date = text.match(/^\*\*(?:Rounds|Date):\*\*[^\n]*?(\d{4}-\d{2}-\d{2})/m)?.[1] ?? "no date";
+      const addendum = text.match(/^> \*\*Addendum (\d{4}-\d{2}-\d{2}):\*\*/m)?.[1];
+      const name = posix.basename(file, ".md");
+      return `- [${name.match(/^\d+/)?.[0] ?? name}](${link(target, file)}) · ${title(text)} · ${date} · ${addendum ? `latest addendum ${addendum}` : "no addendum"}`;
+    })
+    .join("\n");
+}
+
 /** The top-level bullets under a `## <heading>` (matched by its start), each joined onto one line. */
 function bulletsUnder(text, heading) {
   const lines = text.split("\n");
@@ -213,6 +230,7 @@ function openItems({ target, register, lists = [] }) {
 
 export const GENERATORS = {
   "adr-index": adrIndex,
+  discovery,
   "open-items": openItems,
   "implementation-log": implementationLog,
   "devlog-archive": devlogArchive,

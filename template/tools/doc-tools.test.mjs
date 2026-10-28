@@ -297,3 +297,64 @@ test("the health report lists each budgeted doc, fullest first, and closed files
   assert.match(report, /docs\/roadmap\.md\s+10 \/ 10\s+100%\s+over: trim it|docs\/roadmap\.md\s+10 \/ 10\s+100%/);
   assert.match(report, /Closed \(growth: closed[^\n]*\): 1 files\n.*docs\/old\.md/);
 });
+
+/** The fixture repo with a discovery folder: header-exempt, indexed, and one committed doc. */
+function withDiscovery() {
+  const made = repo();
+  const config = CONFIG.replace(
+    'export const HEADER_EXEMPT = [/^docs\\/devlog\\//];',
+    'export const DISCOVERY_DIR = "docs/discovery";\nexport const HEADER_EXEMPT = [/^docs\\/devlog\\//, /^docs\\/discovery\\/(?!README\\.md$)/];',
+  ).replace(
+    'export const GENERATED = [',
+    'export const GENERATED = [{ name: "discovery", target: "docs/discovery/README.md", dir: "docs/discovery" }, ',
+  );
+  writeFileSync(join(made.dir, "tools", "doc-config.mjs"), config);
+  mkdirSync(join(made.dir, "docs", "discovery"));
+  const index = "---\njob: Every discovery doc and its newest addendum.\nkind: generated\n---\n# Discovery\n\n<!-- generated:start discovery -->\n<!-- generated:end discovery -->\n";
+  writeFileSync(join(made.dir, "docs", "discovery", "README.md"), index);
+  const doc = "# Discovery: the shop\n\n**Rounds:** 2026-10-01, with the owner.\n\n## Goals\n\n- Sell coffee to 40 regulars.\n";
+  writeFileSync(join(made.dir, "docs", "discovery", "01-shop.md"), doc);
+  made.node("doc-index.mjs");
+  made.run("add", "-A");
+  made.run("commit", "-q", "-m", "docs: discovery — devlog #1");
+  const path = join(made.dir, "docs", "discovery", "01-shop.md");
+  const edit = (from, to) => writeFileSync(path, readFileSync(path, "utf8").replace(from, to));
+  const check = () => {
+    made.node("doc-index.mjs");
+    return made.node("doc-check.mjs");
+  };
+  return { ...made, path, edit, check };
+}
+
+test("a discovery doc needs no header and is listed in its index, with its newest addendum", () => {
+  const { dir, edit, check } = withDiscovery();
+  const index = () => readFileSync(join(dir, "docs", "discovery", "README.md"), "utf8");
+  assert.match(index(), /- \[01\]\(01-shop\.md\) · Discovery: the shop · 2026-10-01 · no addendum/);
+  edit("# Discovery: the shop\n", "# Discovery: the shop\n\n> **Addendum 2026-11-02:** 14 regulars, not 40. **Changes:** Goals. **Open:** none.\n");
+  const result = check();
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(index(), /· 2026-10-01 · latest addendum 2026-11-02/);
+});
+
+test("a committed discovery doc is never rewritten: a changed line, an edited addendum or a deletion fails; a rename passes", () => {
+  const { run, node, edit, check } = withDiscovery();
+  edit("40 regulars", "14 regulars");
+  assert.match(check().stderr, /01-shop\.md: a line below its addendum block changed\. A discovery doc is never rewritten/);
+  edit("14 regulars", "40 regulars");
+  edit("# Discovery: the shop\n", "# Discovery: the shop\n\n> **Addendum 2026-11-02:** 14 regulars, not 40.\n");
+  assert.equal(check().status, 0);
+  run("commit", "-q", "-am", "docs: an addendum — devlog #1");
+  edit("14 regulars, not 40", "15 regulars");
+  assert.match(check().stderr, /an earlier addendum changed/);
+  edit("15 regulars", "14 regulars, not 40");
+  edit("# Discovery: the shop\n", "# Discovery: the shop\n\n> **Addendum 2026-11-09:** It opens at 7.\n");
+  const twice = check();
+  assert.equal(twice.status, 0, twice.stderr);
+  run("checkout", "--", "docs");
+  run("mv", "docs/discovery/01-shop.md", "docs/discovery/01-coffee-shop.md");
+  const renamed = check();
+  assert.equal(renamed.status, 0, renamed.stderr);
+  run("rm", "-q", "-f", "docs/discovery/01-coffee-shop.md");
+  assert.match(check().stderr, /01-shop\.md: a discovery doc was deleted/);
+  assert.equal(node("doc-check.mjs", "--report").status, 0);
+});

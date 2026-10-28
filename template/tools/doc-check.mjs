@@ -2,7 +2,8 @@
 // checks that used to be greps a session ran from memory. No tokens, no
 // network, a second or two.
 //
-//   node tools/doc-check.mjs                    stale phrases, missing paths, headers and budgets, stale indexes
+//   node tools/doc-check.mjs                    stale phrases, missing paths, headers and budgets, stale indexes,
+//                                               a rewritten discovery doc
 //   node tools/doc-check.mjs --head             + the devlog's top entry matches HEAD's commit
 //   node tools/doc-check.mjs --message-file F   + the devlog's top entry matches a commit about to be made
 //   node tools/doc-check.mjs --message TEXT     the same, for a message given inline
@@ -42,10 +43,13 @@ import {
   PATH_ROOTS,
   STATUS_DOCS,
 } from "./doc-config.mjs";
+import * as docConfig from "./doc-config.mjs";
 import { staleIndexes } from "./doc-index.mjs";
 import { ROOT, budgetProblems, citedDevlogNumbers, devlogEntries, git, isMain, parseFrontmatter, read } from "./doc-lib.mjs";
 
 const BASELINE_PATH = join(ROOT, "tools", "doc-check-baseline.json");
+/** Optional, since 0.3.0: a config written before then has no DISCOVERY_DIR and gets the default. */
+const DISCOVERY_DIR = docConfig.DISCOVERY_DIR ?? "docs/discovery";
 
 const STALE_PHRASES = [
   "not yet committed",
@@ -222,6 +226,57 @@ function budgetRaises(base) {
   return raises;
 }
 
+/**
+ * A discovery doc in three parts: its title line, its addendum block (the quoted and blank lines right
+ * under the title), and its body, everything after.
+ */
+function discoveryParts(text) {
+  const lines = text.replace(/\r\n/g, "\n").split("\n");
+  const at = lines.findIndex((line) => /^# /.test(line));
+  if (at === -1) return { head: "", addenda: "", body: lines.join("\n") };
+  let end = at + 1;
+  while (end < lines.length && (lines[end].trim() === "" || lines[end].startsWith(">"))) end += 1;
+  return { head: lines.slice(0, at + 1).join("\n"), addenda: lines.slice(at + 1, end).join("\n").trim(), body: lines.slice(end).join("\n") };
+}
+
+/**
+ * Every committed discovery doc (at `base`) that a change rewrote: a line of its title or body changed,
+ * an earlier addendum edited, or the doc deleted. A new addendum on top is the only change allowed, so
+ * the doc keeps what was first decided. A rename that keeps the text is allowed.
+ */
+function discoveryRewrites(base) {
+  let committed;
+  try {
+    committed = git(["ls-tree", "-r", "--name-only", base, "--", DISCOVERY_DIR]).split("\n");
+  } catch {
+    return []; // no commit yet, or no discovery folder in it
+  }
+  committed = committed.filter((f) => f.endsWith(".md") && posix.basename(f) !== "README.md");
+  const present = [];
+  walk(DISCOVERY_DIR, present);
+  const problems = [];
+  for (const file of committed) {
+    const before = discoveryParts(git(["show", `${base}:${file}`]));
+    if (!existsSync(join(ROOT, file))) {
+      const moved = present.some((other) => {
+        const after = discoveryParts(read(other));
+        return !committed.includes(other) && after.head === before.head && after.body === before.body;
+      });
+      if (!moved) problems.push(`${file}: a discovery doc was deleted. Discovery docs are records: a fact that no longer holds gets a dated addendum, the doc stays.`);
+      continue;
+    }
+    const after = discoveryParts(read(file));
+    if (after.head !== before.head || after.body !== before.body) {
+      problems.push(
+        `${file}: a line below its addendum block changed. A discovery doc is never rewritten: put the new fact, or the correction, in a dated addendum under its title ("> **Addendum YYYY-MM-DD:** …"), and restore the line.`,
+      );
+    } else if (!after.addenda.endsWith(before.addenda)) {
+      problems.push(`${file}: an earlier addendum changed. Leave it as written and add a new addendum above it.`);
+    }
+  }
+  return problems;
+}
+
 /** Each budgeted doc's size against its limit, fullest first: the warning before a commit is refused. */
 function healthReport() {
   const rows = [];
@@ -361,6 +416,7 @@ function main() {
 
   failures.push(...headerProblems(new Set(baseline.headers)));
   failures.push(...staleIndexes());
+  failures.push(...discoveryRewrites(flag("--head") ? "HEAD~1" : "HEAD"));
 
   const raises = budgetRaises(flag("--head") ? "HEAD~1" : "HEAD");
   if (process.env.PHASE_RUN === "1") {

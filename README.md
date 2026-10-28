@@ -195,7 +195,7 @@ Your rules live in `.claude/workflow.json`, written by setup from your stack:
 
 `phaseRun` also holds what must be running before a run, ports, a QA database, migrations, a
 browser check and the prose each session is given. Every key is described in the
-[guide](docs/guide.md#4-configuring). A typo fails loudly instead of quietly turning a rule off.
+[guide](docs/guide.md#6-configuring). A typo fails loudly instead of quietly turning a rule off.
 
 ## Status
 

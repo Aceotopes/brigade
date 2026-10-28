@@ -83,7 +83,7 @@ these steps:
 
 Planning above a phase (discovery and modules), the design rung for frontends, a project's stack
 read from discovery, and a roadmap page. The decisions are in the
-[0.3.0 discovery doc](discovery/0.3.0.md), the terms in the [glossary](../GLOSSARY.md), and the two
+[0.3.0 discovery doc](discovery/01-brigade-0.3.0.md), the terms in the [glossary](../GLOSSARY.md), and the two
 lasting choices in [ADR 0001](adr/0001-no-stack-recipes.md) and
 [ADR 0002](adr/0002-roadmap-repo-is-truth.md).
 

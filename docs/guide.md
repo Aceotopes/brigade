@@ -4,14 +4,80 @@ How to set a repo up, take a phase from idea to merge, configure the rules, keep
 current, and get out of trouble. The README has the short version and the command tables; this
 guide has the reasons and the options.
 
-- [1. Setting a repo up](#1-setting-a-repo-up)
-- [2. What your repo gets](#2-what-your-repo-gets)
-- [3. A phase, start to finish](#3-a-phase-start-to-finish)
-- [4. Configuring](#4-configuring)
-- [5. Updating](#5-updating)
-- [6. Troubleshooting](#6-troubleshooting)
+- [1. The ladder: from an idea to tickets](#1-the-ladder-from-an-idea-to-tickets)
+- [2. Starting a fresh project](#2-starting-a-fresh-project)
+- [3. Setting a repo up](#3-setting-a-repo-up)
+- [4. What your repo gets](#4-what-your-repo-gets)
+- [5. A phase, start to finish](#5-a-phase-start-to-finish)
+- [6. Configuring](#6-configuring)
+- [7. Updating](#7-updating)
+- [8. Troubleshooting](#8-troubleshooting)
 
-## 1. Setting a repo up
+## 1. The ladder: from an idea to tickets
+
+Brigade breaks work down in four rungs, each one smaller than the one above, and each with one job.
+Terms are in the [glossary](../GLOSSARY.md).
+
+| Rung | What it is | Rough size | Planned from | What comes out |
+|---|---|---|---|---|
+| **Discovery** | The whole product: goals, problems, users, the stack, the areas it splits into | the whole project | Your discovery rounds, in Claude chat or a session | `docs/discovery/NN-<topic>.md`, never rewritten |
+| **Module** | One area with its own words and data ("Inventory", "Payroll"). Optional for a small project | weeks | A planning grill naming its discovery docs | Its phases on the roadmap, and `docs/guides/module-N.md` opening with **Sources:** |
+| **Phase** | A slice you can test end to end in one morning and merge on its own | 5–10 tickets, one pull request | A phase grill, from the module guide's sources | A spec issue, then tickets |
+| **Ticket** | One session's work | one commit, under two hours | The spec | Code, tests, its implementation log |
+
+**Each grill works on one rung and names its sources** in its first line, so nothing is planned from
+memory:
+
+```
+/grill-with-docs Module 2, Inventory: plan its phases. Sources: docs/discovery/03-inventory.md and 05-suppliers.md.
+/grill-with-docs Phase 2A, stock counts. Sources: 03-inventory.md §2–§4, docs/guides/module-2.md.
+```
+
+**Drawing the lines:**
+- A module boundary is where the words change: payroll talks about cutoffs and payslips, inventory
+  about counts and suppliers.
+- A phase is the right size when you could hand-test all of it in one morning.
+- A ticket is the right size when one fresh session can finish it without asking anything.
+
+Modules are numbered: Module 1, phases 1A and 1B, branches `phase-1a` and `phase-1b`. A project
+without modules names its phases (`phase-checkout`).
+
+**Discovery docs are records.** Once committed, doc-check refuses a commit that changes one. A later
+fact, or a correction, is a dated addendum under the title, newest first:
+
+```
+> **Addendum 2026-11-02:** 14 staff, not 40. **Changes:** Goals 2. **Open:** none.
+```
+
+So you can always see what was first decided, and what changed since.
+
+## 2. Starting a fresh project
+
+The order, from an empty folder to the first phase:
+
+1. **Create the repo:** `git init -b main`, then `gh repo create <name> --private --source .`
+   (the runner reads its tickets from GitHub). Don't push yet: there's nothing to push.
+2. **Install Brigade** (README, "Install") at project scope, and commit the settings change.
+3. **Save your discovery docs** in `docs/discovery/`, one per topic or round, named `01-<topic>.md`
+   onward, in the shape of [`discovery.md`](../template/docs/_templates/discovery.md). Its
+   **Requirements and stack** table records the stack (write "undecided" where you haven't chosen).
+   Setup asks about the stack today; reading it from this table is planned for 0.3.0.
+4. **`/setup-workflow`.** A repo holding only discovery docs still counts as new. Setup writes the
+   workflow around them, never touches them, and lists them in `docs/discovery/README.md`. Commit,
+   then `git push -u origin main`.
+5. **`/setup-matt-pocock-skills`**, for the labels `/to-spec` and `/to-tickets` use.
+6. **Plan the first module** with a planning grill (the ladder above). A small project skips this
+   and plans phases directly.
+7. **Phase 0, the skeleton**, built with you there: the app, its test runner, lint, typecheck and a
+   first test, on branch `phase-0`, merged through its pull request. The runner can't build it,
+   because there are no gates to run yet. Afterwards, add its checks to `.claude/workflow.json`:
+   ask Claude to run the plugin's `scripts/setup.mjs propose .` and copy in the gates and stop
+   checks it suggests.
+8. **Every phase after that** follows section 5's path.
+
+Setup first and discovery afterwards also works: discovery docs added later are indexed the same way.
+
+## 3. Setting a repo up
 
 Install Brigade first (README, "Install") and commit the `.claude/settings.json` change. Then type
 `/setup-workflow` in a Claude Code session in the project folder. Setup has the same file work to do
@@ -56,7 +122,7 @@ what it needs, and gets your yes before anything is written.
 6. **Check, and stop.** It runs `setup.mjs verify` (doc-check, the template's two test suites, both
    config loaders), shows `git status`, and drafts the commit message. **Setup never commits.**
 
-## 2. What your repo gets
+## 4. What your repo gets
 
 | Kind | Files | Who owns them afterwards |
 |---|---|---|
@@ -72,7 +138,7 @@ Two guides arrive with the template and are the reference for daily use:
 - [`docs/guides/phase-run.md`](../template/docs/guides/phase-run.md): the phase run's evening and
   morning checklists, undoing a ticket, and a symptom → fix table.
 
-## 3. A phase, start to finish
+## 5. A phase, start to finish
 
 | # | Step | Who | Command |
 |---|---|---|---|
@@ -113,7 +179,7 @@ message, which closes its devlog entry.
 Small choices are made and listed under "Assumptions made" for you to confirm. Tickets that depend
 on a parked one wait, and the run moves on to the rest.
 
-## 4. Configuring
+## 6. Configuring
 
 ### `.claude/workflow.json`
 
@@ -156,7 +222,7 @@ a typo stops the run at preflight instead of quietly turning a rule off.
 | `tools/doc-check-baseline.json` | Hits doc-check accepts: lines that quote a stale phrase on purpose, and, after a merge setup, docs still without a header |
 | `.github/workflows/checks.yml` | Your stop-gate checks on every push and pull request, so a green pull request means your own tests ran, not only the docs. Edit it when your checks change |
 
-## 5. Updating
+## 7. Updating
 
 A plugin update brings new hooks and skills by itself, but not the template files already copied
 into your repo:
@@ -179,7 +245,7 @@ changelog, and writes nothing until you say yes:
 
 Then it runs the checks, drafts the devlog entry and commit message, and stops for your commit.
 
-## 6. Troubleshooting
+## 8. Troubleshooting
 
 | You see | What to do |
 |---|---|

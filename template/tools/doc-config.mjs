@@ -23,6 +23,12 @@ export const PHASES = "docs/history/devlog/phases.json";
  * every file under docs/agents/gotchas, at any depth.
  */
 export const GOTCHAS_FILE = "docs/agents/gotchas/{phase}.md";
+/**
+ * The discovery docs: what the product is for, written before the first phase, one `NN-topic.md` each.
+ * Records: never rewritten, so doc-check refuses a change below a doc's addendum block; a later fact is
+ * a dated addendum at its top. Its README is the generated index.
+ */
+export const DISCOVERY_DIR = "docs/discovery";
 
 /**
  * Files and folders whose claims are read as current: one folder per question
@@ -33,7 +39,7 @@ export const GOTCHAS_FILE = "docs/agents/gotchas/{phase}.md";
  */
 export const LIVE_DOCS = [
   "CLAUDE.md",
-  "CONTEXT.md",
+  "GLOSSARY.md",
   "docs/README.md",
   "docs/status",
   "docs/guides",
@@ -46,7 +52,7 @@ export const LIVE_DOCS = [
 ];
 
 /** The stale-phrase check covers status-bearing docs only. */
-export const STATUS_DOCS = /^(CLAUDE\.md|CONTEXT\.md|docs\/(status|guides|reference|agents)\/.+)$/;
+export const STATUS_DOCS = /^(CLAUDE\.md|GLOSSARY\.md|docs\/(status|guides|reference|agents)\/.+)$/;
 
 /**
  * The missing-path check: a path a live doc cites (`docs/guides/x.md`) must exist.
@@ -63,7 +69,7 @@ export const PATH_EXTENSIONS = ["md", "html", "tsx", "ts", "mjs", "sql", "yml", 
  */
 export const HEADER_REQUIRED = [
   "CLAUDE.md",
-  "CONTEXT.md",
+  "GLOSSARY.md",
   "docs", // every doc in docs/, so a new one cannot land without a job and a budget
 ];
 
@@ -72,6 +78,7 @@ export const HEADER_EXEMPT = [
   /^tools\/phase-run\//, // prompts the runner renders
   // Frozen records inside docs/: written once, never budgeted.
   /^docs\/research\//,
+  new RegExp(`^${DISCOVERY_DIR}/(?!README\\.md$)`), // discovery docs, written as they came; the index has a header
   /^docs\/adr\/\d{4}-/, // an ADR's header holds its status, not a job
   /^docs\/history\/implementation-log\/\d/,
   /^docs\/_templates\/(?!README\.md$)/, // a template's header is a placeholder
@@ -91,6 +98,7 @@ export const GENERATED = [
   { name: "handbook", target: "docs/handbook/README.md", dir: "docs/handbook" },
   { name: "doc-map", target: "docs/README.md", dir: "." },
   { name: "adr-index", target: "docs/adr/README.md", dir: "docs/adr" },
+  { name: "discovery", target: `${DISCOVERY_DIR}/README.md`, dir: DISCOVERY_DIR },
   {
     name: "open-items",
     target: "docs/status/open-items.md",

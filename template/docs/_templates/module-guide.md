@@ -5,6 +5,9 @@ max-lines: 600
 ---
 # Module N — <name>: the owner's practical guide
 
+**Sources:** <the discovery docs and sections this module was planned from, e.g. `03-inventory.md`
+§2–§4>. A phase grill in this module reads these first.
+
 **Status lives in [`docs/status/roadmap.md`](../status/roadmap.md)**: this guide explains, it does not track.
 
 ## The 30-second version

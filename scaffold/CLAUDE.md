@@ -27,6 +27,9 @@ max-lines: 150
 ## Where things live
 
 - `docs/README.md`: every doc and its job, generated from the docs' own headers.
+- `docs/discovery/README.md`: the discovery docs (what the product is for), never rewritten; read
+  the ones a module's guide names before planning in it.
+- `GLOSSARY.md`: the project's terms, written by `/grill-with-docs` as they are settled.
 - `docs/status/roadmap.md` and `docs/status/handoff.md`: where things stand and the next step.
 - `docs/agents/workflow.md`: which skill to reach for, from grill to merge.
 - `docs/guides/phase-run.md`: the unattended phase run, evening to morning.

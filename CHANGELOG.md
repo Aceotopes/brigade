@@ -4,6 +4,23 @@ What changed in each version, for `/update-workflow` to show a project before it
 template. Newest first. A version that changes a config file's format says so, and ships its
 migration in `scripts/migrations.mjs`.
 
+## 0.3.0 — unreleased
+Built so far: phase A, the ladder (planning above a phase). The decisions are in
+`docs/discovery/01-brigade-0.3.0.md`.
+- The glossary is `GLOSSARY.md`, the name `/grill-with-docs` writes, in place of `CONTEXT.md`. A test
+  keeps the old name out of the generic files. Setup detects both: overwrite archives an old one and
+  offers its terms, and merge reports a `CONTEXT.md` beside the new name.
+- Discovery docs have a home: `DISCOVERY_DIR` in `tools/doc-config.mjs` (default `docs/discovery`),
+  header-exempt, from the new `docs/_templates/discovery.md` (with a "Requirements and stack"
+  table), and listed in a generated index, `docs/discovery/README.md`.
+- doc-check refuses a commit that rewrites a committed discovery doc: a changed line, an edited
+  addendum, or a deletion. A dated addendum under its title is the only change allowed, and a rename
+  that keeps the text passes. A config written before 0.3.0 gets the default folder.
+- A repo holding only discovery docs still counts as new, so discovery can come before setup.
+- `workflow.md` has "Before the first phase": discovery, a module's planning grill and what it
+  produces, module numbering, and Phase 0. The module guide's template opens with **Sources:**.
+- `CLAUDE.md`'s starting copy points at the discovery index and the glossary.
+
 ## 0.2.2 — 2026-10-27
 Fixes from the trials' finish review and the two existing-repo trials (overwrite, merge).
 - Setup writes `.github/workflows/checks.yml`: the stop gate's checks on every push and pull
