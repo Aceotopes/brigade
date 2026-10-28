@@ -113,6 +113,7 @@ export const GENERATED = [
   { name: "adr-index", target: "docs/adr/README.md", dir: "docs/adr" },
   { name: "discovery", target: `${DISCOVERY_DIR}/README.md`, dir: DISCOVERY_DIR },
   { name: "design", target: `${DESIGN_DIR}/README.md`, dir: `${DESIGN_DIR}/flows` },
+  { name: "stack", target: "CLAUDE.md", config: ".claude/workflow.json" }, // the `stack` section, for every session
   {
     name: "open-items",
     target: "docs/status/open-items.md",

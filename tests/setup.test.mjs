@@ -11,7 +11,7 @@ import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 
 import { parseWorkflowConfig } from "../hooks/workflow-config.mjs";
-import { ARCHIVE, STAMP, apply, autoModeLines, buildPlan, compareVersions, detect, plan, suggestPrototypeDir, update } from "../scripts/setup.mjs";
+import { ARCHIVE, STAMP, apply, autoModeLines, buildPlan, compareVersions, detect, dockerStatus, parseStackTable, plan, refresh, stackDisagreements, suggestPrototypeDir, update } from "../scripts/setup.mjs";
 import { PLUGIN, repo, write } from "./helpers.mjs";
 
 const read = (dir, rel) => readFileSync(join(dir, rel), "utf8");
@@ -233,6 +233,116 @@ test("a glossary under its old name, CONTEXT.md: merge reports it beside GLOSSAR
   assert.deepEqual(result.oldGlossary, [`${ARCHIVE}/CONTEXT.md`]);
   assert.match(read(over, result.oldGlossary[0]), /A person with a paid plan/);
   assert.ok(!existsSync(join(over, "CONTEXT.md")));
+});
+
+/** A discovery doc with the template's stack table: pnpm, a hosted Postgres, a Docker test database, storage undecided. */
+const DISCOVERY = [
+  "# Discovery: the gym desk",
+  "",
+  "**Rounds:** 2026-10-20.",
+  "",
+  "## Requirements and stack",
+  "",
+  "| Part | Choice | Why |",
+  "|---|---|---|",
+  "| Language | TypeScript | |",
+  "| Framework | Next.js | |",
+  "| Package manager | pnpm | the owner's habit |",
+  "| Database | Postgres on Supabase | |",
+  "| Migrations | <e.g. Prisma> | |",
+  "| Test database | Docker Postgres | |",
+  "| Storage | undecided | |",
+  "| Other services | Stripe, Resend | |",
+  "",
+  "## Candidate modules",
+  "",
+].join("\n");
+
+test("the stack table reads by its Part names; an undecided, empty or placeholder cell is left out", () => {
+  assert.deepEqual(parseStackTable(DISCOVERY), {
+    language: "TypeScript",
+    framework: "Next.js",
+    packageManager: "pnpm",
+    database: "Postgres on Supabase",
+    testDatabase: "Docker Postgres",
+    other: ["Stripe", "Resend"],
+  });
+  assert.equal(parseStackTable("# A doc\n\n## Goals\n"), null, "no table");
+});
+
+test("discovery first: setup records the declared stack, the wrappers for its package manager, and the Stack block", () => {
+  const { dir } = repo("brigade-stack-");
+  write(dir, { "docs/discovery/01-gym-desk.md": DISCOVERY });
+  const det = detect(dir);
+  assert.equal(det.discoveryStack.from, "docs/discovery/01-gym-desk.md");
+  const result = apply(dir, runPlan(dir, { mode: "new" }));
+  assert.equal(result.docCheck.status, 0, result.docCheck.output);
+  const config = JSON.parse(read(dir, ".claude/workflow.json"));
+  assert.deepEqual(config.stack, parseStackTable(DISCOVERY));
+  assert.deepEqual(config.guard.wrappers, ["pnpm exec", "pnpm dlx", "pnpm", "npx"], "no lockfile yet: the package manager the table names");
+  const claude = read(dir, "CLAUDE.md");
+  assert.match(claude, /- \*\*Database:\*\* Postgres on Supabase/);
+  assert.match(claude, /- \*\*Storage:\*\* undecided/);
+  assert.match(claude, /- \*\*Other services:\*\* Stripe, Resend/);
+});
+
+test("where the discovery doc and the files name different parts, detect lists each for the owner", () => {
+  const { dir, git } = existing();
+  write(dir, { "docs/discovery/01-gym.md": DISCOVERY.replace("| Package manager | pnpm |", "| Package manager | bun |") });
+  git("add", "-A");
+  git("commit", "-q", "-m", "discovery");
+  const det = detect(dir);
+  assert.deepEqual(det.stackDisagreements, [{ key: "packageManager", declared: "bun", found: "pnpm" }]);
+  assert.equal(det.stackFromFiles.database, "Postgres");
+  assert.deepEqual(stackDisagreements({ database: "Postgres on Supabase" }, { database: "Postgres" }), [], "a more specific name agrees");
+});
+
+test("a refresh adds what the stack suggests, removes or changes only what the owner accepts, and records a new stack", () => {
+  const { dir } = existing();
+  apply(dir, runPlan(dir, { mode: "merge" }));
+  assert.deepEqual(refresh(dir).items, [], "right after setup there is nothing to do");
+  const path = join(dir, ".claude/workflow.json");
+  const config = JSON.parse(read(dir, ".claude/workflow.json"));
+  delete config.guard.wrappers;
+  config.phaseRun.gates.push({ label: "e2e", run: "pnpm e2e" });
+  writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`);
+  const seen = refresh(dir);
+  assert.deepEqual(seen.items.filter((i) => i.op === "add").map((i) => i.id), ["guard.wrappers+pnpm exec", "guard.wrappers+pnpm dlx", "guard.wrappers+pnpm", "guard.wrappers+npx"]);
+  assert.deepEqual(seen.items.filter((i) => i.op === "remove").map((i) => i.id), ["phaseRun.gates-pnpm e2e"]);
+  refresh(dir, { apply: true });
+  let now = JSON.parse(read(dir, ".claude/workflow.json"));
+  assert.deepEqual(now.guard.wrappers, ["pnpm exec", "pnpm dlx", "pnpm", "npx"]);
+  assert.ok(now.phaseRun.gates.some((g) => g.run === "pnpm e2e"), "a hand-written gate is never dropped silently");
+  refresh(dir, { apply: true, accept: ["phaseRun.gates-pnpm e2e"] });
+  now = JSON.parse(read(dir, ".claude/workflow.json"));
+  assert.ok(!now.phaseRun.gates.some((g) => g.run === "pnpm e2e"));
+  const result = refresh(dir, { stack: { ...now.stack, storage: "Cloudflare R2" }, apply: true });
+  assert.deepEqual(result.applied, ["stack"]);
+  assert.equal(JSON.parse(read(dir, ".claude/workflow.json")).stack.storage, "Cloudflare R2");
+  assert.match(read(dir, "CLAUDE.md"), /- \*\*Storage:\*\* Cloudflare R2/, "the Stack block follows");
+});
+
+test("an older CLAUDE.md without the Stack section is offered it, and gets it only on a yes", () => {
+  const { dir } = existing();
+  apply(dir, runPlan(dir, { mode: "merge" }));
+  const claude = join(dir, "CLAUDE.md");
+  writeFileSync(claude, read(dir, "CLAUDE.md").replace(/## Stack[\s\S]*?<!-- generated:end stack -->\n/, ""));
+  const offered = refresh(dir).items.find((i) => i.id === "CLAUDE.md:stack");
+  assert.equal(offered.op, "change");
+  refresh(dir, { apply: true });
+  assert.doesNotMatch(read(dir, "CLAUDE.md"), /## Stack/);
+  refresh(dir, { apply: true, accept: ["CLAUDE.md:stack"] });
+  assert.match(read(dir, "CLAUDE.md"), /## Stack[\s\S]*- \*\*Framework:\*\* Next\.js[\s\S]*<!-- generated:end stack -->/);
+});
+
+test("the Docker check says whether Docker is installed and running, and never installs it", () => {
+  const fake = (results) => (cmd, args) => results[args[0]];
+  assert.deepEqual(dockerStatus(fake({ "--version": { error: new Error("ENOENT") } })).installed, false);
+  const stopped = dockerStatus(fake({ "--version": { status: 0, stdout: "Docker version 27.3.1\n" }, info: { status: 1, stdout: "" } }));
+  assert.deepEqual([stopped.installed, stopped.running, stopped.version], [true, false, "Docker version 27.3.1"]);
+  const up = dockerStatus(fake({ "--version": { status: 0, stdout: "x" }, info: { status: 0, stdout: "27.3.1\n" } }));
+  assert.deepEqual([up.running, up.version], [true, "27.3.1"]);
+  assert.match(up.help, /^https:\/\/docs\.docker\.com\//);
 });
 
 test("the command line: plan previews the changed files, apply writes, verify passes every check", () => {

@@ -20,7 +20,7 @@ the finish ticket, whatever a row below says.
 | `docs/guides/module-N.md` | Phase end: the phases table's "What it gives you", traps, how-tos, owner-held items, present tense. A new module gets one (from `docs/_templates/module-guide.md`) when its planning starts. |
 | `docs/guides/<tool>.md` | The tool it covers changes: a new error mode, a changed command, a retired resource. |
 | `docs/reference/domain-model.md` | A table or column changes, or an `OPEN-nn` item is resolved: mark it `✅ CLOSED`, link the ADR, "Recommendation" becomes "Decided". |
-| `docs/reference/tech-stack.md` | A technology is added, replaced or dropped; keep `CLAUDE.md`'s summary in step. |
+| `.claude/workflow.json`'s `stack` | A technology is added, replaced or dropped: never by hand. `/setup-workflow`'s refresh changes it (and the config it decides), `CLAUDE.md`'s Stack block regenerates, and the reason goes in a dated addendum to the discovery doc the stack came from. |
 | `GLOSSARY.md` | A domain term appears or its definition sharpens (`mattpocock-skills:domain-modeling`'s format: one term, one word, rejects under `_Avoid_`). The why goes in an ADR. |
 | `CLAUDE.md` | A rule, the stack, the working agreement, or a gotcha that bites every session changes. Never status. |
 | `docs/agents/*.md` | The process, the ticket shape, the issue tracker, the labels or the domain-doc layout changes; keep `CLAUDE.md`'s "Agent skills" block in step. |

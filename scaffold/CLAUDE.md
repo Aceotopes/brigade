@@ -11,6 +11,14 @@ max-lines: 150
 
 {{COMMANDS}}
 
+## Stack
+
+What this project is built with, from `.claude/workflow.json`'s `stack`: generated, so change it
+with `/setup-workflow`'s refresh (and note why in a discovery doc's addendum), never here.
+
+<!-- generated:start stack -->
+<!-- generated:end stack -->
+
 ## Working agreement
 
 - **Commit only with the owner's go-ahead**, and push only when asked; the two are separate asks.

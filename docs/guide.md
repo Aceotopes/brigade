@@ -80,7 +80,8 @@ The order, from an empty folder to the first phase:
 3. **Save your discovery docs** in `docs/discovery/`, one per topic or round, named `01-<topic>.md`
    onward, in the shape of [`discovery.md`](../template/docs/_templates/discovery.md). Its
    **Requirements and stack** table records the stack (write "undecided" where you haven't chosen).
-   Setup asks about the stack today; reading it from this table is planned for 0.3.0.
+   Setup reads that table, shows it beside what your files say, and asks only about disagreements
+   and undecided parts.
 4. **`/setup-workflow`.** A repo holding only discovery docs still counts as new. Setup writes the
    workflow around them, never touches them, and lists them in `docs/discovery/README.md`. Commit,
    then `git push -u origin main`.
@@ -213,9 +214,20 @@ on a parked one wait, and the run moves on to the rest.
 | `when` | `always`, or `phase-run` (only inside a phase run) |
 | `message` | What the session is told when the rule blocks it |
 
+**`guard.wrappers`**: the command prefixes the guard strips before testing a rule, so a rule
+against `prisma format` also catches `pnpm exec prisma format` or `bunx prisma format`. Setup
+writes them for your package manager (`["bunx", "bun x", "bun run", "bun"]` for bun); without
+them, `pnpm exec`, `pnpm dlx`, `pnpm` and `npx`.
+
 **`stopGate.checks`**: `{ "label", "run" }` pairs, run in order each time a phase-run session
 tries to stop. In `run`, `{base}` is the run's base commit, for example
 `vitest run --changed {base}`.
+
+**`stack`**: what the project is built with, from your discovery doc at setup: `language`,
+`framework`, `packageManager`, `database`, `migrations`, `testDatabase`, `storage`, and `other` (a
+list), in any words. An undecided part is left out. `CLAUDE.md`'s Stack section is generated from
+it. Don't edit it by hand: when the stack changes, run `/setup-workflow` and pick the refresh. The
+refresh adds what the new stack suggests, and changes or removes anything only on your yes.
 
 **`phaseRun`**: what the runner checks and pins. The phase-run guide's
 "[What your config sets](../template/docs/guides/phase-run.md#what-your-config-sets)" section has
@@ -244,6 +256,11 @@ a typo stops the run at preflight instead of quietly turning a rule off.
 
 ## 7. Updating
 
+Two things keep a project current, and `/setup-workflow` on a set-up project offers both:
+- **Your stack changed** (you added storage, Phase 0 added `package.json`, you moved hosts): the
+  **refresh** (section 6, `stack`).
+- **Brigade changed:** the update below.
+
 A plugin update brings new hooks and skills by itself, but not the template files already copied
 into your repo:
 
@@ -270,7 +287,7 @@ Then it runs the checks, drafts the devlog entry and commit message, and stops f
 | You see | What to do |
 |---|---|
 | "The working tree has changes; commit or put them away first" | Commit or `git stash` them, then run setup again. The plugin install's own `.claude/settings.json` change doesn't count |
-| "This project is already set up" | Use `/update-workflow` |
+| "This project is already set up" | `/setup-workflow` offers the two ways to keep it current: `/update-workflow` after a plugin update, or a refresh of the config after your stack changed |
 | Brigade is not enabled here | `claude plugin install brigade@argee --scope project`, then commit the settings change |
 | "The repo changed since this plan was made" | Setup plans again and shows you the new plan |
 | Setup stopped partway through writing | The tree was clean before it began, so `git reset --hard` and `git clean -fd` undo it (overwrite mode: also switch back and delete `adopt-workflow`). Commit the plugin install first, because `git clean` would remove it |

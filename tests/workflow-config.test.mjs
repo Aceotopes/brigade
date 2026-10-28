@@ -25,7 +25,7 @@ const RUN = { PHASE_RUN: "1" };
 // ------------------------------------------------------------------- the loader
 
 test("both shipped configs load: the blank template and Steak To Juan's example", () => {
-  assert.deepEqual(parseWorkflowConfig(JSON.parse(BLANK)), { rules: [], checks: [] });
+  assert.deepEqual(parseWorkflowConfig(JSON.parse(BLANK)), { rules: [], checks: [], wrappers: ["pnpm exec", "pnpm dlx", "pnpm", "npx"] });
   const stj = parseWorkflowConfig(JSON.parse(STJ));
   assert.equal(stj.rules.length, 4);
   assert.deepEqual(stj.checks.map((c) => c.label), ["Typecheck", "Lint", "The tests your changes touch"]);
@@ -41,8 +41,23 @@ test("a config with a mistake names it: version, a typo'd key, a bad when, a bad
     [rule({ text: "x" }), /exactly one of "command" and "text"/],
     [rule({ message: "" }), /message is missing/],
     [{ version: 1, stopGate: { checks: [{ label: "Lint" }] } }, /checks\[0\]\.run is missing/],
+    [{ version: 1, stack: { databse: "Postgres" } }, /stack has unknown key\(s\) databse/],
+    [{ version: 1, stack: { database: "" } }, /stack\.database must be text \(leave an undecided part out\)/],
+    [{ version: 1, stack: { other: "Stripe" } }, /stack\.other must be a list of texts/],
+    [{ version: 1, guard: { wrappers: ["bunx", ""] } }, /guard\.wrappers must be a list of command prefixes/],
+    [{ version: 1, roadmap: { url: "x" } }, /roadmap has unknown key\(s\) url/],
   ];
   for (const [data, error] of cases) assert.throws(() => parseWorkflowConfig(data), error);
+});
+
+test("the stack, the roadmap's link and the guard's wrappers load as written", () => {
+  const data = {
+    version: 1,
+    guard: { block: [], wrappers: ["bunx", " bun x "] },
+    stack: { language: "TypeScript", database: "Postgres on Supabase", other: ["Stripe", "Resend"] },
+    roadmap: { artifact: "https://claude.ai/artifact/abc" },
+  };
+  assert.deepEqual(parseWorkflowConfig(data).wrappers, ["bunx", "bun x"]);
 });
 
 // -------------------------------------------------------------------- the guard
@@ -57,6 +72,24 @@ test("Steak To Juan's rows block what its hardcoded hook blocked", () => {
   assert.match(guard(dir, "pnpm prisma migrate deploy", RUN).stderr, /never migrates dev Neon/);
   assert.equal(guard(dir, 'DATABASE_URL="postgres://localhost:5432/t" pnpm prisma migrate deploy', RUN).status, 0);
   assert.match(guard(dir, "node scripts/apply-pending-migrations.mjs", RUN).stderr, /never migrates dev Neon/);
+});
+
+test("a block rule holds however the command is wrapped: the project's own wrappers are stripped first", () => {
+  const rule = { when: "always", command: "^prisma\\s+format\\b", message: "`prisma format` rewrites the whole schema." };
+  const config = (wrappers) => JSON.stringify({ version: 1, guard: { block: [rule], ...(wrappers ? { wrappers } : {}) } });
+  const { dir: bun } = project(config(["bunx", "bun x", "bun run", "bun"]));
+  for (const command of ["bunx prisma format", "bun x prisma format", "bunx --bun prisma format", "prisma format"]) {
+    assert.match(guard(bun, command).stderr, /rewrites the whole schema/, command);
+  }
+  assert.equal(guard(bun, "bunx prisma validate").status, 0);
+  const { dir: yarn } = project(config(["yarn dlx", "yarn exec", "yarn"]));
+  assert.match(guard(yarn, "yarn prisma format").stderr, /rewrites the whole schema/);
+  assert.match(guard(yarn, "yarn dlx prisma format").stderr, /rewrites the whole schema/);
+  // No wrappers named: the ones the guard always knew.
+  const { dir: plain } = project(config());
+  assert.match(guard(plain, "pnpm exec prisma format").stderr, /rewrites the whole schema/);
+  assert.match(guard(plain, "npx -y prisma format").stderr, /rewrites the whole schema/);
+  assert.equal(guard(plain, "bunx prisma format").status, 0, "bunx is not a default wrapper");
 });
 
 test("the blank template and a missing file block nothing a project would add", () => {

@@ -1,6 +1,6 @@
 ---
 name: setup-workflow
-description: Set a repo up on the Brigade workflow, new or existing. Use when the owner types /setup-workflow in a project that has no .claude/workflow-version.json. Detects the stack, asks overwrite or merge for an existing repo, shows every file it will write or move, writes them after a yes, and stops before the commit.
+description: Set a repo up on the Brigade workflow, new or existing, or refresh a set-up repo's config after its stack changed. Use when the owner types /setup-workflow. Reads the stack from the discovery doc and the files, asks overwrite or merge for an existing repo, shows every file it will write or move, writes them after a yes, and stops before the commit.
 disable-model-invocation: true
 argument-hint: "[--settings <path>]  (a copy of ~/.claude/settings.json, for a trial)"
 ---
@@ -17,7 +17,10 @@ never in `git status`. `<dir>` below is the project's root (`CLAUDE_PROJECT_DIR`
 
 1. Not a git repo: offer `git init -b main` (it is needed for the rest); stop if declined.
 2. `node "${CLAUDE_PLUGIN_ROOT}/scripts/setup.mjs" detect <dir>`. Read all of it.
-3. `stamp` set: this project is already set up. Say so and point at `/update-workflow`. Stop.
+3. `stamp` set: this project is already set up. Offer the two things that keep it current and do
+   the one the owner picks: **update the template** (`/update-workflow`, after a plugin update) or
+   **refresh the config from the stack** (§8, after the stack changed or the app grew: Phase 0 added
+   `package.json`, a database, screens). Then stop.
 4. `brigadeEnabled` false: Brigade is not installed at project scope here. Say how
    (`claude plugin install brigade@<marketplace> --scope project`) and stop: the hooks would not run.
 
@@ -37,11 +40,19 @@ never in `git status`. `<dir>` below is the project's root (`CLAUDE_PROJECT_DIR`
 
 ## 3. Confirm the stack, then the config
 
+**The stack first.** detect gives `discoveryStack` (the newest discovery doc's "Requirements and
+stack" table, already parsed: only its decided rows), `stackFromFiles` (what `package.json`, the
+lockfile and a Prisma schema show) and `stackDisagreements` (where they name different things).
+Show the owner both, side by side, and ask only: each disagreement (which is right?), and each part
+neither names (decided yet? "undecided" is fine: it stays out of `stack`). The answer is the
+`stack` in the proposed config: keys `language`, `framework`, `packageManager`, `database`,
+`migrations`, `testDatabase`, `storage`, `other` (a list), any words for the values. After setup
+this config is the stack's truth; discovery is not read again.
+
 `node "${CLAUDE_PLUGIN_ROOT}/scripts/setup.mjs" propose <dir>` gives the `.claude/workflow.json` the
 stack suggests: the stop gate's checks and the phase run's gates from the `package.json` scripts that
-exist, the package manager's allow rules. Never guess silently: show the owner what was detected
-(package manager, TypeScript, the scripts found, a database such as Prisma's provider, a frontend)
-and the proposed gates, and ask in one batch:
+exist, `stack`, the guard's `wrappers` and the allow rules for the package manager. Never guess
+silently: show the owner what was detected and the proposed gates, and ask in one batch:
 
 - the project's **name** and a **one-paragraph summary** (for `CLAUDE.md`);
 - are these **gates** right (add, drop, reorder; a repo with no scripts names its own, e.g.
@@ -60,6 +71,20 @@ and the proposed gates, and ask in one batch:
   later in `tools/doc-config.mjs`'s `PROTOTYPE_DIR`;
 - merge only: the project's **docs to treat as living** (default: the `.md` files directly under
   `docs/`) and its **code folders** for the path check (default: `topFolders`).
+
+**Then walk the stack, part by part.** Brigade ships no per-tool recipe (`docs/adr/0001` in the
+plugin): you write the config each part needs, from the owner's answers and
+`template/docs/guides/phase-run.md`'s "What your config sets", and the loaders check it.
+- **packageManager**: the `guard.wrappers` and allow rules `propose` gave (check them against it).
+- **database**: a QA database for sessions (`phaseRun.qa`, never the real one) and, only if the owner
+  names a shared development database, `phaseRun.migrations` with its target.
+- **testDatabase**: if it runs in Docker, `docker-compose.yml` for it (the image, a port, a volume)
+  and a `phaseRun.preflight` row, `docker compose up -d --wait`, with the hint "Is Docker running?";
+  its port in `phaseRun.ports`. Then §6's Docker check.
+- **storage**: keep sessions off the real bucket: `phaseRun.sessionEnv` pins its variables to a test
+  bucket or a dummy value.
+- **framework**: the prototype folder (above), and whether the build is a gate.
+- **other**: each service's live keys stay out of sessions the same way (`sessionEnv`).
 
 Write the answers to `.git/brigade/answers.json`:
 `{ "mode", "name", "summary", "workflow", "frontend"?, "prototypeDir"?, "pathRoots"?, "liveDocs"? }`.
@@ -110,6 +135,12 @@ Ask before each; the owner may skip any.
 - **Impeccable**, if `frontend` is not empty: offer it (a design skill for frontend work). On a yes:
   `claude plugin install impeccable@impeccable --scope project` (if that marketplace is unknown,
   `claude plugin marketplace add pbakaus/impeccable` first). Never copy its files into the repo.
+- **Docker**, if the test database runs in it: `node "${CLAUDE_PLUGIN_ROOT}/scripts/setup.mjs" docker`.
+  Running: say so. Not installed, or installed but not running: explain in two sentences what it is
+  ("Docker runs the test database in a small sealed box on your machine, so tests never touch real
+  data. Brigade starts it before each phase run and needs Docker Desktop running for that."), give
+  its `help` link to install Docker Desktop, and how to check it works (`docker info`). Never install
+  it yourself.
 - **autoMode lines.** Auto mode reads trusted infrastructure only from the user's own settings, so
   each project adds its lines there. Draft them, one per topic that applies, each
   `**Project <absolute path> — <topic>**: <one line>`: what it is (and whether its repo is private),
@@ -133,5 +164,26 @@ Ask before each; the owner may skip any.
 3. **Stop.** Setup never commits; the owner says when. Tell the owner the next steps: commit, then
    grill the first phase (`docs/agents/workflow.md`).
 
-Known limits, to say if they apply: guard-shell's command parsing knows the `pnpm` and `npx`
-wrappers, not `yarn` or `bun`; same-job docs are reported, never merged.
+Known limit, to say if it applies: same-job docs are reported, never merged.
+
+## 8. Refresh: the config after the stack changes
+
+On a project already set up (§1.3), when the owner picks the refresh:
+
+1. Ask what changed ("you added storage", "Phase 0 added `package.json`", "we moved to another
+   host"), and write the stack as it now is to `.git/brigade/stack.json` (the config's `stack` with
+   the change; an undecided part left out). Nothing changed in the stack itself (only the app grew):
+   skip `--stack`.
+2. `node "${CLAUDE_PLUGIN_ROOT}/scripts/setup.mjs" refresh <dir> --stack .git/brigade/stack.json`:
+   a report, nothing written. Its items:
+   - `set`: the stack itself; `add`: what the stack suggests and the config lacks. Both are written.
+   - `change`, `remove`: a row the stack would not suggest, a changed file (`checks.yml`), an older
+     `CLAUDE.md`'s missing Stack section. **Never written unless the owner says yes**, item by item
+     (AskUserQuestion, up to 4 per call). A hand-written row is kept by default.
+3. Run it again with `--apply` and `--accept <the ids the owner said yes to>`. It writes, regenerates
+   the indexes (the Stack block in `CLAUDE.md` follows), and stages.
+4. Walk §3's checklist for the parts that changed (a new database: its QA database; a new test
+   database in Docker: compose and the Docker check), then `verify`.
+5. Remind the owner to record why in a dated addendum at the top of the discovery doc it came from
+   ("> **Addendum YYYY-MM-DD:** storage is Cloudflare R2. **Changes:** Requirements and stack."),
+   and draft `chore: refresh the config from the stack — devlog #N`. **Stop** before the commit.

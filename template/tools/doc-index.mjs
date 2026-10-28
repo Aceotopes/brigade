@@ -212,6 +212,35 @@ function design({ target, dir }) {
     .join("\n");
 }
 
+/** The stack's parts, in the discovery template's order, and their names in the block. */
+const STACK_PARTS = [
+  ["language", "Language"],
+  ["framework", "Framework"],
+  ["packageManager", "Package manager"],
+  ["database", "Database"],
+  ["migrations", "Migrations"],
+  ["testDatabase", "Test database"],
+  ["storage", "Storage"],
+  ["other", "Other services"],
+];
+
+/**
+ * The project's stack, one line per part, from `.claude/workflow.json`'s `stack` (written by setup,
+ * changed by its refresh). A part left out is undecided.
+ */
+function stackBlock({ config }) {
+  let stack = {};
+  try {
+    stack = JSON.parse(read(config)).stack ?? {};
+  } catch {
+    stack = {}; // no config yet: every part is undecided
+  }
+  return STACK_PARTS.map(([key, label]) => {
+    const value = Array.isArray(stack[key]) ? stack[key].join(", ") : stack[key];
+    return `- **${label}:** ${value || "undecided"}`;
+  }).join("\n");
+}
+
 /** The top-level bullets under a `## <heading>` (matched by its start), each joined onto one line. */
 function bulletsUnder(text, heading) {
   const lines = text.split("\n");
@@ -267,6 +296,7 @@ export const GENERATORS = {
   "adr-index": adrIndex,
   discovery,
   design,
+  stack: stackBlock,
   "open-items": openItems,
   "implementation-log": implementationLog,
   "devlog-archive": devlogArchive,

@@ -89,20 +89,32 @@ const GIT_GLOBAL = new RegExp(
 );
 
 /**
+ * The project's wrappers (`guard.wrappers`: `pnpm exec`, `bunx`, `yarn dlx`…) as one pattern, the longest
+ * first so `pnpm exec` wins over `pnpm`, each taking the flags right after it (`npx -y`).
+ */
+function wrapperPattern(wrappers) {
+  const alternatives = [...wrappers]
+    .sort((a, b) => b.length - a.length)
+    .map((w) => w.trim().split(/\s+/).map((word) => word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join(String.raw`\s+`));
+  return new RegExp(String.raw`^(?:${alternatives.join("|")})\s+(?:--?[A-Za-z][\w-]*\s+)*`);
+}
+
+/**
  * The command split into simple commands, each with its leading wrappers
- * (env assignments, `pnpm exec`, `npx`) stripped, and the folder it is aimed
+ * (env assignments, then one of the project's `guard.wrappers`) stripped, and the folder it is aimed
  * at: a `cd` (or Set-Location, pushd) moves every command after it, git's
  * `-C <dir>` its own. A separator inside a quoted string splits wrongly, which
  * only yields fragments that start with prose and match nothing.
  */
-function simpleCommands(command, cwd) {
+function simpleCommands(command, cwd, wrappers) {
+  const strip = wrapperPattern(wrappers);
   let dir = cwd;
   const out = [];
   for (const part of command.split(/&&|\|\||[;|\n]/)) {
     let text = part
       .trim()
       .replace(/^(\w+=("[^"]*"|'[^']*'|\S*)\s+)+/, "")
-      .replace(/^(pnpm\s+(exec|dlx)\s+|npx\s+(--yes\s+|-y\s+)?|pnpm\s+)/, "");
+      .replace(strip, "");
     if (!text) continue;
     const cd = text.match(CHANGE_DIR);
     if (cd && !COMPUTED.test(cd[1])) dir = toPath(cd[1], dir);
@@ -149,18 +161,17 @@ function main() {
 
   const cwd = typeof input.cwd === "string" && input.cwd ? input.cwd : process.cwd();
   const root = resolve(process.env.CLAUDE_PROJECT_DIR || cwd);
-  const all = simpleCommands(command, cwd);
-  // The project's rules hold for the commands aimed at it; inside a phase run, for every command.
-  const mine = IN_RUN ? all : all.filter((c) => inside(root, c.dir));
-  const find = (list, pattern) => list.find((c) => pattern.test(c.text));
-  const starts = (pattern) => Boolean(find(mine, pattern));
-  const commands = mine.map((c) => c.text);
-
   // A broken config is refused outright: a rule that silently stopped applying is worse.
   const config = loadWorkflowConfig(root);
   if (config.error) {
     block(`${config.error}\nFix the file (the Edit tool still works); until then no shell command runs.`);
   }
+  const all = simpleCommands(command, cwd, config.wrappers);
+  // The project's rules hold for the commands aimed at it; inside a phase run, for every command.
+  const mine = IN_RUN ? all : all.filter((c) => inside(root, c.dir));
+  const find = (list, pattern) => list.find((c) => pattern.test(c.text));
+  const starts = (pattern) => Boolean(find(mine, pattern));
+  const commands = mine.map((c) => c.text);
   for (const rule of config.rules) {
     if (rule.when === "phase-run" && !IN_RUN) continue;
     const hit = rule.command

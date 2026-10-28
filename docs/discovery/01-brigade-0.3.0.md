@@ -1,5 +1,46 @@
 # Discovery: Brigade 0.3.0, from discovery to a merged first phase
 
+> **Addendum 2026-10-28:** Phase B (the stack and setup) was grilled, and its details are decided,
+> not built:
+> 1. **Reading the stack table.** `setup.mjs detect` finds the "Requirements and stack" table in
+>    the newest discovery doc that has one, and turns it into a proposed `stack`, reading rows by
+>    their fixed Part names. Claude shows it beside what detect found in the files, and asks only
+>    about undecided rows and any disagreement.
+> 2. **Where the truth is.** Discovery is read only at first setup. After that, the `stack`
+>    section of `.claude/workflow.json` is the truth. A stack change goes through a refresh, plus a
+>    dated addendum to the discovery doc saying why (doc-sync reminds the owner).
+> 3. **A refresh adds freely.** Anything it would change or remove is listed apart and applied one
+>    item at a time on a yes. A hand-written row is never dropped silently. Each section is shown
+>    as a diff first.
+> 4. **Refresh scope:**
+>    - `stack`;
+>    - `.claude/workflow.json`'s checks, gates, wrappers and permissions;
+>    - `checks.yml`;
+>    - doc-config's `PROTOTYPE_DIR`;
+>    - the design rung's prompt file, once there are screens.
+>
+>    `/setup-workflow` offers it on a project that is already set up, next to `/update-workflow`.
+> 5. **`guard.wrappers`** is plain command prefixes (`["pnpm exec", "pnpm dlx", "pnpm", "npx"]`).
+>    The guard strips the longest match and the flags right after it. Setup writes the list for the
+>    package manager; without one, today's pnpm and npx list.
+> 6. **An undecided row** is left out of `stack`, shown as "undecided" in the Stack block, and
+>    asked about by a refresh.
+> 7. **`stack` has fixed keys** and any text values: `language`, `framework`, `packageManager`,
+>    `database`, `migrations`, `testDatabase`, `storage`, and `other` (a list). The hooks' loader
+>    refuses an unknown key. Each table row maps to one key, and Other services is split on commas.
+> 8. **The Stack block.** `CLAUDE.md`'s starting copy gets a Stack section between generated
+>    markers, which doc-index writes from `stack`. A `CLAUDE.md` without the markers has none.
+>    doc-sync's `tech-stack.md` row goes.
+> 9. **An older `CLAUDE.md`.** A refresh offers to add the Stack section, as a diff.
+> 10. **Docker.** No recipe: Claude writes `docker-compose.yml` and the preflight row
+>     (`docker compose up -d --wait`). `setup.mjs docker` reports whether Docker is installed and
+>     running. If it is not, the skill explains Docker and links the installer. Nothing is
+>     installed.
+>
+> **Changes:** "The stack and setup" below gains these details. The hooks' loader must allow
+> `stack`, `roadmap` and `guard.wrappers` in the same release, or it would refuse the file.
+> **Open:** none for phase B.
+
 > **Addendum 2026-10-28:** Phase D (the design rung) was grilled, and its details are decided, not
 > built:
 > 1. **Sample data** is JSON, one file per module, `design/sample-data/module-N.json`, in a

@@ -42,7 +42,7 @@ status into the roadmap, and only when a phase's state changes. New docs start f
 | `docs/status/noted-for-later.md` | The command-center check: if the ticket exposed a real signal a future monitoring dashboard could show, one line under the sync/ops dashboard's suggestion list. Most tickets add nothing; silence is the correct report. |
 | `docs/guides/runbook.md` | Only when the ticket adds a step a person must run (a migration to apply by hand, a secret, a script). This cannot wait for phase end. |
 | `DESIGN.md` (+ `.impeccable/design.json` with Impeccable), in a project with screens | A **short** entry, only when the ticket adds a reusable component or changes a rule (a token, a colour role, a cap), in the section format the file already uses. A new colour role needs an ADR first. |
-| `CLAUDE.md`, `GLOSSARY.md`, `docs/reference/domain-model.md`, `docs/reference/tech-stack.md` | Only when a rule, a term, the schema or the stack changed. Each holds a budget in its header: compress before growing, and check with a search that anything trimmed still exists elsewhere. |
+| `CLAUDE.md`, `GLOSSARY.md`, `docs/reference/domain-model.md` | Only when a rule, a term or the schema changed (a stack change is the refresh's: the routing table's `stack` row). Each holds a budget in its header: compress before growing, and check with a search that anything trimmed still exists elsewhere. |
 
 ### Once per phase, in its finish ticket
 

@@ -10,6 +10,10 @@
 //   node scripts/setup.mjs apply <dir> --plan <f>                do it, if the repo is still as planned
 //   node scripts/setup.mjs verify <dir>                          doc-check, the template's tests, both config loaders
 //   node scripts/setup.mjs update <dir> [--apply] [--remove]     re-copy template/ into a set-up project
+//   node scripts/setup.mjs refresh <dir> [--stack <f>] [--apply] [--accept <id,id>]
+//                                                                bring the config in line with the stack (--stack: the new
+//                                                                one); --apply writes the additions and the accepted ids
+//   node scripts/setup.mjs docker                                is Docker installed, and running
 //   node scripts/setup.mjs automode --settings <f> --lines <f> [--apply]   the project's autoMode lines
 //   node scripts/setup.mjs labels                                the GitHub labels the workflow reads
 //
@@ -183,6 +187,18 @@ export function detect(dir) {
     (name) => !name.startsWith(".") && !NOT_CODE.includes(name),
   );
   const settings = json(".claude/settings.json");
+  const typescript = existsSync(join(dir, "tsconfig.json")) || Boolean(deps.typescript);
+  const provider = schema?.match(/datasource\s+\w+\s*\{[^}]*provider\s*=\s*"([^"]+)"/)?.[1] ?? null;
+  const framework = FRAMEWORKS.find(([dep]) => deps[dep])?.[1];
+  // What the files show, in the stack's own words; the discovery doc's table says what was chosen.
+  const stackFromFiles = {
+    ...(pkg ? { language: typescript ? "TypeScript" : "JavaScript" } : {}),
+    ...(framework ? { framework } : {}),
+    ...(packageManager ? { packageManager } : {}),
+    ...(provider ? { database: DATABASES[provider] ?? provider } : {}),
+    ...(schema ? { migrations: "Prisma" } : deps["drizzle-kit"] ? { migrations: "Drizzle" } : {}),
+  };
+  const declared = discoveryStack(dir, files);
   return {
     dir,
     name: basename(dir),
@@ -202,9 +218,13 @@ export function detect(dir) {
     packageManagerPin: pkg?.packageManager ?? null,
     packageJson: pkg !== null,
     scripts: pkg?.scripts ?? {},
-    typescript: existsSync(join(dir, "tsconfig.json")) || Boolean(deps.typescript),
-    prisma: schema ? { provider: schema.match(/datasource\s+\w+\s*\{[^}]*provider\s*=\s*"([^"]+)"/)?.[1] ?? "unknown" } : null,
+    typescript,
+    prisma: schema ? { provider: provider ?? "unknown" } : null,
     frontend,
+    // The newest discovery doc's "Requirements and stack" table, what the files show, and where they differ.
+    discoveryStack: declared,
+    stackFromFiles,
+    stackDisagreements: stackDisagreements(declared?.stack, stackFromFiles),
     prototypeDir: suggestPrototypeDir(deps, (d) => existsSync(join(dir, d))),
     docs,
     agentFiles: ["CLAUDE.md", "AGENTS.md", ...GLOSSARY_NAMES].filter((f) => existsSync(join(dir, f))),
@@ -235,18 +255,120 @@ export function stackChecks(det) {
   return out;
 }
 
-/** `.claude/workflow.json` as the stack suggests it: the template's blank copy with the checks filled in. */
-export function proposeWorkflow(det, plugin = PLUGIN) {
+/**
+ * `.claude/workflow.json` as the stack suggests it: the template's blank copy with the checks filled in,
+ * the stack recorded, and the guard's wrappers for the package manager. `stack` replaces the one detect
+ * proposes (the discovery doc's table over what the files show): a refresh passes the config's own.
+ */
+export function proposeWorkflow(det, plugin = PLUGIN, { stack } = {}) {
   const config = JSON.parse(readText(join(plugin, "template", ".claude", "workflow.json")));
   const checks = stackChecks(det);
   config.stopGate.checks = checks.filter((c) => c.key !== "build").map(({ label, run }) => ({ label, run }));
   config.phaseRun.gates = checks.map(({ key, label, run }) => ({ label: label.toLowerCase(), run, ...(key === "test" ? { alone: true } : {}) }));
-  const pm = det.packageManager;
+  const chosen = orderStack(stack ?? { ...(det.stackFromFiles ?? {}), ...(det.discoveryStack?.stack ?? {}) });
+  if (Object.keys(chosen).length) config.stack = chosen;
+  const pm = det.packageManager ?? packageManagerIn(chosen.packageManager);
   if (pm) {
+    config.guard.wrappers = WRAPPERS[pm];
     const tools = pm === "npm" ? ["npm", "npx"] : [pm];
     config.phaseRun.permissions = { allow: tools.flatMap((t) => [`Bash(${t} *)`, `PowerShell(${t} *)`]) };
   }
   return config;
+}
+
+// ------------------------------------------------------------------ the stack
+
+/** The discovery template's "Requirements and stack" rows, by their Part name, and the `stack` key each fills. */
+const STACK_ROWS = {
+  language: "language",
+  framework: "framework",
+  "package manager": "packageManager",
+  database: "database",
+  migrations: "migrations",
+  "test database": "testDatabase",
+  storage: "storage",
+  "other services": "other",
+};
+const STACK_ORDER = Object.values(STACK_ROWS);
+/** What the guard strips before a block rule is tested (`guard.wrappers`), per package manager. */
+const WRAPPERS = {
+  pnpm: ["pnpm exec", "pnpm dlx", "pnpm", "npx"],
+  npm: ["npm exec", "npx"],
+  yarn: ["yarn dlx", "yarn exec", "yarn"],
+  bun: ["bunx", "bun x", "bun run", "bun"],
+};
+/** The framework a dependency means, the most specific first (Next.js before React). */
+const FRAMEWORKS = [
+  ["next", "Next.js"],
+  ["nuxt", "Nuxt"],
+  ["@sveltejs/kit", "SvelteKit"],
+  ["astro", "Astro"],
+  ["@angular/core", "Angular"],
+  ["solid-js", "Solid"],
+  ["vue", "Vue"],
+  ["svelte", "Svelte"],
+  ["react", "React"],
+];
+/** A Prisma datasource provider, in the stack's words. */
+const DATABASES = { postgresql: "Postgres", mysql: "MySQL", sqlite: "SQLite", sqlserver: "SQL Server", mongodb: "MongoDB", cockroachdb: "CockroachDB" };
+
+const orderStack = (stack) => Object.fromEntries(STACK_ORDER.filter((key) => stack[key] !== undefined).map((key) => [key, stack[key]]));
+const packageManagerIn = (text) => text?.toLowerCase().match(/\b(pnpm|npm|yarn|bun)\b/)?.[1] ?? null;
+
+/**
+ * A discovery doc's "Requirements and stack" table as a `stack`: the decided rows only. A cell left
+ * empty, "undecided" or still a `<placeholder>` is left out, and Other services is split on commas.
+ * null when the doc has no such table.
+ */
+export function parseStackTable(text) {
+  const lines = lf(text).split("\n");
+  const start = lines.findIndex((line) => /^## Requirements and stack\b/.test(line));
+  if (start === -1) return null;
+  const stack = {};
+  let found = false;
+  for (const line of lines.slice(start + 1)) {
+    if (/^## /.test(line)) break;
+    const cells = line.match(/^\|(.*)\|\s*$/)?.[1].split("|").map((cell) => cell.trim());
+    const key = cells && STACK_ROWS[cells[0].replace(/\*/g, "").toLowerCase()];
+    if (!key) continue;
+    found = true;
+    const choice = (cells[1] ?? "").replace(/<[^>]*>/g, "").trim();
+    if (!choice || /^undecided\b/i.test(choice)) continue;
+    stack[key] = key === "other" ? choice.split(",").map((s) => s.trim()).filter(Boolean) : choice;
+  }
+  return found ? stack : null;
+}
+
+/** The newest discovery doc that has a stack table: `{ from, stack }`, or null. */
+function discoveryStack(dir, files) {
+  const docs = files
+    .filter((f) => /^docs\/discovery\/[^/]+\.md$/.test(f) && posix.basename(f) !== "README.md")
+    .sort((a, b) => b.localeCompare(a, "en", { numeric: true }));
+  for (const from of docs) {
+    const stack = parseStackTable(readText(join(dir, from)));
+    if (stack) return { from, stack };
+  }
+  return null;
+}
+
+/** The parts where the discovery doc and the files name different things ("Postgres on Supabase" agrees with "Postgres"). */
+export function stackDisagreements(declared = {}, found = {}) {
+  const agree = (a, b) => a.toLowerCase().includes(b.toLowerCase()) || b.toLowerCase().includes(a.toLowerCase());
+  return STACK_ORDER.filter((key) => key !== "other" && declared[key] && found[key] && !agree(declared[key], found[key])).map((key) => ({
+    key,
+    declared: declared[key],
+    found: found[key],
+  }));
+}
+
+/** Whether Docker is installed and running, for a stack whose test database runs in it. Nothing is installed. */
+export function dockerStatus(run = spawnSync) {
+  const help = "https://docs.docker.com/get-started/get-docker/";
+  const version = run("docker", ["--version"], { encoding: "utf8" });
+  if (version.error || version.status !== 0) return { installed: false, running: false, version: null, help };
+  const info = run("docker", ["info", "--format", "{{.ServerVersion}}"], { encoding: "utf8" });
+  const running = !info.error && info.status === 0;
+  return { installed: true, running, version: String(running ? info.stdout : version.stdout).trim(), help };
 }
 
 /** The template's doc-config.mjs, pointed at the project's code folders and (merge) its existing docs. */
@@ -573,6 +695,138 @@ export function apply(dir, saved, plugin = PLUGIN) {
   };
 }
 
+// ------------------------------------------------------------------ refresh
+
+/** The scaffold CLAUDE.md's Stack section: its heading, its line, and the generated markers. */
+function stackSection(plugin) {
+  const lines = lf(readText(join(plugin, "scaffold", "CLAUDE.md"))).split("\n");
+  const start = lines.findIndex((line) => line === "## Stack");
+  const end = lines.findIndex((line, i) => i > start && /^## /.test(line));
+  return lines.slice(start, end === -1 ? undefined : end).join("\n").trim();
+}
+
+/**
+ * Brings a set-up project's config in line with its stack: the config's own `stack`, or `stack` given,
+ * the owner's answer to "what changed?". Each item is one of:
+ *   set     the stack itself, as the owner gave it
+ *   add     something the stack suggests that is missing; --apply writes it
+ *   change, remove   written only when its id is in `accept`: a hand-written row is never dropped silently
+ * It covers the stack, the guard's wrappers, the stop gate's checks, the runner's gates and allow
+ * rules, the design rung's prompt file, PROTOTYPE_DIR, CLAUDE.md's Stack section and checks.yml.
+ */
+export function refresh(dir, { stack, apply = false, accept = [] } = {}, plugin = PLUGIN) {
+  const det = detect(dir);
+  if (!det.stamp) throw new Error(`No ${STAMP}: this project was not set up by /setup-workflow. Run that first.`);
+  const current = JSON.parse(readText(join(dir, ".claude", "workflow.json")));
+  const chosen = orderStack(stack ?? current.stack ?? {});
+  const proposed = proposeWorkflow(det, plugin, { stack: chosen });
+  const items = [];
+  const item = (id, op, summary, edit) => items.push({ id, op, summary, edit });
+
+  if (JSON.stringify(orderStack(current.stack ?? {})) !== JSON.stringify(chosen)) {
+    item("stack", "set", `stack: ${JSON.stringify(chosen)}`, (config) => {
+      if (Object.keys(chosen).length) config.stack = chosen;
+      else delete config.stack;
+    });
+  }
+
+  // The lists the stack suggests rows for: a missing one is added; one it would not suggest is offered for removal.
+  const same = (row) => row;
+  const lists = [
+    { section: "guard.wrappers", get: (c) => c.guard?.wrappers ?? [], put: (c, v) => (c.guard = { ...(c.guard ?? {}), wrappers: v }), key: same, show: same },
+    {
+      section: "stopGate.checks",
+      get: (c) => c.stopGate?.checks ?? [],
+      put: (c, v) => (c.stopGate = { ...(c.stopGate ?? {}), checks: v }),
+      key: (r) => r.run,
+      show: (r) => `${r.label}: ${r.run}`,
+    },
+    {
+      section: "phaseRun.gates",
+      get: (c) => c.phaseRun?.gates ?? [],
+      put: (c, v) => (c.phaseRun = { ...(c.phaseRun ?? {}), gates: v }),
+      key: (r) => r.run ?? r.builtin,
+      show: (r) => `${r.label}: ${r.run}`,
+    },
+    {
+      section: "phaseRun.permissions.allow",
+      get: (c) => c.phaseRun?.permissions?.allow ?? [],
+      put: (c, v) => (c.phaseRun = { ...(c.phaseRun ?? {}), permissions: { ...(c.phaseRun?.permissions ?? {}), allow: v } }),
+      key: same,
+      show: same,
+    },
+  ];
+  for (const list of lists) {
+    const have = list.get(current);
+    const want = list.get(proposed);
+    const haveKeys = new Set(have.map(list.key));
+    const wantKeys = new Set(want.map(list.key));
+    for (const row of want.filter((r) => !haveKeys.has(list.key(r)))) {
+      item(`${list.section}+${list.key(row)}`, "add", `${list.section}: add ${list.show(row)}`, (config) => list.put(config, [...list.get(config), row]));
+    }
+    for (const row of have.filter((r) => !r.builtin && !wantKeys.has(list.key(r)))) {
+      item(`${list.section}-${list.key(row)}`, "remove", `${list.section}: ${list.show(row)} is not one the stack suggests (kept unless accepted)`, (config) =>
+        list.put(config, list.get(config).filter((r) => list.key(r) !== list.key(row))),
+      );
+    }
+  }
+
+  // The design rung, once the project has screens: its prompt file and the prototype folder.
+  if (det.frontend.length && !current.phaseRun?.prompt) {
+    item("phaseRun.prompt", "add", `phaseRun.prompt: ${PROMPT_FILE}, the design review's prompt`, (config) => {
+      config.phaseRun = { ...(config.phaseRun ?? {}), prompt: PROMPT_FILE };
+    });
+    if (!existsSync(join(dir, PROMPT_FILE))) {
+      item(PROMPT_FILE, "add", `${PROMPT_FILE}: the design review's prompt file`, (config, files) => files.set(PROMPT_FILE, readText(join(plugin, "scaffold", PROMPT_FILE))));
+    }
+  }
+  const docConfigPath = "tools/doc-config.mjs";
+  const docConfig = existsSync(join(dir, docConfigPath)) ? readText(join(dir, docConfigPath)) : "";
+  const prototypeLine = /^export const PROTOTYPE_DIR = (null|"[^"\n]*");(?=\r?$)/m;
+  const prototypeNow = docConfig.match(prototypeLine);
+  if (prototypeNow && det.prototypeDir && JSON.parse(prototypeNow[1]) !== det.prototypeDir) {
+    const was = JSON.parse(prototypeNow[1]);
+    item("PROTOTYPE_DIR", was === null ? "add" : "change", `${docConfigPath}: PROTOTYPE_DIR ${JSON.stringify(was)} → ${JSON.stringify(det.prototypeDir)}`, (config, files) =>
+      files.set(docConfigPath, (files.get(docConfigPath) ?? docConfig).replace(prototypeLine, `export const PROTOTYPE_DIR = ${JSON.stringify(det.prototypeDir)};`)),
+    );
+  }
+  // An older CLAUDE.md has no Stack section: CLAUDE.md is the project's, so it is offered, not added.
+  if (existsSync(join(dir, "CLAUDE.md")) && !/<!-- generated:start stack\b/.test(readText(join(dir, "CLAUDE.md")))) {
+    item("CLAUDE.md:stack", "change", "CLAUDE.md: add the Stack section, generated from the stack", (config, files) =>
+      files.set("CLAUDE.md", `${readText(join(dir, "CLAUDE.md")).replace(/\n*$/, "\n\n")}${stackSection(plugin)}\n`),
+    );
+  }
+
+  // What the selected items make, then checks.yml from the checks as they will be.
+  const selected = (it) => it.op === "set" || it.op === "add" || accept.includes(it.id);
+  const build = () => {
+    const config = structuredClone(current);
+    const files = new Map();
+    for (const it of items.filter(selected)) it.edit(config, files);
+    return { config, files };
+  };
+  const ciPath = ".github/workflows/checks.yml";
+  const ci = checksWorkflowText(det, build().config);
+  const ciNow = existsSync(join(dir, ciPath)) ? readText(join(dir, ciPath)) : null;
+  if (ci && lf(ci) !== lf(ciNow ?? "")) {
+    item(ciPath, ciNow === null ? "add" : "change", `${ciPath}: ${ciNow === null ? "written" : "rewritten"} from the checks`, (config, files) => files.set(ciPath, ci));
+  }
+
+  const report = { stack: chosen, items: items.map(({ id, op, summary }) => ({ id, op, summary })), applied: [], written: [] };
+  if (!apply) return report;
+  const { config, files } = build();
+  if (JSON.stringify(config) !== JSON.stringify(current)) files.set(".claude/workflow.json", `${JSON.stringify(config, null, 2)}\n`);
+  for (const [path, text] of files) {
+    mkdirSync(dirname(join(dir, path)), { recursive: true });
+    writeFileSync(join(dir, path), text);
+  }
+  // The Stack section and the other indexes follow the config.
+  if (existsSync(join(dir, "tools", "doc-index.mjs"))) spawnSync(process.execPath, ["tools/doc-index.mjs"], { cwd: dir, encoding: "utf8" });
+  const written = [...files.keys()];
+  if (written.length) execFileSync("git", ["add", "--", ...written, ...(existsSync(join(dir, "CLAUDE.md")) ? ["CLAUDE.md"] : [])], { cwd: dir });
+  return { ...report, applied: items.filter(selected).map((it) => it.id), written };
+}
+
 // ------------------------------------------------------------------ update
 
 /** The CHANGELOG.md sections after `from`, up to and including `to`. */
@@ -787,7 +1041,12 @@ async function main() {
       }
       print({ writable: result.writable, changed: result.changed, removed: result.removed, added: result.added, written: rest.includes("--apply") });
     } else if (command === "labels") print(LABELS);
-    else throw new Error("Usage: setup.mjs detect|propose|plan|apply|verify|update|automode|labels (see the top of this file).");
+    else if (command === "refresh") {
+      const stack = value("--stack") ? JSON.parse(readText(value("--stack"))) : undefined;
+      const accept = value("--accept") ? value("--accept").split(",").map((id) => id.trim()) : [];
+      print(refresh(target, { stack, apply: rest.includes("--apply"), accept }));
+    } else if (command === "docker") print(dockerStatus());
+    else throw new Error("Usage: setup.mjs detect|propose|plan|apply|verify|update|refresh|docker|automode|labels (see the top of this file).");
   } catch (error) {
     console.error(`setup: ${error.message}`);
     process.exit(1);
