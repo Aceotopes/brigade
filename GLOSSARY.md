@@ -94,8 +94,17 @@ _Avoid_: mockup
 
 **Flow diagram**:
 A module's map of screens, states and the moves between them, drawn from its approved prototype
-and kept as the reference.
+and kept as the reference. Its opening line records the prototype's approval.
 _Avoid_: user flow, wireframe
+
+**Screen brief**:
+A screen's job, its states and what it must not do, approved with its prototype. With Impeccable
+it is the surface brief; without, a note under the screen in its flow diagram.
+_Avoid_: design note, spec
+
+**Prototype guard**:
+The check that keeps prototype screens out of a production build.
+_Avoid_: feature flag
 
 **Visual system**:
 The project's durable visual decisions, recorded in `DESIGN.md` from the built app shell and

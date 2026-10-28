@@ -1,5 +1,44 @@
 # Discovery: Brigade 0.3.0, from discovery to a merged first phase
 
+> **Addendum 2026-10-28:** Phase D (the design rung) was grilled, and its details are decided, not
+> built:
+> 1. **Sample data** is JSON, one file per module, `design/sample-data/module-N.json`, in a
+>    configurable folder (`SAMPLE_DATA_DIR`). The prototype imports it, a seed in any language
+>    reads it, and tests load it.
+> 2. **Stand-in data.** Phase 0's grill drafts a rough sample-data file for each candidate module
+>    from discovery. Each module's planning grill later refines its own file.
+> 3. **Approval is recorded in the flow diagram.** `design/flows/module-N.md` opens with
+>    `**Approved:** YYYY-MM-DD by the owner` and lists the module's screens by name. A frontend
+>    ticket names one of them. No flow, or no Approved line, means not approved.
+> 4. **Screen brief.** Each screen in the flow has one: its job, its states (empty, loading,
+>    error, long content), and what it must not do. With Impeccable, the surface brief is the
+>    screen brief. `/ticket-check` requires one for a frontend ticket's screen.
+> 5. **The visual system comes first.** `/ticket-check` refuses a module's frontend tickets until
+>    `DESIGN.md` exists. Impeccable's documenter writes it at Phase 0's finish; without
+>    Impeccable, Claude writes a plain one from a short template.
+> 6. **The finish review.** For a frontend project, setup writes the phase-run prompt file with a
+>    default `## Review` section:
+>    - with Impeccable, it starts `impeccable-finish-reviewer`;
+>    - without, a fresh subagent compares the screenshots with the screen, its flow and
+>      `DESIGN.md`.
+>
+>    Either way it is one round and one fix batch, and the project can edit it afterwards.
+> 7. **The prototype folder** is proposed by setup from the framework: Next app router
+>    `app/(prototype)/`, SvelteKit `src/routes/(prototype)/`, Nuxt `pages/prototype/`, a plain
+>    React or Vite app `src/prototype/`. Setup asks when it can't tell. The answer is saved as
+>    `PROTOTYPE_DIR`.
+> 8. **Kept out of production.** The prototype folder's layout renders only in development, and
+>    its guard carries a `brigade:prototype-guard` marker. doc-check refuses a prototype folder
+>    without the marker. Phase 0 also writes the project's own test that a production build hides
+>    prototype routes, which runs as a gate.
+> 9. **Design index.** `design/README.md` is generated from `design/flows/`: each module's
+>    approval date, its screens, and whether its prototype folder still exists.
+> 10. **The QA seed** loading the sample data is documented, not enforced: it is project code.
+> 11. **Term.** "Screen brief" is the canonical name.
+>
+> **Changes:** "The design rung" below gains these details. Open question 4 is settled by items 1,
+> 2 and 10, and open question 5 by item 7. **Open:** none for phase D.
+
 > **Addendum 2026-10-28:** Phase A (the ladder) was grilled, and its details are decided, not
 > built:
 > 1. **Template.** `docs/_templates/discovery.md` requires Goals, Problems, Requirements and stack,
