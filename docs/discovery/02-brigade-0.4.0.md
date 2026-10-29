@@ -1,5 +1,21 @@
 # Discovery: Brigade 0.4.0, the runner's night
 
+> **Addendum 2026-10-30:** 0.4.0 is released, after a throwaway trial night.
+> - **The trial:** a fresh repo with a tiny library and one spec, two run tickets (one blocked by
+>   the other) and the finish ticket. Both tickets were built and none parked, for $5.60 at API
+>   rates; the pull request's checks ran green.
+> - **Seen live:** the table redrawn in place with its dim detail lines and colours; the tab title
+>   following the run; `status.mjs` in a second terminal printing the same table. Read from the
+>   run's files: a stop check with `"testsSkipped": true`, and a Scoreboard with "Slept" at 0 and a
+>   cost and time split per ticket.
+> - **Not seen:** the Windows notification, because the owner's Do Not Disturb was on. The same
+>   script ran without an error, so nothing was changed.
+> - **Found:** the receipt only helps when the session tests last. One session wrote its devlog
+>   and logs after its last test pass, and a docs-only edit is still a new tree, so the hook ran
+>   the tests again. Left for 0.4.1, to be decided first.
+>
+> **Changes:** Goals 1 and 3 are met. Goal 2 is met for fixed sleeps, and in part for test runs.
+
 **Rounds:** 2026-10-28. A handoff from one real project's session that profiled a 14-ticket phase
 run, with five fixes and a new terminal display the owner had already approved there, then built
 and committed there. Brigade ports them, and the owner settled how they become generic in one

@@ -4,7 +4,7 @@ What changed in each version, for `/update-workflow` to show a project before it
 template. Newest first. A version that changes a config file's format says so, and ships its
 migration in `scripts/migrations.mjs`.
 
-## 0.4.0 — unreleased
+## 0.4.0 — 2026-10-30
 The phase runner measures each ticket, shows the run as a table, and stops repeating work: a port
 of the upgrades one real project made after profiling a 14-ticket night. The decisions are in
 `docs/discovery/02-brigade-0.4.0.md`.

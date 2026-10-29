@@ -219,7 +219,10 @@ migrations, a browser check and the prose each session is given. Every key is de
 
 ## Status
 
-Version **0.3.0** (see [CHANGELOG.md](CHANGELOG.md)). It has been proven on throwaway repos:
+Version **0.4.0** (see [CHANGELOG.md](CHANGELOG.md)). It has been proven on throwaway repos:
+- **a trial night** (0.4.0): a phase run on a fresh repo, watched live as the table in the
+  terminal, with each ticket measured in the report's Scoreboard and the stop check skipping tests
+  already passed on the same code;
 - **a fresh project, every rung** (0.3.0): a discovery doc with a stack, the one-command install
   from GitHub, setup reading the stack, Phase 0, a refresh, a planned module, a real unattended
   phase run, the finish ticket, the merge, and `/roadmap` publishing the page. The generated
@@ -236,6 +239,9 @@ Known limits:
   and listed; nothing is merged for you.
 - Claude Code runs the phase run's sessions only in a folder you have opened in it once and
   trusted; the runner checks before it starts.
+- The stop check skips the tests only when the session tested last: any edit after the pass, a
+  docs-only one included, makes them run again.
+- The end-of-run Windows notification is built but has not yet been seen live.
 
 ## More
 

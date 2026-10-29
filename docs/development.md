@@ -91,7 +91,7 @@ these steps:
    - The decisions are in the [0.3.0 discovery doc](discovery/01-brigade-0.3.0.md), the terms in
      the [glossary](../GLOSSARY.md), and the two lasting choices in
      [ADR 0001](adr/0001-no-stack-recipes.md) and [ADR 0002](adr/0002-roadmap-repo-is-truth.md).
-10. **0.4.0, the runner's night** (2026-10-28, unreleased): a port of the runner upgrades one real
+10. **0.4.0, the runner's night** (2026-10-28, released 2026-10-30 after a trial night): a port of the runner upgrades one real
     project built after profiling a 14-ticket night. Each ticket is measured (cost at API rates,
     the time split), the run's terminal is a table, the stop check trusts a tests-passed receipt,
     sessions wait on things instead of the clock, and tickets get a size budget. The decisions
