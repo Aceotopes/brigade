@@ -38,3 +38,19 @@ runner's gates trust no receipt and run the full suite on every ticket, as befor
   stops being true.
 - The receipt names the commands it vouches for, so changing a receipt row's `run` makes every old
   receipt stop matching. There is one command, in one place.
+
+## Addendum 2026-10-30: unread paths (0.4.1, decided, not built)
+
+The 0.4.0 trial night showed the receipt holding only when a session tested last. Each ticket
+ends by writing its devlog and logs, and a docs-only edit was still a new tree, so the hook ran
+the tests again.
+
+- **"The same code" now means every file except the ones the project lists as unread.** That
+  list is `"unread"` on the tests' row, written in git globs. Setup writes `["docs/**", "*.md"]`;
+  with no list, every file counts, as before.
+- The receipt records the list it was made under. A different list makes the receipt stale, as a
+  different command does.
+- **The trust stays the same:** a wrong list (one that names a file the tests do read) can skip
+  only the hook's re-run, and the gates still run the full suite. To keep that mistake small, the
+  loader refuses a catch-all such as `**`.
+- The prompt also tells a session to run the tests last, after its docs.

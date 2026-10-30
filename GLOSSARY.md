@@ -67,9 +67,15 @@ _Avoid_: night run, batch
 A check the runner makes on a ticket's result before the branch is pushed.
 
 **Receipt**:
-A record that a project's tests passed on exactly the current code, from the same base. The stop
-check skips the tests while it holds; a gate never reads one.
+A record that a project's tests passed on exactly the current code, from the same base; files the
+project lists as unread (its docs) do not count as code. The stop check skips the tests while it
+holds; a gate never reads one.
 _Avoid_: cache, pass token
+
+**Unread paths**:
+The files a project's tests never read, listed on its tests row, so an edit to them keeps a
+receipt.
+_Avoid_: ignore list, excluded files
 
 **Stack**:
 The tools a project declares it is built with: language, framework, package manager, database,

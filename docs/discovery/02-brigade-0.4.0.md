@@ -1,5 +1,28 @@
 # Discovery: Brigade 0.4.0, the runner's night
 
+> **Addendum 2026-10-30 (2):** 0.4.1, the receipt ignores unread paths. Grilled; decided, not built.
+> - **D1** Two fixes: the receipt's key leaves out the paths the project lists, and the session
+>   prompt says to write the docs first and run `stop-tests.mjs` last.
+> - **D2** The list is `"unread"` on the tests' stop-check row, allowed only beside
+>   `"receipt": true`. It needs 0.4.1 hooks.
+> - **D3** The paths are git globs (`docs/**`, `*.md` for the root only), applied by git itself when
+>   it builds the key.
+> - **D4** Setup writes `["docs/**", "*.md"]`. With no list, every file counts, as before.
+> - **D5** Refresh compares the keys inside the tests row and offers a missing `receipt` or
+>   `unread` as an add.
+> - **D6** The receipt records its `unread` list, so a different list makes it stale.
+> - **D7** The config loader refuses a catch-all (`**`, `**/*`, `.`).
+> - **D8** `stop-check-log.jsonl` gains `"receipt": "held" | "stale" | "none"`.
+> - **D9** 0.4.1 ships on green unit tests plus one hands-on check in a scratch repo: pass the
+>   tests, edit a doc, and see the hook skip. No trial night.
+> - **Tickets:**
+>   1. The receipt ignores unread paths (D1–D3, D6–D8).
+>   2. Setup writes the list and refresh offers it (D4, D5). Blocked by 1.
+>   3. Finish: the docs, the hands-on check and the 0.4.1 version. Blocked by 1 and 2.
+>
+> **Changes:** Goal 2's test runs are covered once these ship.
+> [ADR 0003](../adr/0003-stop-check-trusts-a-receipt.md) gains an addendum.
+
 > **Addendum 2026-10-30:** 0.4.0 is released, after a throwaway trial night.
 > - **The trial:** a fresh repo with a tiny library and one spec, two run tickets (one blocked by
 >   the other) and the finish ticket. Both tickets were built and none parked, for $5.60 at API
