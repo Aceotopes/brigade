@@ -242,6 +242,8 @@ export function detect(dir) {
 const RUN = { pnpm: (s) => `pnpm ${s}`, npm: (s) => `npm run ${s}`, yarn: (s) => `yarn ${s}`, bun: (s) => `bun run ${s}` };
 const EXEC = { pnpm: "pnpm exec", npm: "npx", yarn: "yarn", bun: "bunx" };
 const PLACEHOLDER_TEST = /no test specified/;
+/** What setup lists as the tests' unread paths (git globs): the docs folder, and the root's Markdown. */
+export const UNREAD = ["docs/**", "*.md"];
 
 /** The checks the stack already has: a typecheck, a lint, the tests and a build, as commands. */
 export function stackChecks(det) {
@@ -265,8 +267,9 @@ export function stackChecks(det) {
 export function proposeWorkflow(det, plugin = PLUGIN, { stack } = {}) {
   const config = JSON.parse(readText(join(plugin, "template", ".claude", "workflow.json")));
   const checks = stackChecks(det);
-  // The tests row carries the receipt (tools/phase-run/stop-tests.mjs): the stop check skips it on code that already passed.
-  config.stopGate.checks = checks.filter((c) => c.key !== "build").map(({ key, label, run }) => ({ label, run, ...(key === "test" ? { receipt: true } : {}) }));
+  // The tests row carries the receipt (tools/phase-run/stop-tests.mjs): the stop check skips it on code that already passed,
+  // and on code that changed only where the tests never read (UNREAD).
+  config.stopGate.checks = checks.filter((c) => c.key !== "build").map(({ key, label, run }) => ({ label, run, ...(key === "test" ? { receipt: true, unread: [...UNREAD] } : {}) }));
   config.phaseRun.gates = checks.map(({ key, label, run }) => ({ label: label.toLowerCase(), run, ...(key === "test" ? { alone: true } : {}) }));
   const chosen = orderStack(stack ?? { ...(det.stackFromFiles ?? {}), ...(det.discoveryStack?.stack ?? {}) });
   if (Object.keys(chosen).length) config.stack = chosen;
@@ -723,6 +726,9 @@ export function refresh(dir, { stack, apply = false, accept = [] } = {}, plugin 
   const current = JSON.parse(readText(join(dir, ".claude", "workflow.json")));
   const chosen = orderStack(stack ?? current.stack ?? {});
   const proposed = proposeWorkflow(det, plugin, { stack: chosen });
+  // A tests row added whole shares the project's own unread list, if it has one: the loaders refuse two lists.
+  const projectUnread = (current.stopGate?.checks ?? []).find((c) => c.receipt && Array.isArray(c.unread))?.unread;
+  if (projectUnread) for (const row of proposed.stopGate.checks.filter((c) => c.receipt)) row.unread = [...projectUnread];
   const items = [];
   const item = (id, op, summary, edit) => items.push({ id, op, summary, edit });
 
@@ -772,6 +778,26 @@ export function refresh(dir, { stack, apply = false, accept = [] } = {}, plugin 
         list.put(config, list.get(config).filter((r) => list.key(r) !== list.key(row))),
       );
     }
+  }
+
+  // Inside the tests row (0.4.1): the rows above match by command only, so a row the project has is never
+  // offered whole again; its missing receipt, then its missing unread list, are each an add. The project's
+  // own list is never changed, and the one offered matches it, as every receipt row shares one list.
+  const haveChecks = current.stopGate?.checks ?? [];
+  const wantTests = (proposed.stopGate?.checks ?? []).find((c) => c.receipt);
+  // The row, unless an accepted removal took it first: then there is nothing to add to.
+  const rowIn = (config, run) => config.stopGate?.checks?.find((c) => c.run === run) ?? {};
+  const testsRow = wantTests && !haveChecks.some((c) => c.receipt) ? haveChecks.find((c) => c.run === wantTests.run) : null;
+  if (testsRow) {
+    item(`stopGate.checks.receipt+${testsRow.run}`, "add", `stopGate.checks: ${testsRow.label} gets "receipt": true, so the stop check skips tests already passed`, (config) => {
+      rowIn(config, testsRow.run).receipt = true;
+    });
+  }
+  for (const row of haveChecks.filter((c) => (c.receipt || c === testsRow) && c.unread === undefined)) {
+    const unread = [...(projectUnread ?? UNREAD)];
+    item(`stopGate.checks.unread+${row.run}`, "add", `stopGate.checks: ${row.label} gets "unread": ${JSON.stringify(unread)}, so a docs-only edit keeps its receipt`, (config) => {
+      rowIn(config, row.run).unread = unread;
+    });
   }
 
   // The design rung, once the project has screens: its prompt file and the prototype folder.

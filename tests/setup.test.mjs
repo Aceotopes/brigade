@@ -110,6 +110,11 @@ test("the runner's own loader accepts the config setup proposes from a stack", a
   assert.equal(JSON.parse(read(target, ".claude/workflow.json")).stopGate.checks[0].run, "pnpm exec tsc --noEmit");
   // The tests row, and only it, carries the receipt that lets the stop check skip a passed run.
   assert.deepEqual(config.stopChecks.filter((c) => c.receipt).map((c) => c.label), ["Tests"]);
+  // ...and the paths its tests never read, so a devlog written after the pass keeps the receipt (0.4.1).
+  const written = JSON.parse(read(target, ".claude/workflow.json"));
+  assert.deepEqual(written.stopGate.checks.find((c) => c.receipt), { label: "Tests", run: "pnpm test", receipt: true, unread: ["docs/**", "*.md"] });
+  assert.deepEqual(parseWorkflowConfig(written).checks.find((c) => c.receipt).unread, ["docs/**", "*.md"], "the hooks' loader accepts it");
+  assert.deepEqual(config.stopChecks.find((c) => c.receipt).unread, ["docs/**", "*.md"], "and the runner's");
 });
 
 test("the prototype folder is a route group where the framework has them, and unknown otherwise", () => {
@@ -322,6 +327,55 @@ test("a refresh adds what the stack suggests, removes or changes only what the o
   assert.deepEqual(result.applied, ["stack"]);
   assert.equal(JSON.parse(read(dir, ".claude/workflow.json")).stack.storage, "Cloudflare R2");
   assert.match(read(dir, "CLAUDE.md"), /- \*\*Storage:\*\* Cloudflare R2/, "the Stack block follows");
+});
+
+test("a refresh looks inside the tests row: a missing receipt or unread list is added, a project's own list never touched", () => {
+  const { dir } = existing();
+  apply(dir, runPlan(dir, { mode: "merge" }));
+  const path = join(dir, ".claude/workflow.json");
+  const testsRow = () => JSON.parse(read(dir, ".claude/workflow.json")).stopGate.checks.find((c) => c.run === "pnpm test");
+  const edit = (change) => {
+    const config = JSON.parse(read(dir, ".claude/workflow.json"));
+    change(config.stopGate.checks.find((c) => c.run === "pnpm test"));
+    writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`);
+  };
+  const adds = () => refresh(dir).items.filter((i) => i.op === "add").map((i) => i.id);
+
+  // A 0.4.0 project: the receipt, no list.
+  edit((row) => delete row.unread);
+  assert.deepEqual(adds(), ["stopGate.checks.unread+pnpm test"]);
+  refresh(dir, { apply: true });
+  assert.deepEqual(testsRow(), { label: "Tests", run: "pnpm test", receipt: true, unread: ["docs/**", "*.md"] });
+
+  // An older project still: neither.
+  edit((row) => {
+    delete row.receipt;
+    delete row.unread;
+  });
+  assert.deepEqual(adds(), ["stopGate.checks.receipt+pnpm test", "stopGate.checks.unread+pnpm test"]);
+  const applied = refresh(dir, { apply: true });
+  assert.deepEqual(applied.applied, ["stopGate.checks.receipt+pnpm test", "stopGate.checks.unread+pnpm test"]);
+  assert.deepEqual(testsRow(), { label: "Tests", run: "pnpm test", receipt: true, unread: ["docs/**", "*.md"] });
+
+  // The project's own list is its own: never offered for change or removal.
+  edit((row) => (row.unread = ["docs/**", "notes/**"]));
+  assert.deepEqual(refresh(dir).items, []);
+});
+
+test("a refresh never trips on a tests row the owner also chose to remove", () => {
+  const { dir } = existing();
+  apply(dir, runPlan(dir, { mode: "merge" }));
+  const path = join(dir, ".claude/workflow.json");
+  const config = JSON.parse(read(dir, ".claude/workflow.json"));
+  const own = config.stopGate.checks.find((c) => c.receipt);
+  own.run = "pnpm vitest run";
+  delete own.unread;
+  writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`);
+  const ids = refresh(dir).items.map((i) => i.id);
+  assert.ok(ids.includes("stopGate.checks-pnpm vitest run") && ids.includes("stopGate.checks.unread+pnpm vitest run"), ids.join(", "));
+  refresh(dir, { apply: true, accept: ["stopGate.checks-pnpm vitest run"] });
+  const rows = JSON.parse(read(dir, ".claude/workflow.json")).stopGate.checks.filter((c) => c.receipt);
+  assert.deepEqual(rows, [{ label: "Tests", run: "pnpm test", receipt: true, unread: ["docs/**", "*.md"] }]);
 });
 
 test("an older CLAUDE.md without the Stack section is offered it, and gets it only on a yes", () => {

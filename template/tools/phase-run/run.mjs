@@ -551,6 +551,12 @@ function gotchasFile(branch) {
   return fill(docConfig.GOTCHAS_FILE ?? "docs/agents/gotchas/{phase}.md", { phase: branch.replace(/^phase-/, "") });
 }
 
+/** What the prompt says an edit after the pass does, by the tests row's unread list. */
+function unreadNote(stopChecks) {
+  const unread = stopChecks.find((c) => c.receipt)?.unread ?? [];
+  return unread.length ? `except to ${unread.map((glob) => `\`${glob}\``).join(", ")}, which the tests never read` : "docs included";
+}
+
 function render(template, values) {
   return template.replace(/\{\{(\w+)\}\}/g, (whole, key) => (key in values ? String(values[key]) : whole));
 }
@@ -608,7 +614,9 @@ function promptValues(project, prose, ticket) {
       ? project.stopChecks.map((c) => (c.receipt ? "`node tools/phase-run/stop-tests.mjs` (the tests)" : `\`${c.run.replaceAll("{base}", base)}\``)).join(", ")
       : "nothing, as this project names no stop checks",
     RECEIPT: project.stopChecks.some((c) => c.receipt)
-      ? " Run the tests through `node tools/phase-run/stop-tests.mjs`, never by hand: it prints a short summary (the failures and the totals), and on a pass records a receipt, so a second run on the same code (or the stop check) skips them. Any edit since makes them run again."
+      ? " Run the tests through `node tools/phase-run/stop-tests.mjs`, never by hand: it prints a short summary (the failures and the totals), and on a pass records a receipt, so a second run on the same code (or the stop check) skips them. Any edit since makes them run again, " +
+        unreadNote(project.stopChecks) +
+        ": so write your docs and logs first, and run the tests last."
       : "",
     MIGRATIONS: target
       ? `never apply a migration to ${target} yourself; the runner applies it after your checks pass`

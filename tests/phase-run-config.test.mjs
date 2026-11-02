@@ -25,6 +25,36 @@ test("both shipped configs load through the hooks' loader and the runner's", () 
   assert.deepEqual([blank.gates, blank.qa, blank.migrations, blank.browserCheck], [[], null, null, null]);
 });
 
+// The receipt's unread paths are checked by both loaders alike: the hooks' (the Stop hook) and the
+// runner's (stop-tests.mjs and preflight), which cannot share code across the plugin and the project.
+const tests = (over = {}) => ({ label: "Tests", run: "npm test", receipt: true, ...over });
+const checks = (...rows) => ({ version: 1, stopGate: { checks: rows } });
+
+test("both loaders read the tests row's unread paths", () => {
+  const data = checks({ label: "Lint", run: "npm run lint" }, tests({ unread: ["docs/**", "*.md"] }));
+  assert.deepEqual(parseWorkflowConfig(data).checks.map((c) => c.unread), [[], ["docs/**", "*.md"]]);
+  assert.deepEqual(parseRunConfig(data).stopChecks.map((c) => c.unread), [[], ["docs/**", "*.md"]]);
+});
+
+test("both loaders refuse a misplaced, malformed or catch-all unread list, naming the row", () => {
+  const cases = [
+    [checks({ label: "Lint", run: "x", unread: ["docs/**"] }), /checks\[0\]\.unread belongs on the tests' row/],
+    [checks(tests({ unread: "docs/**" })), /checks\[0\]\.unread must be a list/],
+    [checks(tests({ unread: ["docs/**", 3] })), /checks\[0\]\.unread\[1\] must be a git glob/],
+    [checks(tests({ unread: [" "] })), /checks\[0\]\.unread\[0\] must be a git glob/],
+    // A glob that names no folder or file could leave out every file, and the receipt would never go stale.
+    ...["**", "**/*", "*/**", ".", "**/**", "**/*.*", "*"].map((glob) => [checks(tests({ unread: ["docs/**", glob] })), /checks\[0\]\.unread\[1\] .* every file/]),
+    // Git refuses a path outside the repo, and `./` or `..` can climb back to its root.
+    ...["/docs/**", "./**", "src/..", "../shared/**"].map((glob) => [checks(tests({ unread: [glob] })), /checks\[0\]\.unread\[0\] .* inside the repo/]),
+    [checks(tests({ unread: [" docs/**"] })), /checks\[0\]\.unread\[0\] .* spaces around it/],
+    [checks(tests({ unread: ["docs/**"] }), tests({ run: "npm run e2e" })), /checks\[1\]\.unread differs from stopGate\.checks\[0\]\.unread/],
+  ];
+  for (const [data, error] of cases) {
+    assert.throws(() => parseWorkflowConfig(data), error, `hooks: ${JSON.stringify(data.stopGate)}`);
+    assert.throws(() => parseRunConfig(data), error, `runner: ${JSON.stringify(data.stopGate)}`);
+  }
+});
+
 test("Steak To Juan's example holds exactly what run.mjs hardcoded", () => {
   const stj = parseRunConfig(STJ);
   const lookup = (name) => ({ NEON_TEST_DATABASE_URL: "postgresql://u:p@localhost:5432/stj_test", NEON_DATABASE_URL: "postgresql://u:p@ep-cool-1-pooler.ap.aws.neon.tech/db" })[name];

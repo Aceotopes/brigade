@@ -236,7 +236,12 @@ tries to stop. In `run`, `{base}` is the run's base commit, for example
 `vitest run --changed {base}`. Mark the tests' row `"receipt": true` (setup does): a session then
 runs it through `tools/phase-run/stop-tests.mjs`, and the stop check skips it on code that already
 passed. An optional `"quiet": { "totals", "failures" }` pair of patterns there trims what the
-session reads of the output; the phase-run guide has a vitest example.
+session reads of the output; the phase-run guide has a vitest example. An `"unread"` list on the
+same row names, in git globs, what the tests never read: setup writes `["docs/**", "*.md"]`
+(`*.md` is the root's Markdown only), so a docs-only edit after the pass keeps the receipt. With no
+list, every file counts. The config refuses a glob that names no folder or file (`**`, `*.*`, `.`)
+or one outside the repo, and every row with `"receipt": true` shares one list. Each stop check
+logs `"receipt": "held"`, `"stale"` or `"none"` in `.phase-run/stop-check-log.jsonl`.
 
 **`stack`**: what the project is built with, from your discovery doc at setup: `language`,
 `framework`, `packageManager`, `database`, `migrations`, `testDatabase`, `storage`, and `other` (a

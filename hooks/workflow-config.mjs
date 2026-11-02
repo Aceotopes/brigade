@@ -11,7 +11,8 @@
 //       "wrappers": ["pnpm exec", "pnpm dlx", "pnpm", "npx"] },   prefixes stripped before a rule is tested
 //     "stopGate": { "checks": [ { "label": "Typecheck", "run": "pnpm typecheck" },
 //       { "label": "Tests", "run": "pnpm test", "receipt": true,     the tests: skipped while their receipt holds
-//         "quiet": { "totals": "<regex>", "failures": "<regex>" } } ] },   what stop-tests.mjs prints of them
+//         "quiet": { "totals": "<regex>", "failures": "<regex>" },   what stop-tests.mjs prints of them
+//         "unread": ["docs/**", "*.md"] } ] },   git globs the tests never read: an edit there keeps the receipt
 //     "stack": { "language", "framework", "packageManager", "database", "migrations", "testDatabase",
 //                "storage": "<any text>", "other": ["<any text>"] },   what the project is built with
 //     "roadmap": { "artifact": "<the roadmap page's link>" }
@@ -30,7 +31,7 @@ export const CONFIG_PATH = join(".claude", "workflow.json");
 
 const WHEN = ["always", "phase-run"];
 const RULE_KEYS = ["when", "command", "text", "with", "unless", "message", "note"];
-const CHECK_KEYS = ["label", "run", "receipt", "quiet", "note"];
+const CHECK_KEYS = ["label", "run", "receipt", "quiet", "unread", "note"];
 /** The stack's parts, in the order the discovery template's table lists them. */
 export const STACK_KEYS = ["language", "framework", "packageManager", "database", "migrations", "testDatabase", "storage", "other"];
 /** What the guard strips before a rule is tested, when the project names none: the wrappers it always knew. */
@@ -98,9 +99,41 @@ export function parseWorkflowConfig(data) {
         pattern(check.quiet[key], `${where}.quiet.${key}`);
       }
     }
-    return { label: check.label, run: check.run, receipt: check.receipt === true };
+    return { label: check.label, run: check.run, receipt: check.receipt === true, unread: unreadList(check, where) };
   });
+  sharedUnread(checks, "stopGate.checks");
   return { rules, checks, wrappers: wrappers.map((w) => w.trim()) };
+}
+
+/**
+ * A row's unread paths: git globs the receipt's key leaves out, only on a row with "receipt": true. A
+ * glob that names no folder or file (`**`, `*.*`, `.`) could leave out every file, so no edit would make
+ * the receipt stale; one that leaves the repo is one git refuses.
+ */
+function unreadList(check, where) {
+  if (check.unread === undefined) return [];
+  if (check.receipt !== true) throw new Error(`${where}.unread belongs on the tests' row, the one with "receipt": true.`);
+  if (!Array.isArray(check.unread)) throw new Error(`${where}.unread must be a list of git globs, such as ["docs/**", "*.md"].`);
+  check.unread.forEach((glob, j) => {
+    const at = `${where}.unread[${j}]`;
+    if (typeof glob !== "string" || !glob.trim()) throw new Error(`${at} must be a git glob, such as "docs/**".`);
+    if (glob !== glob.trim()) throw new Error(`${at} "${glob}" has spaces around it, which git would match as written.`);
+    if (/^\.?\//.test(glob) || glob.split("/").includes("..")) throw new Error(`${at} "${glob}" must be a path inside the repo, from its root, such as "docs/**".`);
+    if (!/[\p{L}\p{N}]/u.test(glob)) {
+      throw new Error(`${at} "${glob}" names no folder or file, so it could leave out every file; name only what the tests never read, such as "docs/**".`);
+    }
+  });
+  return check.unread;
+}
+
+/** The receipt keeps one key, so every row with "receipt": true leaves out the same paths. */
+function sharedUnread(checks, where) {
+  const rows = checks.map((check, i) => ({ check, i })).filter(({ check }) => check.receipt);
+  const key = (list) => [...list].sort().join("\n");
+  const differing = rows.find(({ check }) => key(check.unread) !== key(rows[0].check.unread));
+  if (differing) {
+    throw new Error(`${where}[${differing.i}].unread differs from ${where}[${rows[0].i}].unread: every row with "receipt": true shares one unread list.`);
+  }
 }
 
 function list(value, where) {

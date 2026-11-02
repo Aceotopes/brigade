@@ -1,5 +1,25 @@
 # Discovery: Brigade 0.4.0, the runner's night
 
+> **Addendum 2026-11-02:** 0.4.1 is built, test-first and attended (tickets #2–#4), and proven by the
+> hands-on check (D9).
+> - **The check:** a scratch git repo with the runner copied in. Its tests row is `node test.mjs`
+>   with `"unread": ["docs/**", "*.md"]`, and the test counts its own runs. It was driven like a
+>   ticket:
+>   1. A code change, then `stop-tests.mjs`: passed, and the receipt recorded the list.
+>   2. The devlog and README edited, then the plugin's real Stop hook: it skipped the tests and
+>      logged `"receipt": "held"` (still 1 test run).
+>   3. A code edit, then the hook: it ran the tests and logged `"stale"` (2 runs).
+> - **Found in review, fixed with tests:**
+>   - the loaders refuse any glob that names no folder or file, or that leaves the repo, not
+>     only the four named catch-alls;
+>   - a list that leaves out every file gives no key;
+>   - `stop-tests.mjs` says why it recorded no receipt;
+>   - refresh survives an accepted removal of the row it offers a list for;
+>   - the prompt names the project's own list, or says docs edits count.
+>
+> **Changes:** Goal 2 is met for test runs too. [ADR 0003](../adr/0003-stop-check-trusts-a-receipt.md)
+> gains a "built" addendum.
+
 > **Addendum 2026-10-30 (2):** 0.4.1, the receipt ignores unread paths. Grilled; decided, not built.
 > - **D1** Two fixes: the receipt's key leaves out the paths the project lists, and the session
 >   prompt says to write the docs first and run `stop-tests.mjs` last.

@@ -54,3 +54,10 @@ the tests again.
   only the hook's re-run, and the gates still run the full suite. To keep that mistake small, the
   loader refuses a catch-all such as `**`.
 - The prompt also tells a session to run the tests last, after its docs.
+
+## Addendum 2026-11-02: unread paths built (0.4.1)
+
+Built as decided, with one widening: the review of the build found catch-alls past the four
+named ones (`**/**`, `**/*.*`, `./**`, `src/..`). So the loaders refuse any glob that names no
+folder or file, or that leaves the repo. As a backstop, a list that still leaves out every file
+gives no key, so no receipt is written.

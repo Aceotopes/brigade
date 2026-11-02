@@ -4,6 +4,28 @@ What changed in each version, for `/update-workflow` to show a project before it
 template. Newest first. A version that changes a config file's format says so, and ships its
 migration in `scripts/migrations.mjs`.
 
+## 0.4.1 — 2026-11-02
+The receipt ignores unread paths: a session's devlog and logs, written after its last test pass,
+no longer make the stop check run the tests again. The decisions are the 0.4.1 addendum in
+`docs/discovery/02-brigade-0.4.0.md` and in ADR 0003.
+
+**Config:** the tests' `stopGate.checks` row gains `unread`, a list of git globs, allowed only
+beside `"receipt": true`. Only 0.4.1's hooks accept it, and only 0.4.1's `receipt.mjs` applies it:
+update the plugin, then run `/update-workflow`. No migration: in a project set up before 0.4.1,
+run `/setup-workflow` and pick the refresh, which offers `unread` (and a missing `"receipt": true`)
+as adds. A project's own list is never changed.
+
+- **Unread paths** (`receipt.mjs`): the receipt's key leaves out the listed paths, and git does
+  the matching (`docs/**` is the folder, `*.md` the root only). The receipt records the list, so a
+  different list makes it stale. With no list, every file counts, as in 0.4.0.
+- **The loaders refuse a list that could hide code:** a glob that names no folder or file (`**`,
+  `**/*`, `*.*`, `.`), one outside the repo (`/x`, `./x`, `..`), one with spaces around it, and
+  two receipt rows with different lists. A list that still leaves out every file gives no key, so
+  no receipt is written and `stop-tests.mjs` says so.
+- **Setup writes `["docs/**", "*.md"]`** on a new project's tests row.
+- **The stop check's log** (`stop-check-log.jsonl`) gains `"receipt": "held" | "stale" | "none"`.
+- **The ticket prompt** tells a session to write its docs and logs first, and run the tests last.
+
 ## 0.4.0 — 2026-10-30
 The phase runner measures each ticket, shows the run as a table, and stops repeating work: a port
 of the upgrades one real project made after profiling a 14-ticket night. The decisions are in

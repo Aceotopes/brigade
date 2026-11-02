@@ -8,7 +8,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { once } from "node:events";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -258,6 +258,30 @@ test("any edit, or a new untracked file, changes the tree key; the real index is
   assert.notEqual(treeKey(dir), withNew);
 });
 
+test("with unread paths, a docs-only edit keeps the tree key; code, a new code file or a nested .md change it", () => {
+  const unread = ["docs/**", "*.md"];
+  const { dir, git } = gitRepo({ "README.md": "# r\n", "docs/x.md": "x\n", "src/a.js": "1\n", "src/notes.md": "n\n" });
+  const clean = treeKey(dir, unread);
+  assert.ok(clean);
+  writeFileSync(join(dir, "docs/x.md"), "edited\n");
+  writeFileSync(join(dir, "README.md"), "# edited\n");
+  writeFileSync(join(dir, "docs/new.md"), "new\n");
+  assert.equal(treeKey(dir, unread), clean);
+  assert.equal(git("status", "--porcelain").stdout.trim().split("\n").length, 3); // nothing was staged in the real index
+  git("add", "-A");
+  git("commit", "-q", "-m", "docs");
+  assert.equal(treeKey(dir, unread), clean, "the same after the docs are committed");
+
+  writeFileSync(join(dir, "src/notes.md"), "edited\n"); // `*.md` is the root only
+  assert.notEqual(treeKey(dir, unread), clean);
+  git("checkout", "--", "src/notes.md");
+  writeFileSync(join(dir, "src/b.js"), "new code\n");
+  assert.notEqual(treeKey(dir, unread), clean);
+  rmSync(join(dir, "src/b.js"));
+  writeFileSync(join(dir, "src/a.js"), "2\n");
+  assert.notEqual(treeKey(dir, unread), clean);
+});
+
 test("a receipt holds only for the same tree, base and command, and a pass", () => {
   const receipt = { tree: "t1", base: "b1", commands: ["npm test"], passed: true };
   const now = { tree: "t1", base: "b1", command: "npm test" };
@@ -268,6 +292,24 @@ test("a receipt holds only for the same tree, base and command, and a pass", () 
   assert.equal(receiptHolds({ ...receipt, passed: false }, now), false);
   assert.equal(receiptHolds(null, now), false);
   assert.equal(receiptHolds(receipt, { ...now, tree: null }), false);
+});
+
+test("a receipt holds only under the unread list it was made under; a 0.4.0 receipt only under none", () => {
+  const now = { tree: "t1", base: "b1", command: "npm test", unread: ["docs/**", "*.md"] };
+  const made = { tree: "t1", base: "b1", commands: ["npm test"], passed: true, unread: ["*.md", "docs/**"] };
+  assert.equal(receiptHolds(made, now), true, "the same list in another order");
+  assert.equal(receiptHolds({ ...made, unread: ["docs/**"] }, now), false);
+  const older = { tree: "t1", base: "b1", commands: ["npm test"], passed: true };
+  assert.equal(receiptHolds(older, now), false);
+  assert.equal(receiptHolds(older, { ...now, unread: [] }), true);
+  assert.equal(receiptHolds(made, { ...now, unread: undefined }), false);
+  assert.equal(receiptHolds(made, { ...now, unread: null }), false, "a null list is no list, never a crash");
+});
+
+test("an unread list that leaves out every file gives no tree key, so no receipt can hold", () => {
+  const { dir } = gitRepo();
+  assert.equal(treeKey(dir, ["*.txt", ".gitignore"]), null);
+  assert.ok(treeKey(dir, [".gitignore"]));
 });
 
 // -------------------------------------------------------------- quiet tests
@@ -292,10 +334,10 @@ test("without a pair, a pass prints its last lines and a failure its tail", () =
 });
 
 /** A project with this folder's runner copied in, and the given test command as its receipt row. */
-function stopTestsProject(testRun) {
+function stopTestsProject(testRun, row = {}) {
   const files = Object.fromEntries(["stop-tests.mjs", "receipt.mjs", "config.mjs", "metrics.mjs", "ticket-size.mjs"].map((name) => [`tools/phase-run/${name}`, readFileSync(join(HERE, name), "utf8")]));
   files["tools/phase-run/prices.json"] = readFileSync(join(HERE, "prices.json"), "utf8");
-  files[".claude/workflow.json"] = JSON.stringify({ version: 1, stopGate: { checks: [{ label: "Tests", run: testRun, receipt: true }] } });
+  files[".claude/workflow.json"] = JSON.stringify({ version: 1, stopGate: { checks: [{ label: "Tests", run: testRun, receipt: true, ...row }] } });
   const project = gitRepo(files);
   const run = () => spawnSync(process.execPath, [join(project.dir, "tools/phase-run/stop-tests.mjs"), "main"], { cwd: project.dir, encoding: "utf8", env: { ...process.env, PHASE_RUN_TICKET: "7" } });
   return { ...project, run, receipt: () => readReceipt(receiptPath(project.dir, "7")) };
@@ -314,6 +356,33 @@ test("stop-tests.mjs writes a receipt on a pass, skips on the same code, and wri
   assert.equal(result.status, 3);
   assert.match(result.stdout, /Tests: FAILED/);
   assert.equal(failing.receipt(), null);
+});
+
+test("stop-tests.mjs records its unread list, and a docs-only edit after the pass skips the tests", () => {
+  const project = stopTestsProject('node -e "console.log(1)"', { unread: ["docs/**", "*.md"] });
+  assert.equal(project.run().status, 0);
+  assert.deepEqual(project.receipt().unread, ["docs/**", "*.md"]);
+  mkdirSync(join(project.dir, "docs"), { recursive: true });
+  writeFileSync(join(project.dir, "docs", "devlog.md"), "the ticket's entry\n");
+  assert.match(project.run().stdout, /already passed on exactly this code/);
+  writeFileSync(join(project.dir, "a.txt"), "code edited\n");
+  assert.match(project.run().stdout, /Tests: passed/);
+});
+
+test("stop-tests.mjs says so when git cannot key the code, and records no receipt", () => {
+  const project = stopTestsProject('node -e "console.log(1)"', { unread: ["tools/**", ".claude/**", "*.txt", ".gitignore"] });
+  const result = project.run();
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /"unread" list.*no receipt is recorded/);
+  assert.equal(project.receipt(), null);
+});
+
+test("stop-tests.mjs says so when the tests changed a tracked file, and records no receipt", () => {
+  const project = stopTestsProject("node -e \"require('fs').writeFileSync('a.txt', 'rewritten by the tests')\"");
+  const result = project.run();
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /code changed while the tests ran.*no receipt is recorded/);
+  assert.equal(project.receipt(), null);
 });
 
 // ------------------------------------------------------------ the waits
@@ -362,6 +431,10 @@ test("a project with a receipt row is told to test through stop-tests.mjs; one w
   const withReceipt = promptValues(project([{ label: "Lint", run: "npm run lint" }, { label: "Tests", run: "npm test -- --since {base}", receipt: true }]), "", { BASE: "abc", N: 1 });
   assert.equal(withReceipt.STOP_CHECKS, "`npm run lint`, `node tools/phase-run/stop-tests.mjs` (the tests)");
   assert.match(withReceipt.RECEIPT, /stop-tests\.mjs`, never by hand/);
+  assert.match(withReceipt.RECEIPT, /docs and logs first.*tests last/s, "a devlog written after the pass no longer costs a re-run");
+  assert.match(withReceipt.RECEIPT, /docs included/, "with no unread list, a docs edit runs them again");
+  const listed = promptValues(project([{ label: "Tests", run: "npm test", receipt: true, unread: ["docs/**", "*.md"] }]), "", { BASE: "abc", N: 1 });
+  assert.match(listed.RECEIPT, /except to `docs\/\*\*`, `\*\.md`.*docs and logs first.*tests last/s);
   const without = promptValues(project([{ label: "Tests", run: "npm test" }]), "", { BASE: "abc", N: 1 });
   assert.equal(without.STOP_CHECKS, "`npm test`");
   assert.equal(without.RECEIPT, "");

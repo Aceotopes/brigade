@@ -97,6 +97,10 @@ these steps:
     sessions wait on things instead of the clock, and tickets get a size budget. The decisions
     are in the [0.4.0 discovery doc](discovery/02-brigade-0.4.0.md), the receipt's trust in
     [ADR 0003](adr/0003-stop-check-trusts-a-receipt.md).
+11. **0.4.1, the receipt ignores unread paths** (2026-11-02): the tests row's `unread` globs are
+    left out of the receipt's key, so a session's devlog no longer re-runs the tests. Setup writes
+    the list and the refresh offers it. Built attended and test-first, and proven by a hands-on
+    check in a scratch repo; the decisions are the 0.4.1 addendum in the 0.4.0 discovery doc.
 
 ## Changing the workflow
 

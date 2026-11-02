@@ -118,13 +118,50 @@ export function parseRunConfig(data) {
     steps: list(run.steps, `${where}.steps`).map((row, i) => parseStep(row, `${where}.steps[${i}]`)),
     ticketSize: run.ticketSize === undefined ? null : list(run.ticketSize, `${where}.ticketSize`).map((row, i) => parseSizeRule(row, `${where}.ticketSize[${i}]`)),
     // The hooks check stopGate (hooks/workflow-config.mjs); a bad pattern here only falls back to the plain tail.
-    stopChecks: list(data?.stopGate?.checks, "stopGate.checks").map((check) => ({
-      label: String(check.label),
-      run: String(check.run),
-      receipt: check.receipt === true,
-      quiet: quietPair(check.quiet),
-    })),
+    // `unread` is checked here too, as the hooks check it: it decides what the receipt vouches for.
+    stopChecks: sharedUnread(
+      list(data?.stopGate?.checks, "stopGate.checks").map((check, i) => ({
+        label: String(check.label),
+        run: String(check.run),
+        receipt: check.receipt === true,
+        quiet: quietPair(check.quiet),
+        unread: unreadList(check, `stopGate.checks[${i}]`),
+      })),
+      "stopGate.checks",
+    ),
   };
+}
+
+/**
+ * A row's unread paths: git globs the receipt's key leaves out, only on a row with "receipt": true. A
+ * glob that names no folder or file (`**`, `*.*`, `.`) could leave out every file, so no edit would make
+ * the receipt stale; one that leaves the repo is one git refuses.
+ */
+function unreadList(check, where) {
+  if (check.unread === undefined) return [];
+  if (check.receipt !== true) throw new Error(`${where}.unread belongs on the tests' row, the one with "receipt": true.`);
+  if (!Array.isArray(check.unread)) throw new Error(`${where}.unread must be a list of git globs, such as ["docs/**", "*.md"].`);
+  check.unread.forEach((glob, j) => {
+    const at = `${where}.unread[${j}]`;
+    if (typeof glob !== "string" || !glob.trim()) throw new Error(`${at} must be a git glob, such as "docs/**".`);
+    if (glob !== glob.trim()) throw new Error(`${at} "${glob}" has spaces around it, which git would match as written.`);
+    if (/^\.?\//.test(glob) || glob.split("/").includes("..")) throw new Error(`${at} "${glob}" must be a path inside the repo, from its root, such as "docs/**".`);
+    if (!/[\p{L}\p{N}]/u.test(glob)) {
+      throw new Error(`${at} "${glob}" names no folder or file, so it could leave out every file; name only what the tests never read, such as "docs/**".`);
+    }
+  });
+  return check.unread;
+}
+
+/** The receipt keeps one key, so every row with "receipt": true leaves out the same paths. */
+function sharedUnread(checks, where) {
+  const rows = checks.map((check, i) => ({ check, i })).filter(({ check }) => check.receipt);
+  const key = (list) => [...list].sort().join("\n");
+  const differing = rows.find(({ check }) => key(check.unread) !== key(rows[0].check.unread));
+  if (differing) {
+    throw new Error(`${where}[${differing.i}].unread differs from ${where}[${rows[0].i}].unread: every row with "receipt": true shares one unread list.`);
+  }
+  return checks;
 }
 
 function parseStep(row, at) {

@@ -43,9 +43,10 @@ test("each stop check leaves a log row the runner's hookTime reads", async () =>
   assert.equal(stop(dir, { PHASE_RUN: "1", PHASE_RUN_TICKET: "7", PHASE_RUN_BASE: git("rev-parse", "HEAD") }).status, 0);
   const log = join(dir, ".phase-run", "stop-check-log.jsonl");
   const [row] = readFileSync(log, "utf8").trim().split("\n").map((line) => JSON.parse(line));
-  assert.deepEqual(Object.keys(row).sort(), ["endedAt", "passed", "startedAt", "testsSkipped", "ticket"]);
+  assert.deepEqual(Object.keys(row).sort(), ["endedAt", "passed", "receipt", "startedAt", "testsSkipped", "ticket"]);
   assert.equal(row.ticket, 7);
   assert.equal(row.passed, true);
+  assert.equal(row.receipt, "none", "a project with no receipt row");
   assert.equal(hookTime(log, 7, before), row.endedAt - row.startedAt);
   assert.equal(hookTime(log, 8, before), 0);
 });
@@ -57,17 +58,17 @@ const FAILING_TESTS = 'node -e "process.exit(1)"';
 const TYPECHECK = "node -e \"require('fs').writeFileSync('.phase-run/typecheck-ran', '')\"";
 
 /** A project whose tests always fail, so a test can tell whether the hook ran them; work is in its tree. */
-async function receiptProject({ withReceiptCode = true } = {}) {
+async function receiptProject({ withReceiptCode = true, unread } = {}) {
   const { dir, git } = repo("brigade-project-", {
     ".gitignore": ".phase-run/\n",
-    ".claude/workflow.json": JSON.stringify({ version: 1, stopGate: { checks: [{ label: "Typecheck", run: TYPECHECK }, { label: "Tests", run: FAILING_TESTS, receipt: true }] } }),
+    ".claude/workflow.json": JSON.stringify({ version: 1, stopGate: { checks: [{ label: "Typecheck", run: TYPECHECK }, { label: "Tests", run: FAILING_TESTS, receipt: true, ...(unread ? { unread } : {}) }] } }),
     ...(withReceiptCode ? { "tools/phase-run/receipt.mjs": readFileSync(RECEIPT_SOURCE, "utf8") } : {}),
   });
   const base = git("rev-parse", "HEAD");
   write(dir, { "changed.txt": "the ticket's work\n", ".phase-run/.keep": "" });
   const receipts = await import(pathToFileURL(RECEIPT_SOURCE).href);
   const vouch = (over = {}) =>
-    receipts.writeReceipt(receipts.receiptPath(dir, "7"), { base, tree: receipts.treeKey(dir), commands: [FAILING_TESTS], passed: true, passedAt: "now", ...over });
+    receipts.writeReceipt(receipts.receiptPath(dir, "7"), { base, tree: receipts.treeKey(dir, unread ?? []), commands: [FAILING_TESTS], ...(unread ? { unread } : {}), passed: true, passedAt: "now", ...over });
   const check = (env = {}) => stop(dir, { PHASE_RUN: "1", PHASE_RUN_TICKET: "7", PHASE_RUN_BASE: base, ...env });
   const lastLog = () => JSON.parse(readFileSync(join(dir, ".phase-run", "stop-check-log.jsonl"), "utf8").trim().split("\n").at(-1));
   return { dir, base, vouch, check, lastLog };
@@ -106,4 +107,37 @@ test("a project without the receipt code has every check run", async () => {
   const { vouch, check } = await receiptProject({ withReceiptCode: false });
   vouch();
   assert.equal(check().status, 2);
+});
+
+// 0.4.1: the tests row's unread paths are left out of the receipt's key, so a session's devlog and
+// logs, written after its last test pass, no longer make the stop check run the tests again.
+const UNREAD = ["docs/**", "*.md"];
+
+test("with unread paths, a docs-only edit after the pass skips the tests and logs the receipt held", async () => {
+  const { dir, vouch, check, lastLog } = await receiptProject({ unread: UNREAD });
+  vouch();
+  write(dir, { "docs/devlog.md": "the ticket's entry\n", "README.md": "# Test, edited\n" });
+  assert.equal(check().status, 0);
+  assert.deepEqual([lastLog().testsSkipped, lastLog().receipt], [true, "held"]);
+});
+
+test("with unread paths, a code edit, a new code file or a receipt under another list runs the tests", async () => {
+  const cases = [
+    ["a code edit", (p) => write(p.dir, { "changed.txt": "edited after the tests passed\n" })],
+    ["a new code file", (p) => write(p.dir, { "src/new.js": "untracked code\n" })],
+    ["another list", (p) => p.vouch({ unread: ["docs/**"] })],
+  ];
+  for (const [name, change] of cases) {
+    const project = await receiptProject({ unread: UNREAD });
+    project.vouch();
+    change(project);
+    assert.equal(project.check().status, 2, name);
+    assert.deepEqual([project.lastLog().testsSkipped, project.lastLog().receipt], [false, "stale"], name);
+  }
+});
+
+test("with no receipt written, the log says none", async () => {
+  const { check, lastLog } = await receiptProject({ unread: UNREAD });
+  assert.equal(check().status, 2);
+  assert.equal(lastLog().receipt, "none");
 });

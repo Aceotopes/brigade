@@ -73,13 +73,14 @@ if (changed === "" && ahead === "0") process.exit(0); // nothing was written
 // report counts them as the ticket's "hook" minutes (hookTime in metrics.mjs).
 const startedAt = Date.now();
 let testsSkipped = false; // set below; declared first so the exit handler can always read it
+let receiptState = "none"; // "held" | "stale" | "none": why the tests ran or didn't
 if (ticket) {
   const marker = join(ROOT, ".phase-run", `stop-check-${ticket}.json`);
   mkdirSync(dirname(marker), { recursive: true });
   writeFileSync(marker, `${JSON.stringify({ pid: process.pid, startedAt })}\n`);
   process.on("exit", (code) => {
     rmSync(marker, { force: true });
-    const entry = { ticket: Number(ticket), startedAt, endedAt: Date.now(), passed: code === 0, testsSkipped };
+    const entry = { ticket: Number(ticket), startedAt, endedAt: Date.now(), passed: code === 0, testsSkipped, receipt: receiptState };
     appendFileSync(join(ROOT, ".phase-run", "stop-check-log.jsonl"), `${JSON.stringify(entry)}\n`);
   });
 }
@@ -88,11 +89,16 @@ if (ticket) {
 // tests pass. A `receipt` check whose receipt still holds (this exact code,
 // this base, this command) is not run again; every other check is. The receipt
 // code is the project's, imported from it: a project without it, or one this
-// cannot load, has every check run, as before receipts existed.
-const receipts = config.checks.some((check) => check.receipt) ? await loadReceipts() : null;
-const tree = receipts ? receipts.treeKey(ROOT) : null;
+// cannot load, has every check run, as before receipts existed. The tests row's
+// `unread` paths (the loader makes every receipt row share one list) are left
+// out of the key, so a docs-only edit after the pass keeps the receipt.
+const receiptChecks = config.checks.filter((check) => check.receipt);
+const receipts = receiptChecks.length ? await loadReceipts() : null;
+const unread = receipts?.receiptUnread?.(config.checks) ?? []; // a 0.4.0 receipt.mjs has no list to apply
+const tree = receipts ? receipts.treeKey(ROOT, unread) : null;
 const receipt = receipts ? receipts.readReceipt(receipts.receiptPath(ROOT, ticket)) : null;
-const holds = (check) => Boolean(receipts && check.receipt && receipts.receiptHolds(receipt, { tree, base, command: check.run }));
+const holds = (check) => Boolean(receipts && check.receipt && receipts.receiptHolds(receipt, { tree, base, command: check.run, unread }));
+if (receipt) receiptState = receiptChecks.every(holds) ? "held" : "stale";
 
 let failure = config.error ? `The project's stop checks could not be read: ${config.error}` : null;
 for (const check of config.checks) {

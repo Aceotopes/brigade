@@ -16,7 +16,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { loadRunConfig } from "./config.mjs";
-import { readReceipt, receiptHolds, receiptPath, treeKey, writeReceipt } from "./receipt.mjs";
+import { readReceipt, receiptHolds, receiptPath, receiptUnread, treeKey, writeReceipt } from "./receipt.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const FAILURE_CAP = 15_000;
@@ -47,9 +47,10 @@ function main() {
   }
   const base = process.argv[2] || process.env.PHASE_RUN_BASE || "main";
   const file = receiptPath(ROOT, process.env.PHASE_RUN_TICKET);
-  const tree = treeKey(ROOT);
+  const unread = receiptUnread(rows); // the paths the tests never read: an edit there keeps the receipt
+  const tree = treeKey(ROOT, unread);
   const receipt = readReceipt(file);
-  if (rows.every((row) => receiptHolds(receipt, { tree, base, command: row.run }))) {
+  if (rows.every((row) => receiptHolds(receipt, { tree, base, command: row.run, unread }))) {
     console.log(`The tests already passed on exactly this code (${receipt.passedAt}). Nothing to run.`);
     return 0;
   }
@@ -63,9 +64,13 @@ function main() {
     if (!passed) return run.status ?? 1;
   }
   // The code must still be what was tested: nothing edits it while this runs, but check rather than assume.
-  if (tree && treeKey(ROOT) === tree) {
-    writeReceipt(file, { base, tree, commands: rows.map((row) => row.run), passed: true, passedAt: new Date().toISOString() });
-  }
+  const why = !tree
+    ? `Git could not key this code${unread.length ? ' (check the tests row\'s "unread" list)' : ""}`
+    : treeKey(ROOT, unread) !== tree
+      ? "The code changed while the tests ran (did they write a tracked file?)"
+      : null;
+  if (why) console.log(`${why}, so no receipt is recorded: the stop check will run the tests again.`);
+  else writeReceipt(file, { base, tree, commands: rows.map((row) => row.run), unread, passed: true, passedAt: new Date().toISOString() });
   return 0;
 }
 
