@@ -30,9 +30,9 @@ import { basename, dirname, join, posix } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { MIGRATIONS } from "./migrations.mjs";
+import { STAMP, compareVersions, pluginVersion } from "./versions.mjs";
 
 export const PLUGIN = join(dirname(fileURLToPath(import.meta.url)), "..");
-export const STAMP = ".claude/workflow-version.json";
 export const ARCHIVE = "docs/history/pre-workflow";
 export const BRANCH = "adopt-workflow";
 /** The project's own settings: written once from its stack, never re-copied. */
@@ -107,7 +107,6 @@ export const templateFiles = (plugin = PLUGIN) => walk(join(plugin, "template"))
 export const scaffoldFiles = (plugin = PLUGIN) => walk(join(plugin, "scaffold"));
 /** A hash of each scaffold file as the plugin has it, placeholders and all. */
 const scaffoldHashes = (plugin) => Object.fromEntries(scaffoldFiles(plugin).map((path) => [path, hash(readText(join(plugin, "scaffold", path)))]));
-export const pluginVersion = (plugin = PLUGIN) => JSON.parse(readText(join(plugin, ".claude-plugin", "plugin.json"))).version;
 
 /** `{{KEY}}` filled from `values`; a key with no value is an error, so nothing ships half-filled. */
 export function render(text, values) {
@@ -115,17 +114,6 @@ export function render(text, values) {
     if (values[key] === undefined) throw new Error(`No value for ${marker}.`);
     return values[key];
   });
-}
-
-/** -1, 0 or 1, for versions like 0.2.0. */
-export function compareVersions(a, b) {
-  const pa = String(a).split(".").map(Number);
-  const pb = String(b).split(".").map(Number);
-  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
-    const d = (pa[i] ?? 0) - (pb[i] ?? 0);
-    if (d) return Math.sign(d);
-  }
-  return 0;
 }
 
 // ------------------------------------------------------------------ detect

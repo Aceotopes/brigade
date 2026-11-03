@@ -42,5 +42,5 @@ export function runHook(name, input, env = {}) {
     encoding: "utf8",
     env: { ...clean, ...env },
   });
-  return { status: result.status, stderr: result.stderr };
+  return { status: result.status, stdout: result.stdout, stderr: result.stderr };
 }

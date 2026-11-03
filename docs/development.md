@@ -9,8 +9,8 @@ release a change. Using Brigade in a project is the [guide](guide.md).
 |---|---|---|
 | `.claude-plugin/` | `plugin.json` (the plugin) and `marketplace.json` (so `claude plugin marketplace add` can install it from this repo) | — |
 | `skills/` | `doc-sync`, `ticket-check`, `setup-workflow`, `update-workflow`, `roadmap` (with `page.html`, the roadmap page's template) | From the plugin, in every project |
-| `hooks/` | `guard-shell.mjs` (PreToolUse) and `stop-gate.mjs` (Stop), wired by `hooks.json`. Both read the project's `.claude/workflow.json` through `workflow-config.mjs` | From the plugin, in every project |
-| `scripts/` | `setup.mjs`, the file work behind the two setup skills (detect, propose, plan, apply, verify, update, refresh, docker, automode, labels); `roadmap.mjs`, the roadmap's GitHub check and its page; `migrations.mjs`, each version's config format changes | From the plugin, run by those skills |
+| `hooks/` | `guard-shell.mjs` (PreToolUse) and `stop-gate.mjs` (Stop), wired by `hooks.json`. Both read the project's `.claude/workflow.json` through `workflow-config.mjs`. `version-check.mjs` (SessionStart, a fresh launch only), the out-of-step notice | From the plugin, in every project |
+| `scripts/` | `setup.mjs`, the file work behind the two setup skills (detect, propose, plan, apply, verify, update, refresh, docker, automode, labels); `roadmap.mjs`, the roadmap's GitHub check and its page; `migrations.mjs`, each version's config format changes; `versions.mjs`, the plugin's version, the stamp and the comparison, shared with the notice | From the plugin, run by those skills |
 | `template/` | Files a project keeps **in its own repo**, because CI and `node` run them there: the doc tools, the phase runner, `docs/_templates`, the workflow docs, the doc-check CI job, and blank starting copies of the config | Copied in by `/setup-workflow`, re-copied by `/update-workflow` |
 | `scaffold/` | Files setup writes **once**, which the project then owns: the `CLAUDE.md` skeleton, the devlog with entry #1, the roadmap, the handoff, the issue-tracker page, the generated indexes' heads | Rendered by `/setup-workflow` |
 | `examples/` | A worked example of one real project's config: its `workflow.json` with a full `phaseRun`, its doc-sync rows and its session prose | Never copied; read for reference |
@@ -35,6 +35,7 @@ node --test tools/phase-run/run.test.mjs tools/phase-run/measure.test.mjs
 | Test file | What it holds in place |
 |---|---|
 | `tests/guard-shell.test.mjs`, `tests/stop-gate.test.mjs` | The hooks' rules, which folder a command is aimed at, the stop check's receipt skip, and its log row as the runner reads it |
+| `tests/version-check.test.mjs` | The out-of-step notice: each line or none, silent in a phase run, never failing a session start, a fresh launch only |
 | `template/tools/phase-run/measure.test.mjs` | The runner's measuring and its night-run table: cost and time split, the receipt, quiet test output, the waits, the size budget, and a prompt that never pauses for a fixed time |
 | `tests/workflow-config.test.mjs` | The `.claude/workflow.json` format: every key checked, a broken file fails closed |
 | `tests/env-contract.test.mjs` | The phase-run environment variables, the same in the hooks, doc-check and the runner |

@@ -15,6 +15,7 @@ const RUNNER = "template/tools/phase-run/run.mjs";
 const READERS = [
   "hooks/guard-shell.mjs",
   "hooks/stop-gate.mjs",
+  "hooks/version-check.mjs",
   "template/tools/doc-check.mjs",
   // What a session runs, under the runner's variables.
   "template/tools/phase-run/stop-tests.mjs",

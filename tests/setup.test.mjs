@@ -11,7 +11,8 @@ import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 
 import { parseWorkflowConfig } from "../hooks/workflow-config.mjs";
-import { ARCHIVE, STAMP, apply, autoModeLines, buildPlan, compareVersions, detect, dockerStatus, parseStackTable, plan, refresh, stackDisagreements, suggestPrototypeDir, update } from "../scripts/setup.mjs";
+import { ARCHIVE, apply, autoModeLines, buildPlan, detect, dockerStatus, parseStackTable, plan, refresh, stackDisagreements, suggestPrototypeDir, update } from "../scripts/setup.mjs";
+import { STAMP, compareVersions } from "../scripts/versions.mjs";
 import { PLUGIN, repo, write } from "./helpers.mjs";
 
 const read = (dir, rel) => readFileSync(join(dir, rel), "utf8");
@@ -535,5 +536,6 @@ test("autoMode lines go after the other projects', replace their own earlier lin
 
 test("versions compare by number, not as text", () => {
   assert.equal(compareVersions("0.10.0", "0.9.0"), 1);
+  assert.equal(compareVersions("0.4.9", "0.4.10"), -1);
   assert.equal(compareVersions("0.2.0", "0.2.0"), 0);
 });
