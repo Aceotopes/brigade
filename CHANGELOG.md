@@ -4,6 +4,12 @@ What changed in each version, for `/update-workflow` to show a project before it
 template. Newest first. A version that changes a config file's format says so, and ships its
 migration in `scripts/migrations.mjs`.
 
+## 0.5.1 — 2026-11-04
+The out-of-step notice's "this machine has an older Brigade" line now names the catalog update
+first: `claude plugin marketplace update aceotopes`, then `claude plugin update brigade@aceotopes`,
+then `/reload-plugins`. `plugin update` only sees a version this machine's copy of the catalog
+already has, so on its own it could report "already at the latest". No config or template change.
+
 ## 0.5.0 — 2026-11-04
 The out-of-step notice: a project hears about a new Brigade by itself, and says so when it and the
 installed plugin differ. The decisions are in `docs/discovery/03-brigade-0.5.0.md`.

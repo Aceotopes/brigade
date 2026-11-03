@@ -107,7 +107,8 @@ these steps:
     auto-update for the catalog, now named `aceotopes`. Built attended and test-first. The notice
     is proven by real `claude -p` sessions in scratch repos, and setup's write by its command in
     one; auto-update fetching a release is not yet seen. The decisions are in the
-    [0.5.0 discovery doc](discovery/03-brigade-0.5.0.md).
+    [0.5.0 discovery doc](discovery/03-brigade-0.5.0.md). 0.5.1 (the same day) makes the notice's
+    "older plugin" line name the catalog update first.
 
 ## Changing the workflow
 

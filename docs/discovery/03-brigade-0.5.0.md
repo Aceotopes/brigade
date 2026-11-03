@@ -1,5 +1,13 @@
 # Discovery: Brigade 0.5.0, the out-of-step notice
 
+> **Addendum 2026-11-04 (2):** 0.5.1 rewords D2's second line. It now names the catalog update
+> before the plugin update: "Run `claude plugin marketplace update aceotopes`, then
+> `claude plugin update brigade@aceotopes`, then /reload-plugins." `plugin update` only sees a
+> version this machine's copy of the catalog has. The owner's call, after the 0.5.0 review raised
+> it.
+>
+> **Changes:** D2's second line, as above.
+
 > **Addendum 2026-11-04:** 0.5.0 is built, test-first and attended (tickets #6–#8), and proven by
 > the hands-on check (D11).
 > - **The check:** real `claude -p` sessions (Claude Code 2.1.317) in scratch git repos, with this

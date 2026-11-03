@@ -15,7 +15,7 @@ if (process.env.PHASE_RUN === "1") process.exit(0);
 const VERSION_SHAPE = /^\d+(\.\d+)*$/;
 
 /** The owner's line, or null when there is nothing to say. */
-function notice({ STAMP, compareVersions, pluginId, pluginVersion }) {
+function notice({ STAMP, catalogName, compareVersions, pluginId, pluginVersion }) {
   let input = {};
   try {
     input = JSON.parse(readFileSync(0, "utf8")) ?? {};
@@ -34,7 +34,8 @@ function notice({ STAMP, compareVersions, pluginId, pluginVersion }) {
     return `Brigade ${installed} is installed, but this project's files are from ${projectVersion}. Type /update-workflow to see what changed.`;
   }
   if (order < 0) {
-    return `This project is on Brigade ${projectVersion}, but this machine has ${installed}. Run \`claude plugin update ${pluginId()}\`, then /reload-plugins.`;
+    // The catalog first: `plugin update` only sees a version this machine's copy of the catalog has.
+    return `This project is on Brigade ${projectVersion}, but this machine has ${installed}. Run \`claude plugin marketplace update ${catalogName()}\`, then \`claude plugin update ${pluginId()}\`, then /reload-plugins.`;
   }
   return null;
 }

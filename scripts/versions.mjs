@@ -19,7 +19,10 @@ export const pluginVersion = (plugin = PLUGIN) => manifest(plugin, "plugin.json"
  * lives there only. An installed copy has marketplace.json too, because the catalog's source is the
  * repo's own root ("./").
  */
-export const pluginId = (plugin = PLUGIN) => `${manifest(plugin, "plugin.json").name}@${manifest(plugin, "marketplace.json").name}`;
+export const pluginId = (plugin = PLUGIN) => `${manifest(plugin, "plugin.json").name}@${catalogName(plugin)}`;
+
+/** The name of the catalog (marketplace) Brigade is listed in. */
+export const catalogName = (plugin = PLUGIN) => manifest(plugin, "marketplace.json").name;
 
 /**
  * The catalog Brigade is installed from, as a project's `extraKnownMarketplaces` names it: its name,
@@ -30,7 +33,7 @@ export function catalog(plugin = PLUGIN) {
   const { repository } = manifest(plugin, "plugin.json");
   const url = typeof repository === "string" ? repository : repository?.url;
   const repo = url?.match(/github\.com[/:]([^/]+\/[^/]+?)(?:\.git)?\/?$/)?.[1];
-  return repo ? { name: manifest(plugin, "marketplace.json").name, source: { source: "github", repo } } : null;
+  return repo ? { name: catalogName(plugin), source: { source: "github", repo } } : null;
 }
 
 /** -1, 0 or 1, for versions like 0.2.0. */

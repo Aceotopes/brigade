@@ -36,7 +36,7 @@ test("a project newer than the plugin names the plugin update, by the plugin's c
   const out = JSON.parse(launch(project("99.0.0")).stdout);
   assert.equal(
     out.systemMessage,
-    `This project is on Brigade 99.0.0, but this machine has ${VERSION}. Run \`claude plugin update brigade@aceotopes\`, then /reload-plugins.`,
+    `This project is on Brigade 99.0.0, but this machine has ${VERSION}. Run \`claude plugin marketplace update aceotopes\`, then \`claude plugin update brigade@aceotopes\`, then /reload-plugins.`,
   );
 });
 
