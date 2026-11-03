@@ -4,6 +4,33 @@ What changed in each version, for `/update-workflow` to show a project before it
 template. Newest first. A version that changes a config file's format says so, and ships its
 migration in `scripts/migrations.mjs`.
 
+## 0.5.0 — 2026-11-04
+The out-of-step notice: a project hears about a new Brigade by itself, and says so when it and the
+installed plugin differ. The decisions are in `docs/discovery/03-brigade-0.5.0.md`.
+
+**Reinstall:** the catalog is renamed `argee` → `aceotopes`, so the plugin's ID is now
+`brigade@aceotopes`. A project with `brigade@argee` in its settings reinstalls it:
+`claude plugin uninstall brigade@argee --scope project` and
+`claude plugin marketplace remove argee`, then `claude plugin marketplace add Aceotopes/brigade` and
+`claude plugin install brigade@aceotopes --scope project`, and commit the settings change. No
+migration: no config format changes, and no template file changed.
+
+- **The out-of-step notice** (`hooks/version-check.mjs`, a SessionStart hook on a fresh launch
+  only). It compares the installed Brigade with the project's stamp, and shows one line naming the
+  fix: `/update-workflow` when the plugin is newer, `claude plugin update brigade@aceotopes` when
+  the project is newer, `/setup-workflow` when the repo has no stamp. Claude is told the same, and
+  not to act on it unless asked. It is silent in a phase run, and an error never stops a session
+  from starting.
+- **Auto-update:** setup turns on Claude Code's auto-update for Brigade's catalog in the project's
+  `.claude/settings.json`, so a release reaches the project by itself; the notice then says to run
+  `/update-workflow`. It keeps an install's own entry and every other key, and keeps the file's
+  line endings. A file a rewrite would reformat is left alone, and the setting is listed to add by
+  hand. `/update-workflow` offers it to a project set up without it, as its own yes
+  (`--auto-update`). Setup now stages `.claude/settings.json` with the rest.
+- **The plugin's identity is read from its manifests** (`scripts/versions.mjs`): the version, the
+  ID, and the catalog's name and repo (`plugin.json` gains `repository`).
+- **`package.json`'s scripts** are now added in the file's own line endings too.
+
 ## 0.4.1 — 2026-11-02
 The receipt ignores unread paths: a session's devlog and logs, written after its last test pass,
 no longer make the stop check run the tests again. The decisions are the 0.4.1 addendum in

@@ -1,5 +1,32 @@
 # Discovery: Brigade 0.5.0, the out-of-step notice
 
+> **Addendum 2026-11-04:** 0.5.0 is built, test-first and attended (tickets #6–#8), and proven by
+> the hands-on check (D11).
+> - **The check:** real `claude -p` sessions (Claude Code 2.1.317) in scratch git repos, with this
+>   Brigade loaded by `--plugin-dir` and the hook events in the output stream:
+>   - a stamp older (0.0.1), newer (99.0.0) and missing each sent its line, and Claude quoted it
+>     with the "do not act" note;
+>   - an equal stamp, and `PHASE_RUN=1`, sent nothing, and Claude answered "NONE".
+>
+>   Setup's own command in a scratch repo wrote the catalog entry with `autoUpdate: true` beside
+>   the install's `enabledPlugins`, and staged it. A later `update` offered nothing.
+> - **Found in the build, fixed with tests:**
+>   - a stamp without a version read as "from undefined", so a version must be dotted numbers;
+>   - a rewrite of a CRLF settings file, or `package.json`, would have changed every line, so JSON
+>     edits keep the file's line endings.
+> - **Changed from the decisions:** no generic file may name the catalog's owner
+>   (`tests/no-project-specifics`). So the ID and the repo are read from `.claude-plugin/`, and
+>   `plugin.json` gains `repository`. A file a rewrite would reformat gets the setting "by hand".
+> - **Not yet seen live:**
+>   - Claude Code reading `autoUpdate` from a project's settings (`/plugin` → Marketplaces);
+>   - a release fetched by itself, then the notice at the next launch;
+>   - the notice's line as the terminal shows it, rather than in the output stream.
+>
+>   The first and third wait for 0.5.0 to be pushed and set up in a real project; the second
+>   needs a release after 0.5.0 to reach it.
+>
+> **Changes:** Goals 2 and 3 are met; Goal 1 is built and waits on a later release to be seen.
+
 **Rounds:** 2026-11-03. One grill with the owner, after asking how a project that uses Brigade
 learns of a new release. The facts about Claude Code's plugin updates were checked in its docs
 first. **Status:** decided, not built.

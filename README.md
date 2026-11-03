@@ -23,7 +23,7 @@ one with a script, not a reminder in a prompt:
 | Big work gets planned from memory, one feature at a time | **The ladder**: discovery docs for the whole product, modules for each area, phases sized to test in a morning, tickets sized for one session. Each grill names its sources |
 | Frontends get redone, each screen inventing its own look | **The design rung**: the app shell and visual system come first, each module's screens are prototyped in the real app and approved before its tickets, and `/ticket-check` refuses a screen ticket until they are |
 | Setting all this up by hand in every repo | **`/setup-workflow`** reads your discovery doc's stack and your files, and writes everything: new repos and existing ones. Its **refresh** keeps the config in step when the stack changes |
-| A copied workflow goes stale when the plugin improves | **`/update-workflow`** re-copies the plugin's files, using a version stamp to tell your edits from untouched files |
+| A copied workflow goes stale when the plugin improves | New releases arrive by auto-update, and the **out-of-step notice** says at launch when the project is behind. **`/update-workflow`** re-copies the plugin's files, using a version stamp to tell your edits from untouched files |
 | Nobody can see where the project stands | **`/roadmap`** checks the roadmap's tables against GitHub and publishes the **roadmap page**: modules in build order, their phases, and what comes next |
 
 ## How it works
@@ -219,7 +219,10 @@ migrations, a browser check and the prose each session is given. Every key is de
 
 ## Status
 
-Version **0.4.1** (see [CHANGELOG.md](CHANGELOG.md)). It has been proven on throwaway repos:
+Version **0.5.0** (see [CHANGELOG.md](CHANGELOG.md)). It has been proven on throwaway repos:
+- **the out-of-step notice** (0.5.0): real Claude Code sessions in scratch repos showed the right
+  line, or none, for a project older, newer, not set up, current, and inside a phase run; where a
+  line was shown, Claude was told it and did not act on it;
 - **a trial night** (0.4.0): a phase run on a fresh repo, watched live as the table in the
   terminal, with each ticket measured in the report's Scoreboard and the stop check skipping tests
   already passed on the same code;
@@ -240,6 +243,8 @@ Known limits:
 - Claude Code runs the phase run's sessions only in a folder you have opened in it once and
   trusted; the runner checks before it starts.
 - The end-of-run Windows notification is built but has not yet been seen live.
+- Auto-update fetching a real release into a project, and the notice that follows it, has not yet
+  been seen live: it needs a release after 0.5.0 to reach a project set up with 0.5.0.
 
 ## More
 

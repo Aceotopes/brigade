@@ -283,16 +283,33 @@ Two things keep a project current, and `/setup-workflow` on a set-up project off
   **refresh** (section 6, `stack`).
 - **Brigade changed:** the update below.
 
-A plugin update brings new hooks and skills by itself, but not the template files already copied
-into your repo:
+**How a release reaches a project:**
 
-```
-claude plugin marketplace update aceotopes
-claude plugin update brigade@aceotopes
-```
+1. Setup turns on Claude Code's auto-update for Brigade's catalog in `.claude/settings.json`. Once
+   a session has started, Claude Code checks the catalog by itself, fetches a new release, and says
+   `Plugin updated: brigade · Run /reload-plugins to apply` (Claude Code's documented behaviour, not
+   yet seen with Brigade).
+2. The plugin update brings new hooks and skills, but not the template files already copied into
+   your repo. So at your next launch, the **out-of-step notice** compares the plugin with your
+   project's stamp and says what to do:
 
-Then `/update-workflow` in the project. It lists what changed since your stamp, with the
-changelog, and writes nothing until you say yes:
+   | The notice says | Do this |
+   |---|---|
+   | "Brigade X is installed, but this project's files are from Y" | Type `/update-workflow` |
+   | "This project is on Brigade Y, but this machine has X" | Run `claude plugin marketplace update aceotopes`, then `claude plugin update brigade@aceotopes`, then `/reload-plugins` (the project was updated on another machine) |
+   | "Brigade is on here, but this repo isn't set up yet" | Type `/setup-workflow` |
+
+   It only suggests: nothing is written until you say yes. It is silent when the versions match
+   and in a phase run.
+3. Without auto-update (a project set up before 0.5.0 that said no to it), update by hand:
+
+   ```
+   claude plugin marketplace update aceotopes
+   claude plugin update brigade@aceotopes
+   ```
+
+`/update-workflow` lists what changed since your stamp, with the changelog, and writes nothing
+until you say yes:
 
 | It says | Meaning |
 |---|---|
@@ -301,6 +318,7 @@ changelog, and writes nothing until you say yes:
 | `gone` | A file the plugin no longer ships. Kept unless you say remove |
 | `review` | A scaffold file whose plugin copy changed. You own your copy, so it is only shown |
 | `notes`, `migrations` | Anything else worth knowing, and the config format changes it makes |
+| `setting` | Auto-update for Brigade's catalog is off in `.claude/settings.json`. A separate yes turns it on; when a rewrite would reformat the file, you are shown the line to add by hand instead |
 
 Then it runs the checks, drafts the devlog entry and commit message, and stops for your commit.
 
