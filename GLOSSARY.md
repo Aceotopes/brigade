@@ -86,6 +86,15 @@ _Avoid_: tech, recipe
 Bringing a set-up project's config in line with its stack after the stack changes.
 _Avoid_: re-setup
 
+**Stamp**:
+The record in a set-up project of which Brigade version its copied files came from, and how each
+looked when copied.
+_Avoid_: lockfile, version file
+
+**Out of step**:
+A set-up project whose stamp and the installed Brigade differ in version, either way.
+_Avoid_: outdated, stale
+
 ## Design
 
 **App shell**:
