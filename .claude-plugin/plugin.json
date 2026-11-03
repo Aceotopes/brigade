@@ -5,6 +5,7 @@
   "author": {
     "name": "Argee Vizcarra"
   },
+  "repository": "https://github.com/Aceotopes/brigade",
   "license": "UNLICENSED",
   "keywords": ["workflow", "docs", "phase-run", "hooks"],
   "skills": [

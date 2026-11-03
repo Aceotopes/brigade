@@ -9,7 +9,9 @@
 //                                                                proposed text of each changed or conflicting file under <d>
 //   node scripts/setup.mjs apply <dir> --plan <f>                do it, if the repo is still as planned
 //   node scripts/setup.mjs verify <dir>                          doc-check, the template's tests, both config loaders
-//   node scripts/setup.mjs update <dir> [--apply] [--remove]     re-copy template/ into a set-up project
+//   node scripts/setup.mjs update <dir> [--apply] [--remove] [--auto-update]
+//                                                                re-copy template/ into a set-up project; --auto-update
+//                                                                also turns on auto-update for Brigade's catalog
 //   node scripts/setup.mjs refresh <dir> [--stack <f>] [--apply] [--accept <id,id>]
 //                                                                bring the config in line with the stack (--stack: the new
 //                                                                one); --apply writes the additions and the accepted ids
@@ -20,7 +22,8 @@
 // Three kinds of file reach a project:
 //   template/  the plugin keeps owning them; update re-copies them; a project never edits one.
 //   scaffold/  written once, then the project's own (CLAUDE.md, the devlog, the roadmap…).
-//   config     the project's settings (CONFIG_FILES), written from its stack; update never touches them.
+//   config     the project's settings (CONFIG_FILES), written from its stack; update never touches them,
+//              except .claude/settings.json's auto-update for Brigade's catalog, on a yes.
 // The stamp (.claude/workflow-version.json) records the plugin version, the mode, and a hash of every
 // template file as copied, so update can tell a file the project edited from one it left alone.
 import { execFileSync, spawnSync } from "node:child_process";
@@ -30,7 +33,7 @@ import { basename, dirname, join, posix } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { MIGRATIONS } from "./migrations.mjs";
-import { STAMP, compareVersions, pluginVersion } from "./versions.mjs";
+import { STAMP, catalog, compareVersions, pluginVersion } from "./versions.mjs";
 
 export const PLUGIN = join(dirname(fileURLToPath(import.meta.url)), "..");
 export const ARCHIVE = "docs/history/pre-workflow";
@@ -41,6 +44,8 @@ export const CONFIG_FILES = [".claude/workflow.json", ".claude/spec-issues.json"
 const RUNNER_TESTS = "tools/phase-run/run.test.mjs tools/phase-run/measure.test.mjs";
 /** Settings keys a project-scope plugin install writes: a change to only these is not a dirty tree. */
 const INSTALL_KEYS = ["enabledPlugins", "extraKnownMarketplaces"];
+/** The project's shared Claude Code settings, where auto-update for Brigade's catalog is turned on. */
+const SETTINGS = ".claude/settings.json";
 /** What the runner and /ticket-check read (tools/phase-run/run.mjs: READY_LABEL, PARK_LABEL; the browser check). */
 export const LABELS = [
   { name: "run-ready", color: "0e8a16", description: "/ticket-check found no open question: a phase run may build it" },
@@ -107,6 +112,42 @@ export const templateFiles = (plugin = PLUGIN) => walk(join(plugin, "template"))
 export const scaffoldFiles = (plugin = PLUGIN) => walk(join(plugin, "scaffold"));
 /** A hash of each scaffold file as the plugin has it, placeholders and all. */
 const scaffoldHashes = (plugin) => Object.fromEntries(scaffoldFiles(plugin).map((path) => [path, hash(readText(join(plugin, "scaffold", path)))]));
+
+/**
+ * A JSON file's text after `edit(data)`, in the file's own indent and line endings: `{ text }`, or
+ * `{ same: true }` when `edit` returns false, or `{ reformats: true }` when a rewrite would change more
+ * than the edit.
+ */
+function editJson(text, edit) {
+  const data = JSON.parse(text);
+  const indent = text.match(/^\{\r?\n([ \t]+)"/)?.[1] ?? "  ";
+  const eol = text.includes("\r\n") ? "\r\n" : "\n";
+  const written = () => `${JSON.stringify(data, null, indent)}\n`.replace(/\n/g, eol);
+  const before = written();
+  if (edit(data) === false) return { same: true };
+  if (text.replace(/\r?\n?$/, eol) !== before) return { reformats: true };
+  return { text: written() };
+}
+
+/**
+ * Settings with auto-update on for Brigade's catalog (`cat`, from versions.mjs): `{ text }` to write,
+ * `{ byHand }` when a rewrite would reformat the file, or `{}` when it is already on (or the plugin
+ * names no catalog source). An entry the
+ * install wrote keeps its own source; one that is missing is added with the plugin's.
+ */
+export function autoUpdateSettings(text, cat) {
+  if (!cat) return {};
+  const entry = { source: cat.source, autoUpdate: true };
+  if (text === null) return { text: `${JSON.stringify({ extraKnownMarketplaces: { [cat.name]: entry } }, null, 2)}\n` };
+  const edited = editJson(text, (data) => {
+    const mine = data.extraKnownMarketplaces?.[cat.name];
+    if (mine?.autoUpdate === true) return false;
+    data.extraKnownMarketplaces = { ...(data.extraKnownMarketplaces ?? {}), [cat.name]: { ...entry, ...mine, autoUpdate: true } };
+  });
+  if (edited.text) return { text: edited.text };
+  if (edited.reformats) return { byHand: `add "autoUpdate": true under extraKnownMarketplaces.${cat.name} by hand (rewriting it would reformat the file)` };
+  return {};
+}
 
 /** `{{KEY}}` filled from `values`; a key with no value is an error, so nothing ships half-filled. */
 export function render(text, values) {
@@ -574,20 +615,29 @@ export function buildPlan(dir, det, answers, plugin = PLUGIN) {
   // package.json gets test:docs and test:runner, but only when it can be edited without reformatting it.
   if (det.packageJson && !gone("package.json")) {
     const text = readText(join(dir, "package.json"));
-    const data = JSON.parse(text);
     const want = { "test:docs": "node --test tools/doc-tools.test.mjs", "test:runner": `node --test ${RUNNER_TESTS}` };
-    const missing = Object.entries(want).filter(([key]) => !data.scripts?.[key]);
+    const scripts = JSON.parse(text).scripts ?? {};
+    const missing = Object.entries(want).filter(([key]) => !scripts[key]);
     if (missing.length) {
-      const indent = text.match(/^\{\r?\n([ \t]+)"/)?.[1] ?? "  ";
-      const roundTrips = lf(text).replace(/\n?$/, "\n") === `${JSON.stringify(data, null, indent)}\n`;
-      if (roundTrips) {
+      const edited = editJson(text, (data) => {
         data.scripts = { ...(data.scripts ?? {}), ...Object.fromEntries(missing) };
-        actions.push({ op: "append", path: "package.json", kind: "scaffold", text: `${JSON.stringify(data, null, indent)}\n`, note: "adds test:docs and test:runner" });
+      });
+      if (edited.text) {
+        actions.push({ op: "append", path: "package.json", kind: "scaffold", text: edited.text, note: "adds test:docs and test:runner" });
       } else {
         actions.push({ op: "manual", path: "package.json", note: `add to "scripts" by hand (rewriting it would reformat the file): ${missing.map(([k, v]) => `"${k}": "${v}"`).join(", ")}` });
       }
     }
   }
+
+  // Auto-update for Brigade's catalog, so a release reaches the project by itself; the out-of-step
+  // notice then says to run /update-workflow. Written into whatever settings the project keeps.
+  const carried = actions.find((a) => a.op === "add" && a.path === SETTINGS);
+  const onDisk = exists(SETTINGS) && !gone(SETTINGS) ? readText(join(dir, SETTINGS)) : null;
+  const settings = autoUpdateSettings(carried ? carried.text : onDisk, catalog(plugin));
+  if (carried && settings.text) Object.assign(carried, { text: settings.text, note: `${carried.note}, with auto-update on for Brigade's catalog` });
+  else if (settings.text) actions.push({ op: exists(SETTINGS) ? "append" : "add", path: SETTINGS, kind: "config", text: settings.text, note: "turns on auto-update for Brigade's catalog" });
+  else if (settings.byHand) actions.push({ op: "manual", path: SETTINGS, note: settings.byHand });
 
   const sameJob = mode === "merge" ? sameJobPairs(det.docs) : [];
   return { mode, head: det.git.head, problems, answers: { ...answers, date }, actions, sameJob, oldRules, oldGlossary };
@@ -869,10 +919,12 @@ export function changesSince(from, to, plugin = PLUGIN) {
  *   the project edited it            → a conflict: never overwritten
  *   new in the plugin                → added
  *   gone from the plugin             → listed; removed only with `remove`, and only if unedited
- * Config and scaffold files are never touched, except by a version's migration. A scaffold file the
- * plugin changed since the stamp is listed for review (op "review"), and only listed.
+ * Config and scaffold files are never touched, except by a version's migration and the one setting
+ * below. A scaffold file the plugin changed since the stamp is listed for review (op "review"), and
+ * only listed. Auto-update for Brigade's catalog, when off, is listed (op "setting") and turned on
+ * only with `autoUpdate`.
  */
-export function update(dir, { apply: doApply = false, remove = false, plugin = PLUGIN, migrations = MIGRATIONS, date } = {}) {
+export function update(dir, { apply: doApply = false, remove = false, autoUpdate = false, plugin = PLUGIN, migrations = MIGRATIONS, date } = {}) {
   const stampPath = join(dir, STAMP);
   if (!existsSync(stampPath)) throw new Error(`No ${STAMP}: this project was not set up by /setup-workflow. Run that first.`);
   const stamp = JSON.parse(readText(stampPath));
@@ -909,6 +961,10 @@ export function update(dir, { apply: doApply = false, remove = false, plugin = P
       changes.push({ op: "review", path, note });
     }
   }
+  // A project set up before 0.5.0 has no auto-update for Brigade's catalog: offered, written only on a yes.
+  const settings = autoUpdateSettings(existsSync(join(dir, SETTINGS)) ? readText(join(dir, SETTINGS)) : null, catalog(plugin));
+  if (settings.text) changes.push({ op: "setting", path: SETTINGS, text: settings.text, note: "auto-update for Brigade's catalog is off; on a yes it is turned on, so a release reaches this project by itself" });
+  else if (settings.byHand) changes.push({ op: "setting", path: SETTINGS, note: settings.byHand });
   const pending = migrations.filter((m) => compareVersions(m.version, stamp.version) > 0 && compareVersions(m.version, to) <= 0);
   const report = {
     from: stamp.version,
@@ -922,7 +978,7 @@ export function update(dir, { apply: doApply = false, remove = false, plugin = P
 
   const touched = [];
   for (const c of changes) {
-    if (c.op === "add" || c.op === "replace") {
+    if (c.op === "add" || c.op === "replace" || (c.op === "setting" && autoUpdate && c.text)) {
       mkdirSync(dirname(join(dir, c.path)), { recursive: true });
       writeFileSync(join(dir, c.path), c.text);
       touched.push(c.path);
@@ -1048,7 +1104,7 @@ async function main() {
       console.log(summarize(p));
       if (p.problems.length) process.exitCode = 1;
     } else if (command === "apply") print(apply(target, JSON.parse(readText(value("--plan")))));
-    else if (command === "update") print(update(target, { apply: rest.includes("--apply"), remove: rest.includes("--remove") }));
+    else if (command === "update") print(update(target, { apply: rest.includes("--apply"), remove: rest.includes("--remove"), autoUpdate: rest.includes("--auto-update") }));
     else if (command === "automode") {
       const settings = value("--settings");
       const result = autoModeLines(readText(settings), JSON.parse(readText(value("--lines"))));

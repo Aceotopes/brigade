@@ -18,6 +18,8 @@ import { PLUGIN, repo, write } from "./helpers.mjs";
 const read = (dir, rel) => readFileSync(join(dir, rel), "utf8");
 const node = (dir, ...args) => spawnSync(process.execPath, args, { cwd: dir, encoding: "utf8" });
 const ANSWERS = { name: "Gym Desk", summary: "A desk app for a gym.", date: "2026-10-27" };
+/** What setup writes for Brigade's catalog: its source, and auto-update on, so a release reaches the project by itself. */
+const CATALOG = { aceotopes: { source: { source: "github", repo: "Aceotopes/brigade" }, autoUpdate: true } };
 
 /** A repo the way an older project looks: a stack, loose docs with no headers, a CLAUDE.md. */
 function existing() {
@@ -55,16 +57,16 @@ test("detect reads the stack, the docs and the git state, and tolerates the plug
   assert.equal(det.empty, false);
   assert.deepEqual(det.git.dirty, []);
   // What `claude plugin install --scope project` writes is not a dirty tree; anything else is.
-  write(dir, { ".claude/settings.json": `${JSON.stringify({ enabledPlugins: { "brigade@argee": true } }, null, 2)}\n` });
+  write(dir, { ".claude/settings.json": `${JSON.stringify({ enabledPlugins: { "brigade@aceotopes": true } }, null, 2)}\n` });
   assert.deepEqual(detect(dir).git.dirty, []);
   assert.equal(detect(dir).brigadeEnabled, true);
-  write(dir, { ".claude/settings.json": `${JSON.stringify({ enabledPlugins: { "brigade@argee": true }, permissions: {} })}\n` });
+  write(dir, { ".claude/settings.json": `${JSON.stringify({ enabledPlugins: { "brigade@aceotopes": true }, permissions: {} })}\n` });
   assert.equal(detect(dir).git.dirty.length, 1);
 });
 
 test("new mode on an empty repo: the whole workflow, clean on day one, staged and not committed", () => {
   const { dir, git } = repo("brigade-new-");
-  write(dir, { ".claude/settings.json": `${JSON.stringify({ enabledPlugins: { "brigade@argee": true } }, null, 2)}\n` });
+  write(dir, { ".claude/settings.json": `${JSON.stringify({ enabledPlugins: { "brigade@aceotopes": true } }, null, 2)}\n` });
   const workflow = { ...JSON.parse(readFileSync(join(PLUGIN, "template/.claude/workflow.json"), "utf8")) };
   workflow.phaseRun = { gates: [{ label: "tests", run: "node --test" }] };
   const p = runPlan(dir, { mode: "new", workflow });
@@ -81,7 +83,7 @@ test("new mode on an empty repo: the whole workflow, clean on day one, staged an
   // The config it wrote loads through the hooks' loader, and setup made no commit:
   assert.doesNotThrow(() => parseWorkflowConfig(JSON.parse(read(dir, ".claude/workflow.json"))));
   assert.equal(git("rev-list", "--count", "HEAD"), "1");
-  assert.equal(git("status", "--porcelain", "--", ".claude/settings.json"), "?? .claude/settings.json");
+  assert.equal(git("status", "--porcelain", "--", ".claude/settings.json"), "A  .claude/settings.json");
   assert.match(git("diff", "--cached", "--name-only"), /tools\/phase-run\/run\.mjs/);
   git("commit", "-q", "-m", "chore: adopt the workflow — devlog #1");
   assert.equal(node(dir, "tools/doc-check.mjs", "--head").status, 0);
@@ -419,7 +421,7 @@ test("the command line: plan previews the changed files, apply writes, verify pa
 
 test("overwrite works on its own branch and archives the old docs, CLAUDE.md and settings instead of deleting them", () => {
   const { dir, git } = existing();
-  write(dir, { ".claude/settings.json": `${JSON.stringify({ permissions: { allow: ["Bash(pnpm *)"] }, enabledPlugins: { "brigade@argee": true } }, null, 2)}\n` });
+  write(dir, { ".claude/settings.json": `${JSON.stringify({ permissions: { allow: ["Bash(pnpm *)"] }, enabledPlugins: { "brigade@aceotopes": true } }, null, 2)}\n` });
   git("add", "-A");
   git("commit", "-q", "-m", "settings");
   const result = apply(dir, runPlan(dir, { mode: "overwrite" }));
@@ -428,11 +430,57 @@ test("overwrite works on its own branch and archives the old docs, CLAUDE.md and
   assert.equal(read(dir, `${ARCHIVE}/docs/ROADMAP.md`), "# Roadmap\n\nPhase 2 is next.\n");
   assert.equal(read(dir, `${ARCHIVE}/CLAUDE.md`), "# Gym\n\nUse pnpm. Never push to main.\n");
   assert.ok(!existsSync(join(dir, "docs/ROADMAP.md")));
-  assert.deepEqual(JSON.parse(read(dir, ".claude/settings.json")), { enabledPlugins: { "brigade@argee": true } });
+  assert.deepEqual(JSON.parse(read(dir, ".claude/settings.json")), { enabledPlugins: { "brigade@aceotopes": true }, extraKnownMarketplaces: CATALOG });
   assert.match(read(dir, `${ARCHIVE}/.claude/settings.json`), /Bash\(pnpm \*\)/);
   assert.ok(!existsSync(join(dir, ".brigade-archive")));
   // git sees moves, not deletions:
   assert.match(git("status", "--porcelain"), /^R {2}docs\/ROADMAP\.md -> docs\/history\/pre-workflow\/docs\/ROADMAP\.md$/m);
+});
+
+test("setup turns on auto-update for Brigade's catalog, adding the entry when the install left none", () => {
+  const { dir, git } = repo("brigade-auto-");
+  apply(dir, runPlan(dir, { mode: "new" }));
+  assert.deepEqual(JSON.parse(read(dir, ".claude/settings.json")), { extraKnownMarketplaces: CATALOG });
+  assert.match(git("diff", "--cached", "--name-only"), /^\.claude\/settings\.json$/m);
+});
+
+test("setup adds only autoUpdate to an install's own catalog entry, and keeps every other key as it was", () => {
+  const { dir, git } = existing();
+  const mine = {
+    permissions: { allow: ["Bash(pnpm *)"] },
+    enabledPlugins: { "brigade@aceotopes": true },
+    extraKnownMarketplaces: { aceotopes: { source: { source: "github", repo: "someone/fork" } }, other: { source: { source: "github", repo: "x/y" } } },
+  };
+  write(dir, { ".claude/settings.json": `${JSON.stringify(mine, null, 2)}\n` });
+  git("add", "-A");
+  git("commit", "-q", "-m", "settings");
+  apply(dir, runPlan(dir, { mode: "merge" }));
+  const after = JSON.parse(read(dir, ".claude/settings.json"));
+  assert.deepEqual(after.extraKnownMarketplaces.aceotopes, { source: { source: "github", repo: "someone/fork" }, autoUpdate: true });
+  assert.deepEqual({ ...after, extraKnownMarketplaces: { ...after.extraKnownMarketplaces, aceotopes: mine.extraKnownMarketplaces.aceotopes } }, mine);
+});
+
+test("a settings file a rewrite would reformat is left alone, and the setting is listed to add by hand", () => {
+  const { dir, git } = existing();
+  const text = `${JSON.stringify({ permissions: { allow: ["Bash(pnpm *)"] } })}\n`;
+  write(dir, { ".claude/settings.json": text });
+  git("add", "-A");
+  git("commit", "-q", "-m", "settings");
+  const result = apply(dir, runPlan(dir, { mode: "merge" }));
+  assert.equal(read(dir, ".claude/settings.json"), text);
+  assert.ok(result.manual.some((line) => line.startsWith(".claude/settings.json: ") && /autoUpdate/.test(line)), result.manual.join("\n"));
+});
+
+test("a CRLF settings file keeps its line endings when the setting is added", () => {
+  const { dir, git } = existing();
+  git("config", "core.autocrlf", "false");
+  write(dir, { ".claude/settings.json": `${JSON.stringify({ permissions: { allow: ["Bash(pnpm *)"] } }, null, 2)}\n`.replace(/\n/g, "\r\n") });
+  git("add", "-A");
+  git("commit", "-q", "-m", "settings");
+  apply(dir, runPlan(dir, { mode: "merge" }));
+  const text = read(dir, ".claude/settings.json");
+  assert.equal(text.split("\r\n").length, text.split("\n").length, "every line still ends in CRLF");
+  assert.equal(JSON.parse(text).extraKnownMarketplaces.aceotopes.autoUpdate, true);
 });
 
 test("a dirty tree, a second setup, the wrong mode and a stale plan are each refused", () => {
@@ -507,6 +555,25 @@ test("update replaces what the project left alone, never what it edited, never i
   assert.match(update(dir, { plugin }).notes.join(""), /predates 0\.2\.2/);
   update(dir, { plugin, apply: true });
   assert.ok(JSON.parse(read(dir, STAMP)).scaffold["CLAUDE.md"]);
+});
+
+test("update offers auto-update to a project set up without it, and writes it only on a yes", () => {
+  const { dir, git } = repo("brigade-update-auto-");
+  apply(dir, plan(dir, { ...ANSWERS, mode: "new" }));
+  // A project set up before 0.5.0: its settings carry only the install's keys.
+  const before = `${JSON.stringify({ enabledPlugins: { "brigade@aceotopes": true } }, null, 2)}\n`;
+  write(dir, { ".claude/settings.json": before });
+  git("add", "-A");
+  git("commit", "-q", "-m", "chore: adopt the workflow — devlog #1");
+  const offer = update(dir).changes.filter((c) => c.path === ".claude/settings.json");
+  assert.equal(offer.length, 1);
+  assert.equal(offer[0].op, "setting");
+  update(dir, { apply: true });
+  assert.equal(read(dir, ".claude/settings.json"), before, "without a yes the setting is not written");
+  update(dir, { apply: true, autoUpdate: true });
+  assert.deepEqual(JSON.parse(read(dir, ".claude/settings.json")), { enabledPlugins: { "brigade@aceotopes": true }, extraKnownMarketplaces: CATALOG });
+  assert.match(git("diff", "--cached", "--name-only"), /^\.claude\/settings\.json$/m);
+  assert.ok(!update(dir).changes.some((c) => c.path === ".claude/settings.json"), "once on, it is not offered again");
 });
 
 const STJ_LINES = [

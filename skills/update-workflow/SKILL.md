@@ -15,7 +15,8 @@ touches.
 2. `node "${CLAUDE_PLUGIN_ROOT}/scripts/setup.mjs" update <dir>`: a report, nothing written. No stamp
    (`.claude/workflow-version.json`): the project was never set up; point at `/setup-workflow`.
 3. Tell the owner, plainly:
-   - "This project is on `<from>`; the plugin is `<to>`." The same version: nothing to do; stop.
+   - "This project is on `<from>`; the plugin is `<to>`." The same version and no `setting`:
+     nothing to do; stop.
    - What changed: the `changelog` sections, as they read.
    - `replace` and `add`: the files that will be rewritten or added.
    - `conflict`: a template file the project edited (or deleted, or setup never wrote). It is left
@@ -31,7 +32,11 @@ touches.
      the owner picks it, by hand. A new starting file is added only if the owner wants it.
    - `notes`: say each one (an older stamp cannot list earlier starting-file changes).
    - `migrations`: config format changes this update makes, one line each.
-4. On a yes: the same command with `--apply` (and `--remove` if agreed). It stages what it changed.
+   - `setting`: auto-update for Brigade's catalog is off in `.claude/settings.json`. Turned on, a new
+     release reaches the project by itself. Ask; it is a separate yes. A note saying "by hand"
+     means a rewrite would reformat the file: show the line to add instead.
+4. On a yes: the same command with `--apply` (and `--remove`, `--auto-update` if agreed). It stages
+   what it changed.
 5. `node "${CLAUDE_PLUGIN_ROOT}/scripts/setup.mjs" verify <dir>`. A failure is fixed, never by
    loosening a check.
 6. Add the devlog entry this commit needs, on top of `docs/history/devlog.md`

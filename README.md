@@ -92,11 +92,11 @@ claude plugin install brigade --marketplace Aceotopes/brigade --scope project
 ```
 
 Both need Claude Code 2.1.292 or later. On an older version, add the marketplace first, then
-install from it by its catalog name, `argee`:
+install from it by its catalog name, `aceotopes`:
 
 ```
 claude plugin marketplace add Aceotopes/brigade
-claude plugin install brigade@argee --scope project
+claude plugin install brigade@aceotopes --scope project
 ```
 
 ## Quick start

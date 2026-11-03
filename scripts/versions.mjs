@@ -21,6 +21,18 @@ export const pluginVersion = (plugin = PLUGIN) => manifest(plugin, "plugin.json"
  */
 export const pluginId = (plugin = PLUGIN) => `${manifest(plugin, "plugin.json").name}@${manifest(plugin, "marketplace.json").name}`;
 
+/**
+ * The catalog Brigade is installed from, as a project's `extraKnownMarketplaces` names it: its name,
+ * and its GitHub source from plugin.json's `repository` (a URL, or npm's `{ url }` form). null when
+ * that names no GitHub repo: auto-update is then simply not offered, and nothing else depends on it.
+ */
+export function catalog(plugin = PLUGIN) {
+  const { repository } = manifest(plugin, "plugin.json");
+  const url = typeof repository === "string" ? repository : repository?.url;
+  const repo = url?.match(/github\.com[/:]([^/]+\/[^/]+?)(?:\.git)?\/?$/)?.[1];
+  return repo ? { name: manifest(plugin, "marketplace.json").name, source: { source: "github", repo } } : null;
+}
+
 /** -1, 0 or 1, for versions like 0.2.0. */
 export function compareVersions(a, b) {
   const pa = String(a).split(".").map(Number);

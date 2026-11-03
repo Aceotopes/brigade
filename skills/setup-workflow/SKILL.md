@@ -104,7 +104,10 @@ Write the answers to `.git/brigade/answers.json`:
    things where they apply: `.github/workflows/checks.yml` runs the stop gate's checks on GitHub
    (the project's own from then on: edit it when the checks change), and a `CLAUDE.md` one folder
    down (`docs/CLAUDE.md`) gets a "read it first" line in the new top-level `CLAUDE.md`, as Claude
-   reads a nested one only when it works in that folder.
+   reads a nested one only when it works in that folder. And `.claude/settings.json` turns on
+   auto-update for Brigade's catalog, so a new release reaches the project by itself; it is
+   committed, so collaborators get it too. A file a rewrite would reformat is left alone and listed
+   under "by hand".
 3. Ask for a yes on that exact list. Then
    `node "${CLAUDE_PLUGIN_ROOT}/scripts/setup.mjs" apply <dir> --plan .git/brigade/plan.json`.
    It refuses if the repo changed since the plan: plan again and show it again.

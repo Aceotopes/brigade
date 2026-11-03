@@ -287,8 +287,8 @@ A plugin update brings new hooks and skills by itself, but not the template file
 into your repo:
 
 ```
-claude plugin marketplace update argee
-claude plugin update brigade@argee
+claude plugin marketplace update aceotopes
+claude plugin update brigade@aceotopes
 ```
 
 Then `/update-workflow` in the project. It lists what changed since your stamp, with the
@@ -310,7 +310,7 @@ Then it runs the checks, drafts the devlog entry and commit message, and stops f
 |---|---|
 | "The working tree has changes; commit or put them away first" | Commit or `git stash` them, then run setup again. The plugin install's own `.claude/settings.json` change doesn't count |
 | "This project is already set up" | `/setup-workflow` offers the two ways to keep it current: `/update-workflow` after a plugin update, or a refresh of the config after your stack changed |
-| Brigade is not enabled here | `claude plugin install brigade@argee --scope project`, then commit the settings change |
+| Brigade is not enabled here | `claude plugin install brigade@aceotopes --scope project`, then commit the settings change |
 | "The repo changed since this plan was made" | Setup plans again and shows you the new plan |
 | Setup stopped partway through writing | The tree was clean before it began, so `git reset --hard` and `git clean -fd` undo it (overwrite mode: also switch back and delete `adopt-workflow`). Commit the plugin install first, because `git clean` would remove it |
 | The runner says the repo has no GitHub remote | Add one (`gh repo create`, or `git remote add origin …`) and push `main`. Tickets are read from GitHub |
