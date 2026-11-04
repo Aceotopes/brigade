@@ -1,0 +1,476 @@
+// Tests for the doc tools (doc-check, doc-index, doc-rotate). Plain node:test:
+// no database, no network. Run: pnpm test:docs (node --test tools/doc-tools.test.mjs).
+//
+// The pure helpers are tested directly. The commit-time behaviour is tested
+// end to end in a throwaway git repository holding a copy of tools/ and a
+// small doc-config.mjs of its own, so nothing here touches this repo's docs.
+import assert from "node:assert/strict";
+import { execFileSync, spawnSync } from "node:child_process";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { test } from "node:test";
+import { fileURLToPath } from "node:url";
+
+import { planRotation } from "./doc-rotate.mjs";
+import { parseRoadmap } from "./roadmap-format.mjs";
+import { bucketFor, budgetProblems, devlogEntries, parseFrontmatter } from "./doc-lib.mjs";
+
+const TOOLS = dirname(fileURLToPath(import.meta.url));
+
+test("a header is read as a flat key: value list, numbers as numbers", () => {
+  const header = parseFrontmatter("---\njob: Where things stand.\nkind: living\nmax-lines: 120\n---\n# Roadmap\n");
+  assert.deepEqual(header, { job: "Where things stand.", kind: "living", "max-lines": 120 });
+  assert.equal(parseFrontmatter("# No header\n"), null);
+});
+
+test("a doc over its line budget is named, with the way out", () => {
+  const text = `---\njob: x\nkind: living\nmax-lines: 6\n---\n# T\none\ntwo\n`;
+  const [problem] = budgetProblems("docs/x.md", text);
+  assert.match(problem, /8 lines, over its max-lines of 6/);
+  assert.match(problem, /raise the limit in its header/);
+  assert.deepEqual(budgetProblems("docs/x.md", `---\njob: x\nkind: living\nmax-lines: 8\n---\n# T\none\ntwo\n`), []);
+});
+
+test("a line over the length budget is named by its line number", () => {
+  const text = `---\njob: x\nkind: living\nmax-line-length: 10\n---\nshort\n${"y".repeat(11)}\n`;
+  const problems = budgetProblems("docs/x.md", text);
+  assert.equal(problems.length, 1);
+  assert.match(problems[0], /docs\/x\.md:7 is 11 characters/);
+});
+
+test("an entry over the per-entry budget is named; the separator line does not count", () => {
+  const entry = (n, lines) => [`## #${n} · docs · t`, ...Array.from({ length: lines }, () => "- x"), "", "---", ""].join("\n");
+  const text = `---\njob: x\nkind: log\nmax-entry-lines: 4\n---\n# Devlog\n\n${entry(2, 3)}${entry(1, 5)}`;
+  const problems = budgetProblems("docs/devlog.md", text);
+  assert.equal(problems.length, 1);
+  assert.match(problems[0], /"## #1 · docs · t" is 6 lines/);
+});
+
+test("a header with no job or an unknown kind is refused", () => {
+  const problems = budgetProblems("docs/x.md", "---\nkind: diary\n---\n");
+  assert.equal(problems.length, 2);
+});
+
+test("an entry is open until a commit cites it; an old entry with its hash in the heading is closed", () => {
+  const text = ["# Devlog", "", "## #340 · feat · new", "x", "", "## #339 · docs · cited", "x", "", "## #338 — 90c5200 — old", "x", ""].join("\n");
+  const entries = devlogEntries(text, new Set(["339"]));
+  assert.deepEqual(
+    entries.map((e) => [e.number, e.open]),
+    [
+      ["340", true],
+      ["339", false],
+      ["338", false],
+    ],
+  );
+  assert.equal(devlogEntries("## #337 — uncommitted — x\n", new Set())[0].open, true);
+});
+
+test("a date falls in the first bucket whose end is on or after it; past the last, the current phase", () => {
+  const phases = [
+    { name: "2026-09", label: "September 2026", until: "2026-09-30" },
+    { name: "6f", label: "Phase 6F", until: "2026-10-25" },
+  ];
+  assert.equal(bucketFor("2026-09-30", phases).name, "2026-09");
+  assert.equal(bucketFor("2026-10-01", phases).name, "6f");
+  assert.equal(bucketFor("2026-10-26", phases), null);
+});
+
+test("a rotation moves the closed entries and keeps the preamble and the open one", () => {
+  const text = ["# Devlog", "", "How to write one.", "", "---", "", "## #12 · feat · open", "a", "", "---", "", "## #11 · fix · done", "b", "", "---", ""].join("\n");
+  const plan = planRotation(text, new Set(["11"]));
+  assert.deepEqual(plan.moving, ["11"]);
+  assert.deepEqual(plan.staying, ["12"]);
+  assert.match(plan.devlog, /^# Devlog\n\nHow to write one\.\n\n---\n\n## #12 · feat · open/);
+  assert.doesNotMatch(plan.devlog, /#11/);
+  assert.match(plan.archived, /^## #11 · fix · done\nb\n\n---$/);
+});
+
+// ------------------------------------------------------------------ end to end
+
+const CONFIG = `
+export const DEVLOG = "docs/devlog.md";
+export const DEVLOG_ARCHIVE = "docs/devlog";
+export const PHASES = "docs/devlog/phases.json";
+export const LIVE_DOCS = ["docs/roadmap.md"];
+export const STATUS_DOCS = /^docs\\/roadmap\\.md$/;
+export const PATH_ROOTS = ["docs", "scripts", "tools"];
+export const PATH_EXTENSIONS = ["md", "ts", "mjs"];
+export const HEADER_REQUIRED = ["docs"];
+export const HEADER_EXEMPT = [/^docs\\/devlog\\//];
+export const GENERATED = [{ name: "devlog-archive", target: "docs/devlog/README.md", dir: "docs/devlog" }];
+export const DEVLOG_TYPES = ["feat", "fix", "docs", "chore"];
+export const DEVLOG_TAGGED_FROM = 1;
+`;
+
+function repo() {
+  const dir = mkdtempSync(join(tmpdir(), "doc-tools-"));
+  mkdirSync(join(dir, "tools"));
+  for (const name of ["doc-check.mjs", "doc-index.mjs", "doc-rotate.mjs", "doc-lib.mjs", "roadmap-format.mjs"]) copyFileSync(join(TOOLS, name), join(dir, "tools", name));
+  writeFileSync(join(dir, "tools", "doc-config.mjs"), CONFIG);
+  mkdirSync(join(dir, "docs", "devlog"), { recursive: true });
+  writeFileSync(join(dir, "docs", "roadmap.md"), "---\njob: Where things stand.\nkind: living\nmax-lines: 20\n---\n# Roadmap\n");
+  writeFileSync(join(dir, "docs", "devlog", "README.md"), "# Archive\n\n<!-- generated:start devlog-archive -->\n<!-- generated:end devlog-archive -->\n");
+  writeFileSync(join(dir, "docs", "devlog.md"), "---\njob: The timeline.\nkind: log\nmax-entry-lines: 15\n---\n# Devlog\n\n## #1 · chore · start\n- the repo\n\n---\n");
+  const run = (...args) => execFileSync("git", args, { cwd: dir, encoding: "utf8" });
+  run("init", "-q");
+  run("config", "user.email", "t@example.com");
+  run("config", "user.name", "T");
+  spawnSync(process.execPath, ["tools/doc-index.mjs"], { cwd: dir });
+  run("add", "-A");
+  run("commit", "-q", "-m", "chore: start — devlog #1");
+  const node = (script, ...args) => spawnSync(process.execPath, [`tools/${script}`, ...args], { cwd: dir, encoding: "utf8" });
+  const addEntry = (n, type, lines = 1) => {
+    const path = join(dir, "docs", "devlog.md");
+    const text = readFileSync(path, "utf8");
+    const entry = [`## #${n} · ${type} · work`, ...Array.from({ length: lines }, () => "- x"), "", "---", ""].join("\n");
+    writeFileSync(path, text.replace("# Devlog\n\n", `# Devlog\n\n${entry}`));
+  };
+  return { dir, run, node, addEntry };
+}
+
+test("a commit must cite the devlog's open top entry, and a closed one cannot be reused", () => {
+  const { run, node, addEntry } = repo();
+  assert.equal(node("doc-check.mjs", "--head").status, 0);
+  // Reusing #1, which the first commit already cited:
+  assert.match(node("doc-check.mjs", "--message", "feat: more — devlog #1").stderr, /already belongs to an earlier commit/);
+  addEntry(2, "feat");
+  assert.match(node("doc-check.mjs", "--message", "feat: more").stderr, /names no devlog entry/);
+  assert.match(node("doc-check.mjs", "--message", "feat: more — devlog #3").stderr, /top entry is #2/);
+  assert.equal(node("doc-check.mjs", "--message", "feat: more — devlog #2").status, 0);
+  run("commit", "-q", "-am", "feat: more — devlog #2");
+  assert.equal(node("doc-check.mjs", "--head").status, 0);
+  // An amend keeps citing the entry its commit already closed:
+  assert.equal(node("doc-check.mjs", "--message", "feat: more, reworded — devlog #2", "--amend").status, 0);
+});
+
+test("a top entry without its type tag, or with an unknown one, is refused", () => {
+  const { node, addEntry } = repo();
+  addEntry(2, "party");
+  assert.match(node("doc-check.mjs", "--message", "x — devlog #2").stderr, /type "party"/);
+});
+
+test("an over-budget doc, a missing header and a stale index each fail the check", () => {
+  const { dir, node, addEntry } = repo();
+  addEntry(2, "feat", 20);
+  assert.match(node("doc-check.mjs").stderr, /over its max-entry-lines of 15/);
+  writeFileSync(join(dir, "docs", "devlog.md"), readFileSync(join(dir, "docs", "devlog.md"), "utf8").replace(/(- x\n){20}/, "- x\n"));
+  writeFileSync(join(dir, "docs", "roadmap.md"), "# Roadmap, no header\n");
+  assert.match(node("doc-check.mjs").stderr, /docs\/roadmap\.md: has no header/);
+  writeFileSync(join(dir, "docs", "roadmap.md"), "---\njob: Where things stand.\nkind: living\nmax-lines: 20\n---\n# Roadmap\n");
+  writeFileSync(join(dir, "docs", "devlog", "README.md"), "# Archive\n\n<!-- generated:start devlog-archive -->\nhand-edited\n<!-- generated:end devlog-archive -->\n");
+  assert.match(node("doc-check.mjs").stderr, /index is out of date\. Run: node tools\/doc-index\.mjs/);
+  assert.equal(node("doc-index.mjs").status, 0);
+  assert.equal(node("doc-check.mjs").status, 0);
+});
+
+test("a rotation archives the closed entries, lists the phase, and regenerates the index", () => {
+  const { dir, run, node, addEntry } = repo();
+  addEntry(2, "feat");
+  run("commit", "-q", "-am", "feat: built — devlog #2");
+  addEntry(3, "docs"); // open: no commit cites it yet
+  const rotated = node("doc-rotate.mjs", "--phase", "6g", "--label", "Phase 6G — Payroll");
+  assert.equal(rotated.status, 0, rotated.stderr);
+  const devlog = readFileSync(join(dir, "docs", "devlog.md"), "utf8");
+  assert.match(devlog, /## #3 · docs/);
+  assert.doesNotMatch(devlog, /## #2 |## #1 /);
+  const archive = readFileSync(join(dir, "docs", "devlog", "6g.md"), "utf8");
+  assert.match(archive, /kind: record/);
+  assert.match(archive, /## #2 · feat[\s\S]*## #1 · chore/);
+  const phases = JSON.parse(readFileSync(join(dir, "docs", "devlog", "phases.json"), "utf8"));
+  assert.equal(phases[0].name, "6g");
+  assert.match(readFileSync(join(dir, "docs", "devlog", "README.md"), "utf8"), /\[Phase 6G — Payroll\]\(6g\.md\) · #001–#002, 2 entries/);
+  assert.equal(node("doc-check.mjs").status, 0);
+  assert.match(node("doc-rotate.mjs", "--phase", "6g").stderr, /already exists/);
+});
+
+test("the open-items and ADR indexes read the register, the owner's lists and each ADR's header", () => {
+  const dir = mkdtempSync(join(tmpdir(), "doc-index-"));
+  mkdirSync(join(dir, "tools"));
+  for (const name of ["doc-index.mjs", "doc-lib.mjs"]) copyFileSync(join(TOOLS, name), join(dir, "tools", name));
+  writeFileSync(
+    join(dir, "tools", "doc-config.mjs"),
+    [
+      'export const DEVLOG = "docs/devlog.md";',
+      'export const PHASES = "docs/phases.json";',
+      "export const GENERATED = [",
+      '  { name: "open-items", target: "docs/open.md", register: "docs/model.md", lists: [{ files: ["docs/handoff.md"], heading: "Waiting on the owner" }] },',
+      '  { name: "adr-index", target: "docs/adr/README.md", dir: "docs/adr" },',
+      "];",
+    ].join("\n"),
+  );
+  mkdirSync(join(dir, "docs", "adr"), { recursive: true });
+  const marked = (name) => `# T\n\n<!-- generated:start ${name} -->\n<!-- generated:end ${name} -->\n`;
+  writeFileSync(join(dir, "docs", "open.md"), marked("open-items"));
+  writeFileSync(join(dir, "docs", "adr", "README.md"), marked("adr-index"));
+  writeFileSync(
+    join(dir, "docs", "model.md"),
+    ["**OPEN-01 — Settled thing.** ✅ **CLOSED.**", "", "**OPEN-02 — Still a question.**", "", "**OPEN-03 — Closed on the next", "line.** ✅ **CLOSED**"].join("\n"),
+  );
+  writeFileSync(join(dir, "docs", "handoff.md"), "# H\n\n## Waiting on the owner\n\n- **Close spec #9**\n  by hand.\n  - a sub-point\n\n## Next\n\n- not this\n");
+  writeFileSync(join(dir, "docs", "adr", "0001-a.md"), "---\nstatus: superseded\nsuperseded-by: 0002\nkind: record\n---\n# Old way\n\n**Status:** superseded\n");
+  writeFileSync(join(dir, "docs", "adr", "0002-b.md"), "# New way\n\n**Status:** accepted 2026-10-01\n");
+  const run = spawnSync(process.execPath, ["tools/doc-index.mjs"], { cwd: dir, encoding: "utf8" });
+  assert.equal(run.status, 0, run.stderr);
+  const open = readFileSync(join(dir, "docs", "open.md"), "utf8");
+  assert.match(open, /\*\*OPEN-02\*\* Still a question\./);
+  assert.doesNotMatch(open, /OPEN-01|OPEN-03/);
+  assert.match(open, /- \*\*Close spec #9\*\* by hand\./);
+  assert.doesNotMatch(open, /sub-point|not this/);
+  const adr = readFileSync(join(dir, "docs", "adr", "README.md"), "utf8");
+  assert.match(adr, /\[0001\]\(0001-a\.md\) · \*superseded\* \(superseded by 0002\) · Old way/);
+  assert.match(adr, /\[0002\]\(0002-b\.md\) · \*accepted\* · New way/);
+});
+
+test("a missing path git ignores is local-only and passes; any other missing path fails", () => {
+  const { dir, node } = repo();
+  writeFileSync(join(dir, ".gitignore"), "/scripts/*\n");
+  const roadmap = (body) => `---\njob: Where things stand.\nkind: living\nmax-lines: 20\n---\n# Roadmap\n${body}\n`;
+  writeFileSync(join(dir, "docs", "roadmap.md"), roadmap("Run `scripts/qa-cast.ts`, see [the cast](../scripts/README.md)."));
+  assert.equal(node("doc-check.mjs").status, 0, node("doc-check.mjs").stderr);
+  writeFileSync(join(dir, "docs", "roadmap.md"), roadmap("Run `tools/gone.mjs`."));
+  assert.match(node("doc-check.mjs").stderr, /names a file that does not exist: tools\/gone\.mjs/);
+});
+
+test("only a path under the config's folders, of its file types, is checked", () => {
+  const { dir, node } = repo();
+  const roadmap = (body) => `---\njob: Where things stand.\nkind: living\nmax-lines: 20\n---\n# Roadmap\n${body}\n`;
+  // src/ is not one of this project's PATH_ROOTS, and .css not one of its PATH_EXTENSIONS: both are prose.
+  writeFileSync(join(dir, "docs", "roadmap.md"), roadmap("Built in `src/gone.ts`, styled by `tools/gone.css`."));
+  assert.equal(node("doc-check.mjs").status, 0, node("doc-check.mjs").stderr);
+  writeFileSync(join(dir, "docs", "roadmap.md"), roadmap("Built in `scripts/gone.ts`."));
+  assert.match(node("doc-check.mjs").stderr, /names a file that does not exist: scripts\/gone\.ts/);
+});
+
+test("raising a budget is noted, and refused inside a phase run", () => {
+  const { dir, node } = repo();
+  writeFileSync(join(dir, "docs", "roadmap.md"), "---\njob: Where things stand.\nkind: living\nmax-lines: 30\n---\n# Roadmap\n");
+  const attended = node("doc-check.mjs");
+  assert.equal(attended.status, 0, attended.stderr);
+  assert.match(attended.stdout, /docs\/roadmap\.md: max-lines raised from 20 to 30\. Raising a budget is the owner's call/);
+  const run = spawnSync(process.execPath, ["tools/doc-check.mjs"], { cwd: dir, encoding: "utf8", env: { ...process.env, PHASE_RUN: "1" } });
+  assert.equal(run.status, 1);
+  assert.match(run.stderr, /A phase run never raises a budget/);
+});
+
+test("a new doc anywhere in docs/ needs a header", () => {
+  const { dir, node } = repo();
+  writeFileSync(join(dir, "docs", "notes.md"), "# Some notes\n");
+  assert.match(node("doc-check.mjs").stderr, /docs\/notes\.md: has no header/);
+});
+
+test("a new doc not yet in HEAD passes quietly: git's own complaint is not printed", () => {
+  const { dir, node } = repo();
+  writeFileSync(join(dir, "docs", "notes.md"), "---\njob: Notes.\nkind: living\nmax-lines: 20\n---\n# Notes\n");
+  const check = node("doc-check.mjs");
+  assert.equal(check.status, 0, check.stderr);
+  assert.doesNotMatch(check.stderr, /fatal:/);
+});
+
+test("adopting accepts today's header-less docs; the list only shrinks, and never inside a phase run", () => {
+  const { dir, node } = repo();
+  writeFileSync(join(dir, "docs", "old-notes.md"), "# Notes from before the workflow\n");
+  writeFileSync(join(dir, "docs", "old-plan.md"), "# A plan from before\n");
+  const inRun = spawnSync(process.execPath, ["tools/doc-check.mjs", "--adopt"], { cwd: dir, encoding: "utf8", env: { ...process.env, PHASE_RUN: "1" } });
+  assert.equal(inRun.status, 1);
+  assert.match(inRun.stderr, /never updated inside a phase run/);
+  assert.equal(node("doc-check.mjs", "--adopt").status, 0);
+  const baseline = () => JSON.parse(readFileSync(join(dir, "tools", "doc-check-baseline.json"), "utf8"));
+  assert.deepEqual(baseline().headers, ["docs/old-notes.md", "docs/old-plan.md"]);
+  assert.equal(node("doc-check.mjs").status, 0, node("doc-check.mjs").stderr);
+  // A doc written after adopting still needs a header, and --update-baseline does not add it:
+  writeFileSync(join(dir, "docs", "new.md"), "# New\n");
+  assert.equal(node("doc-check.mjs", "--update-baseline").status, 0);
+  assert.match(node("doc-check.mjs").stderr, /docs\/new\.md: has no header/);
+  // A listed doc that gets a header leaves the list at the next update:
+  writeFileSync(join(dir, "docs", "new.md"), "---\njob: New.\nkind: living\nmax-lines: 20\n---\n# New\n");
+  writeFileSync(join(dir, "docs", "old-plan.md"), "---\njob: The old plan.\nkind: living\nmax-lines: 20\n---\n# A plan\n");
+  assert.equal(node("doc-check.mjs", "--update-baseline").status, 0);
+  assert.deepEqual(baseline().headers, ["docs/old-notes.md"]);
+  assert.equal(node("doc-check.mjs").status, 0);
+});
+
+test("the health report lists each budgeted doc, fullest first, and closed files apart", () => {
+  const { dir, node } = repo();
+  writeFileSync(join(dir, "docs", "roadmap.md"), `---\njob: Where things stand.\nkind: living\nmax-lines: 10\n---\n# Roadmap\n${"- a line\n".repeat(4)}`);
+  writeFileSync(join(dir, "docs", "old.md"), "---\njob: A finished period.\nkind: living\nmax-lines: 6\ngrowth: closed\n---\n# Old\n");
+  const report = node("doc-check.mjs", "--report").stdout;
+  assert.match(report, /docs\/roadmap\.md\s+10 \/ 10\s+100%\s+over: trim it|docs\/roadmap\.md\s+10 \/ 10\s+100%/);
+  assert.match(report, /Closed \(growth: closed[^\n]*\): 1 files\n.*docs\/old\.md/);
+});
+
+/** The fixture repo with a discovery folder: header-exempt, indexed, and one committed doc. */
+function withDiscovery() {
+  const made = repo();
+  const config = CONFIG.replace(
+    'export const HEADER_EXEMPT = [/^docs\\/devlog\\//];',
+    'export const DISCOVERY_DIR = "docs/discovery";\nexport const HEADER_EXEMPT = [/^docs\\/devlog\\//, /^docs\\/discovery\\/(?!README\\.md$)/];',
+  ).replace(
+    'export const GENERATED = [',
+    'export const GENERATED = [{ name: "discovery", target: "docs/discovery/README.md", dir: "docs/discovery" }, ',
+  );
+  writeFileSync(join(made.dir, "tools", "doc-config.mjs"), config);
+  mkdirSync(join(made.dir, "docs", "discovery"));
+  const index = "---\njob: Every discovery doc and its newest addendum.\nkind: generated\n---\n# Discovery\n\n<!-- generated:start discovery -->\n<!-- generated:end discovery -->\n";
+  writeFileSync(join(made.dir, "docs", "discovery", "README.md"), index);
+  const doc = "# Discovery: the shop\n\n**Rounds:** 2026-10-01, with the owner.\n\n## Goals\n\n- Sell coffee to 40 regulars.\n";
+  writeFileSync(join(made.dir, "docs", "discovery", "01-shop.md"), doc);
+  made.node("doc-index.mjs");
+  made.run("add", "-A");
+  made.run("commit", "-q", "-m", "docs: discovery — devlog #1");
+  const path = join(made.dir, "docs", "discovery", "01-shop.md");
+  const edit = (from, to) => writeFileSync(path, readFileSync(path, "utf8").replace(from, to));
+  const check = () => {
+    made.node("doc-index.mjs");
+    return made.node("doc-check.mjs");
+  };
+  return { ...made, path, edit, check };
+}
+
+test("a discovery doc needs no header and is listed in its index, with its newest addendum", () => {
+  const { dir, edit, check } = withDiscovery();
+  const index = () => readFileSync(join(dir, "docs", "discovery", "README.md"), "utf8");
+  assert.match(index(), /- \[01\]\(01-shop\.md\) · Discovery: the shop · 2026-10-01 · no addendum/);
+  edit("# Discovery: the shop\n", "# Discovery: the shop\n\n> **Addendum 2026-11-02:** 14 regulars, not 40. **Changes:** Goals. **Open:** none.\n");
+  const result = check();
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(index(), /· 2026-10-01 · latest addendum 2026-11-02/);
+});
+
+test("a committed discovery doc is never rewritten: a changed line, an edited addendum or a deletion fails; a rename passes", () => {
+  const { run, node, edit, check } = withDiscovery();
+  edit("40 regulars", "14 regulars");
+  assert.match(check().stderr, /01-shop\.md: a line below its addendum block changed\. A discovery doc is never rewritten/);
+  edit("14 regulars", "40 regulars");
+  edit("# Discovery: the shop\n", "# Discovery: the shop\n\n> **Addendum 2026-11-02:** 14 regulars, not 40.\n");
+  assert.equal(check().status, 0);
+  run("commit", "-q", "-am", "docs: an addendum — devlog #1");
+  edit("14 regulars, not 40", "15 regulars");
+  assert.match(check().stderr, /an earlier addendum changed/);
+  edit("15 regulars", "14 regulars, not 40");
+  edit("# Discovery: the shop\n", "# Discovery: the shop\n\n> **Addendum 2026-11-09:** It opens at 7.\n");
+  const twice = check();
+  assert.equal(twice.status, 0, twice.stderr);
+  run("checkout", "--", "docs");
+  run("mv", "docs/discovery/01-shop.md", "docs/discovery/01-coffee-shop.md");
+  const renamed = check();
+  assert.equal(renamed.status, 0, renamed.stderr);
+  run("rm", "-q", "-f", "docs/discovery/01-coffee-shop.md");
+  assert.match(check().stderr, /01-shop\.md: a discovery doc was deleted/);
+  assert.equal(node("doc-check.mjs", "--report").status, 0);
+});
+
+/** The fixture repo with the design rung: a design index and a prototype folder setting. */
+function withDesign() {
+  const made = repo();
+  const config = `${CONFIG.replace(
+    "export const GENERATED = [",
+    'export const GENERATED = [{ name: "design", target: "design/README.md", dir: "design/flows" }, ',
+  )}export const PROTOTYPE_DIR = "app/(prototype)";\n`;
+  writeFileSync(join(made.dir, "tools", "doc-config.mjs"), config);
+  mkdirSync(join(made.dir, "design", "flows"), { recursive: true });
+  writeFileSync(join(made.dir, "design", "README.md"), "# Design\n\n<!-- generated:start design -->\n<!-- generated:end design -->\n");
+  const flow = (approved) =>
+    `# Flow: Module 1, check-in\n\n**Approved:** ${approved}\n\n## Screens\n\n### Member list\n\n- **Job:** find a member.\n\n### Check-in\n\n- **Job:** check one in.\n\n## The flow\n\n### not a screen\n`;
+  writeFileSync(join(made.dir, "design", "flows", "module-1.md"), flow("2026-11-02 by the owner."));
+  writeFileSync(join(made.dir, "design", "flows", "module-2.md"), "# Flow: Module 2, payments\n\n**Approved:** not yet\n");
+  return made;
+}
+
+test("the design index lists each module's flow: its approval, its screens, and whether its prototype is open", () => {
+  const { dir, node } = withDesign();
+  const guard = "export default function Layout({ children }) { return children; } // brigade:prototype-guard\n";
+  mkdirSync(join(dir, "app", "(prototype)", "module-1"), { recursive: true });
+  writeFileSync(join(dir, "app", "(prototype)", "layout.tsx"), guard);
+  assert.equal(node("doc-index.mjs").status, 0);
+  const index = readFileSync(join(dir, "design", "README.md"), "utf8");
+  assert.match(index, /- \[module-1\]\(flows\/module-1\.md\) · Flow: Module 1, check-in · approved 2026-11-02 · 2 screens · prototype open/);
+  assert.match(index, /- \[module-2\]\(flows\/module-2\.md\) · Flow: Module 2, payments · not approved · 0 screens · prototype deleted/);
+  const check = node("doc-check.mjs");
+  assert.equal(check.status, 0, check.stderr);
+});
+
+test("a prototype folder without its guard fails the check; no folder yet passes", () => {
+  const { dir, node } = withDesign();
+  node("doc-index.mjs");
+  assert.equal(node("doc-check.mjs").status, 0, "no prototype folder yet");
+  mkdirSync(join(dir, "app", "(prototype)", "module-1"), { recursive: true });
+  writeFileSync(join(dir, "app", "(prototype)", "layout.tsx"), "export default function Layout({ children }) { return children; }\n");
+  node("doc-index.mjs");
+  assert.match(node("doc-check.mjs").stderr, /app\/\(prototype\)\/: the prototype folder has no guard\. .*"brigade:prototype-guard"/);
+  writeFileSync(join(dir, "app", "(prototype)", "module-1", "page.tsx"), "// brigade:prototype-guard\n");
+  assert.match(node("doc-check.mjs").stderr, /has no guard/, "the guard must sit directly in the folder, not in a module's page");
+});
+
+/** A roadmap in the fixed format: two modules, three phases, one idea for later. */
+const ROADMAP = (modules, phases) =>
+  [
+    "---",
+    "job: Where things stand.",
+    "kind: living",
+    "max-lines: 60",
+    "---",
+    "# Roadmap",
+    "",
+    "<!-- brigade:roadmap -->",
+    "## Modules",
+    "",
+    "| # | Module | Depends on | Stands |",
+    "|---|---|---|---|",
+    ...modules,
+    "",
+    "## Phases",
+    "",
+    "| Phase | Module | Spec | Branch | Stands |",
+    "|---|---|---|---|---|",
+    ...phases,
+    "<!-- /brigade:roadmap -->",
+    "",
+    "## Noted for later",
+    "",
+    "- A loyalty card.",
+    "",
+  ].join("\n");
+const GOOD = ROADMAP(
+  ["| 1 | Accounts | — | delivered |", "| 2 | Inventory | 1 | building |"],
+  ["| 0 Skeleton |  | #3 | phase-0 | merged |", "| 1A Sign-up | 1 | #12 | phase-1a | merged |", "| 2A Stock counts | 2 | #20 | phase-2a | blocked: waiting on the supplier list |"],
+);
+
+test("the roadmap's tables read as modules, phases and ideas, with each phase's module, spec and branch", () => {
+  const roadmap = parseRoadmap(GOOD);
+  assert.deepEqual(roadmap.problems, []);
+  assert.deepEqual(roadmap.modules.map((m) => [m.number, m.name, m.dependsOn, m.stands]), [
+    [1, "Accounts", [], "delivered"],
+    [2, "Inventory", [1], "building"],
+  ]);
+  assert.deepEqual(roadmap.phases.map((p) => [p.phase, p.module, p.spec, p.branch, p.stands, p.reason]), [
+    ["0 Skeleton", null, 3, "phase-0", "merged", null],
+    ["1A Sign-up", 1, 12, "phase-1a", "merged", null],
+    ["2A Stock counts", 2, 20, "phase-2a", "blocked", "waiting on the supplier list"],
+  ]);
+  assert.deepEqual(roadmap.notes, ["A loyalty card."]);
+  assert.equal(parseRoadmap("# Roadmap\n\n| Phase | Stands |\n").converted, false, "no markers: an older roadmap");
+});
+
+test("doc-check refuses a roadmap table out of format, and leaves an unconverted roadmap alone", () => {
+  const { dir, node } = repo();
+  mkdirSync(join(dir, "docs", "status"), { recursive: true });
+  const path = join(dir, "docs", "status", "roadmap.md");
+  writeFileSync(path, GOOD);
+  const clean = node("doc-check.mjs");
+  assert.equal(clean.status, 0, clean.stderr);
+  const cases = [
+    [ROADMAP(["| 1 | Accounts | — | done |"], []), /module 1's Stands: "done" is not one of planned, building, delivered, blocked/],
+    [ROADMAP(["| 1 | Accounts | 3 | planned |"], []), /module 1 depends on "3", which is not a module number/],
+    [ROADMAP(["| 1 | Accounts | — | blocked |"], []), /blocked needs its reason/],
+    [ROADMAP(["| 1 | Accounts | — | planned |"], ["| 1A Sign-up | 2 | #12 | phase-1a | planned |"]), /is in module "2", which is not in the Modules table/],
+    [ROADMAP(["| 1 | Accounts | — | planned |"], ["| 1A Sign-up | 1 | 12 | 1a | planned |"]), /Spec is its issue, like #12[\s\S]*Branch must start with phase-/],
+    [GOOD.replace("<!-- /brigade:roadmap -->\n", ""), /has no closing <!-- \/brigade:roadmap -->/],
+  ];
+  for (const [text, error] of cases) {
+    writeFileSync(path, text);
+    assert.match(node("doc-check.mjs").stderr, error);
+  }
+  writeFileSync(path, "---\njob: Where things stand.\nkind: living\nmax-lines: 60\n---\n# Roadmap\n\n| Phase | Stands |\n|---|---|\n| 2 | almost |\n");
+  assert.equal(node("doc-check.mjs").status, 0, "an older roadmap without the markers is not checked");
+});

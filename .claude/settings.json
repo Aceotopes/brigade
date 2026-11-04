@@ -1,0 +1,14 @@
+{
+  "enabledPlugins": {
+    "brigade@aceotopes": true
+  },
+  "extraKnownMarketplaces": {
+    "aceotopes": {
+      "source": {
+        "source": "github",
+        "repo": "Aceotopes/brigade"
+      },
+      "autoUpdate": true
+    }
+  }
+}

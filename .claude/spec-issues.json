@@ -1,0 +1,4 @@
+{
+  "note": "Spec issues: the owner closes each by hand, so no commit or PR may carry a closing keyword for one (Brigade's guard-shell hook). Add a phase's spec here when /to-spec publishes it; /ticket-check does it too.",
+  "specs": []
+}

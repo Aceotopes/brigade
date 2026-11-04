@@ -1,0 +1,47 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git *)",
+      "Bash(gh *)",
+      "Bash(node *)",
+      "Bash(mkdir *)",
+      "Bash(sleep *)",
+      "Bash(echo *)",
+      "Bash(head *)",
+      "Bash(tail *)",
+      "Bash(wc *)",
+      "Bash(grep *)",
+      "Bash(ls *)",
+      "Bash(cat *)",
+      "Bash(od *)",
+      "Bash(sort *)",
+      "Bash(uniq *)",
+      "Bash(diff *)",
+      "Bash(netstat *)",
+      "Bash(rm .phase-run/tmp/*)",
+      "Bash(rm -f .phase-run/tmp/*)",
+      "Bash(curl *localhost*)",
+      "Bash(curl *127.0.0.1*)",
+      "PowerShell(git *)",
+      "PowerShell(gh *)",
+      "PowerShell(node *)",
+      "PowerShell(Get-NetTCPConnection *)",
+      "PowerShell(Get-CimInstance *)",
+      "PowerShell(Get-Content *)",
+      "PowerShell(Get-ChildItem *)",
+      "PowerShell(Select-Object *)",
+      "PowerShell(Select-String *)",
+      "PowerShell(Test-Path *)",
+      "PowerShell(Stop-Process *)",
+      "PowerShell(Remove-Item .phase-run/tmp/*)",
+      "PowerShell(Remove-Item -LiteralPath .phase-run/tmp/*)",
+      "Skill",
+      "Agent"
+    ],
+    "deny": [
+      "Bash(git push *)",
+      "PowerShell(git push *)",
+      "Read(./.env)"
+    ]
+  }
+}

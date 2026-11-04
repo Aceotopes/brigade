@@ -1,0 +1,27 @@
+name: Checks
+
+# This project's own checks, the stop gate's in .claude/workflow.json, on every push and pull
+# request: a green pull request means they passed too, not only the docs' checks (doc-check.yml).
+# Written once by /setup-workflow; the project owns it and /update-workflow never touches it, so
+# change it here when the checks change.
+on:
+  push: {}
+  pull_request: {}
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: "The plugin's and the template's tests"
+        run: "node --test tests/*.test.mjs template/tools/doc-tools.test.mjs template/tools/phase-run/run.test.mjs template/tools/phase-run/measure.test.mjs"
