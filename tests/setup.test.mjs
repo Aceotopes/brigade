@@ -11,7 +11,7 @@ import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 
 import { parseWorkflowConfig } from "../hooks/workflow-config.mjs";
-import { ARCHIVE, apply, autoModeLines, buildPlan, detect, dockerStatus, parseStackTable, plan, refresh, stackDisagreements, suggestPrototypeDir, update } from "../scripts/setup.mjs";
+import { ARCHIVE, apply, autoModeLines, buildPlan, detect, dockerStatus, parseStackTable, plan, proposeWorkflow, refresh, stackDisagreements, suggestPrototypeDir, update } from "../scripts/setup.mjs";
 import { STAMP, compareVersions } from "../scripts/versions.mjs";
 import { PLUGIN, repo, write } from "./helpers.mjs";
 
@@ -118,6 +118,53 @@ test("the runner's own loader accepts the config setup proposes from a stack", a
   assert.deepEqual(written.stopGate.checks.find((c) => c.receipt), { label: "Tests", run: "pnpm test", receipt: true, unread: ["docs/**", "*.md"] });
   assert.deepEqual(parseWorkflowConfig(written).checks.find((c) => c.receipt).unread, ["docs/**", "*.md"], "the hooks' loader accepts it");
   assert.deepEqual(config.stopChecks.find((c) => c.receipt).unread, ["docs/**", "*.md"], "and the runner's");
+});
+
+test("detect lists the Node test files in a top-level test/ or tests/ folder, one glob per folder and extension", () => {
+  assert.deepEqual(detect(repo("brigade-nodetests-none-").dir).nodeTests, [], "no test files: an empty list");
+  const { dir } = repo("brigade-nodetests-", {
+    "tests/a.test.mjs": "",
+    "tests/b.test.mjs": "",
+    "tests/sub/c.test.js": "", // nested: not counted
+    "tests/helper.mjs": "", // not a test file
+    "template/tools/x.test.mjs": "", // a test file elsewhere
+    "src/y.test.cjs": "",
+  });
+  assert.deepEqual(detect(dir).nodeTests, ["tests/*.test.mjs"]);
+  // Both folders, two extensions: each glob once, sorted.
+  const both = repo("brigade-nodetests-both-", { "tests/a.test.mjs": "", "test/b.test.js": "", "test/c.test.js": "" }).dir;
+  assert.deepEqual(detect(both).nodeTests, ["test/*.test.js", "tests/*.test.mjs"]);
+  // .cjs counts too, and outside a git repository the walk finds the same files.
+  const plain = mkdtempSync(join(tmpdir(), "brigade-nodetests-plain-"));
+  write(plain, { "test/a.test.cjs": "", "test/notes.md": "" });
+  assert.deepEqual(detect(plain).nodeTests, ["test/*.test.cjs"]);
+});
+
+test("a repo without package.json gets its Node tests proposed as the tests row, never a bare node --test", () => {
+  const { dir } = repo("brigade-nodetests-propose-", { "tests/a.test.mjs": "", "test/b.test.js": "" });
+  const det = detect(dir);
+  assert.equal(det.packageJson, false);
+  const config = proposeWorkflow(det);
+  const run = "node --test test/*.test.js tests/*.test.mjs";
+  assert.deepEqual(config.stopGate.checks, [{ label: "Tests", run, receipt: true, unread: ["docs/**", "*.md"] }]);
+  assert.deepEqual(config.phaseRun.gates, [{ label: "tests", run, alone: true }]);
+  for (const row of [...config.stopGate.checks, ...config.phaseRun.gates]) assert.notEqual(row.run.trim(), "node --test");
+  assert.doesNotThrow(() => parseWorkflowConfig(config), "the hooks' loader accepts it");
+  // No Node tests and no package.json: still nothing proposed.
+  const none = proposeWorkflow(detect(repo("brigade-nodetests-empty-").dir));
+  assert.deepEqual([none.stopGate.checks, none.phaseRun.gates], [[], []]);
+});
+
+test("a repo with package.json is proposed what its scripts give, whatever Node tests it has", () => {
+  const { dir } = existing();
+  write(dir, { "tests/a.test.mjs": "" });
+  const det = detect(dir);
+  assert.deepEqual(det.nodeTests, ["tests/*.test.mjs"]);
+  assert.deepEqual(proposeWorkflow(det), proposeWorkflow({ ...det, nodeTests: [] }));
+  assert.equal(proposeWorkflow(det).stopGate.checks.find((c) => c.receipt).run, "pnpm test");
+  // A package.json with no test script is not given the Node tests either.
+  const bare = repo("brigade-nodetests-noscript-", { "package.json": '{ "name": "x" }\n', "tests/a.test.mjs": "" }).dir;
+  assert.equal(proposeWorkflow(detect(bare)).phaseRun.gates.length, 0);
 });
 
 test("the prototype folder is a route group where the framework has them, and unknown otherwise", () => {

@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "note": "Brigade on itself. The gates test the next version (template/, tests/); tools/ at the root is the released runner doing the building, re-copied by /update-workflow after each release.",
+  "guard": {
+    "block": []
+  },
+  "stopGate": {
+    "checks": [
+      {
+        "label": "The plugin's and the template's tests",
+        "run": "node --test tests/*.test.mjs template/tools/doc-tools.test.mjs template/tools/phase-run/run.test.mjs template/tools/phase-run/measure.test.mjs",
+        "receipt": true,
+        "unread": [
+          "docs/**",
+          "*.md"
+        ]
+      }
+    ]
+  },
+  "phaseRun": {
+    "gates": [
+      {
+        "label": "plugin tests",
+        "run": "node --test tests/*.test.mjs"
+      },
+      {
+        "label": "template doc-tools tests",
+        "run": "node --test template/tools/doc-tools.test.mjs"
+      },
+      {
+        "label": "template runner tests",
+        "run": "node --test template/tools/phase-run/run.test.mjs template/tools/phase-run/measure.test.mjs"
+      }
+    ]
+  }
+}
