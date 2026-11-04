@@ -9,6 +9,15 @@ Each commit's entry goes on top, in the shape of `docs/_templates/devlog-entry.m
 message cites it (`devlog #N`). At each phase end, `node tools/doc-rotate.mjs` moves the closed
 entries into `docs/history/devlog/`.
 
+## #4 · chore · /update-workflow to 0.5.2, the pinned runner moves forward
+
+**Built:**
+- The root `tools/doc-tools.test.mjs` re-copied from the 0.5.2 template (the `PHASE_RUN` fix); the
+  stamp `.claude/workflow-version.json` now says 0.5.2. The only change the update listed.
+**Verified:** the update run from the installed 0.5.2 plugin; `PHASE_RUN=1 node --test
+tools/doc-tools.test.mjs` 26/26; `setup.mjs verify` all ok; doc-check clean.
+**Next:** Block23GymV2 setup. **Record:** devlog #3.
+
 ## #3 · chore · release 0.5.2, Brigade on itself
 
 **Built:**

@@ -1,6 +1,6 @@
 {
   "plugin": "brigade",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "mode": "merge",
   "adopted": "2026-11-04",
   "updated": "2026-11-04",
@@ -24,7 +24,7 @@
     "tools/doc-index.mjs": "bd8539da583a8f49",
     "tools/doc-lib.mjs": "82d799048e7659fc",
     "tools/doc-rotate.mjs": "0f86f5af320c7ae5",
-    "tools/doc-tools.test.mjs": "036cc1626879f6d5",
+    "tools/doc-tools.test.mjs": "aa4a4bb498a533db",
     "tools/phase-run/config.mjs": "a53fc9eecb62da86",
     "tools/phase-run/display.mjs": "7c558f9a4db7c204",
     "tools/phase-run/fix-prompt.md": "5a8d70d88c6233f1",
