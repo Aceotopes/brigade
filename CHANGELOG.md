@@ -4,6 +4,15 @@ What changed in each version, for `/update-workflow` to show a project before it
 template. Newest first. A version that changes a config file's format says so, and ships its
 migration in `scripts/migrations.mjs`.
 
+## Unreleased
+- **Setup proposes Node tests for a repo without `package.json`.** `detect` lists the test files
+  directly inside a top-level `test/` or `tests/` folder (`*.test.mjs`, `.js`, `.cjs`) as
+  `nodeTests`, and `propose` turns them into the tests row, e.g. `node --test tests/*.test.mjs`,
+  with the receipt in the stop gate and `alone` in the gates. A repo with `package.json` is
+  proposed what it was before.
+- `tools/doc-tools.test.mjs` passes when run from inside a phase run: it clears the runner's
+  `PHASE_RUN*` variables first, so its "attended" doc-check runs no longer refuse.
+
 ## 0.5.1 — 2026-11-04
 The out-of-step notice's "this machine has an older Brigade" line now names the catalog update
 first: `claude plugin marketplace update aceotopes`, then `claude plugin update brigade@aceotopes`,

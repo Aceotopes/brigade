@@ -17,6 +17,9 @@ import { parseRoadmap } from "./roadmap-format.mjs";
 import { bucketFor, budgetProblems, devlogEntries, parseFrontmatter } from "./doc-lib.mjs";
 
 const TOOLS = dirname(fileURLToPath(import.meta.url));
+// Run from inside a phase run (the stop check, a gate), these tests still see an attended session:
+// a test that wants PHASE_RUN sets it itself, so an "attended" doc-check never inherits it.
+for (const key of Object.keys(process.env)) if (/^PHASE_RUN/.test(key)) delete process.env[key];
 
 test("a header is read as a flat key: value list, numbers as numbers", () => {
   const header = parseFrontmatter("---\njob: Where things stand.\nkind: living\nmax-lines: 120\n---\n# Roadmap\n");

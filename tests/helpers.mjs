@@ -6,6 +6,11 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+// A suite run from inside a phase run (the stop check, a gate) sees an attended session: a test
+// that wants the runner's variables sets them itself. Without this, doc-check spawned "attended"
+// inherits PHASE_RUN and refuses what only a phase run refuses (#9).
+for (const key of Object.keys(process.env)) if (/^PHASE_RUN/.test(key)) delete process.env[key];
+
 export const PLUGIN = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 /** A git repository with one commit. `files` maps a repo path to its text. */

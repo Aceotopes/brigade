@@ -55,8 +55,11 @@ exist, `stack`, the guard's `wrappers` and the allow rules for the package manag
 silently: show the owner what was detected and the proposed gates, and ask in one batch:
 
 - the project's **name** and a **one-paragraph summary** (for `CLAUDE.md`);
-- are these **gates** right (add, drop, reorder; a repo with no scripts names its own, e.g.
-  `node --test`);
+- are these **gates** right (add, drop, reorder). A repo without `package.json` but with Node test
+  files directly in a top-level `test/` or `tests/` folder (detect's `nodeTests`) gets them
+  proposed as the tests row, e.g. `node --test tests/*.test.mjs`; any other repo with no scripts
+  names its own. Never a bare `node --test`: in a set-up project it also runs the template's
+  `tools/*.test.mjs` in every gate;
 - **a migration target**: off unless the owner names one. A phase run applies migrations to it, so
   it must be a shared development database, never production; if named, fill `phaseRun.migrations`
   from `template/docs/guides/phase-run.md`'s "What your config sets";

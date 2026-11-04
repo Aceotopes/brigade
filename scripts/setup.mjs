@@ -180,6 +180,18 @@ function installOnlyChange(dir, git) {
   }
 }
 
+/** A Node test file directly inside a top-level test/ or tests/ folder: the folder, and the extension. */
+const NODE_TEST = /^(tests?)\/[^/]+\.test\.(mjs|js|cjs)$/;
+
+/**
+ * The repo's Node test files as `node --test` globs, one per folder and extension, sorted: what a
+ * repo without package.json runs its tests with. Only the top-level folders, never a bare
+ * `node --test`, which would also run the template's tools/*.test.mjs in a set-up project.
+ */
+export function nodeTestGlobs(files) {
+  return unique(files.map((f) => f.match(NODE_TEST)).filter(Boolean).map(([, folder, ext]) => `${folder}/*.test.${ext}`)).sort();
+}
+
 /** What is in `dir`: everything the plan reads. No writes, no network. */
 export function detect(dir) {
   const git = gitIn(dir);
@@ -249,6 +261,7 @@ export function detect(dir) {
     packageManagerPin: pkg?.packageManager ?? null,
     packageJson: pkg !== null,
     scripts: pkg?.scripts ?? {},
+    nodeTests: nodeTestGlobs(files),
     typescript,
     prisma: schema ? { provider: provider ?? "unknown" } : null,
     frontend,
@@ -274,10 +287,14 @@ const PLACEHOLDER_TEST = /no test specified/;
 /** What setup lists as the tests' unread paths (git globs): the docs folder, and the root's Markdown. */
 export const UNREAD = ["docs/**", "*.md"];
 
-/** The checks the stack already has: a typecheck, a lint, the tests and a build, as commands. */
+/**
+ * The checks the stack already has: a typecheck, a lint, the tests and a build, as commands. A repo
+ * without package.json has only its Node tests, if it has any (`nodeTests`).
+ */
 export function stackChecks(det) {
+  const nodeTests = !det.packageJson && det.nodeTests?.length ? [{ key: "test", label: "Tests", run: `node --test ${det.nodeTests.join(" ")}` }] : [];
   const pm = det.packageManager;
-  if (!pm) return [];
+  if (!pm) return nodeTests;
   const has = (name) => typeof det.scripts[name] === "string" && !PLACEHOLDER_TEST.test(det.scripts[name]);
   const out = [];
   if (has("typecheck")) out.push({ key: "typecheck", label: "Typecheck", run: RUN[pm]("typecheck") });
@@ -285,7 +302,7 @@ export function stackChecks(det) {
   if (has("lint")) out.push({ key: "lint", label: "Lint", run: RUN[pm]("lint") });
   if (has("build")) out.push({ key: "build", label: "Build", run: RUN[pm]("build") });
   if (has("test")) out.push({ key: "test", label: "Tests", run: RUN[pm]("test") });
-  return out;
+  return [...out, ...nodeTests];
 }
 
 /**
