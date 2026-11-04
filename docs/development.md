@@ -109,6 +109,11 @@ these steps:
     one; auto-update fetching a release is not yet seen. The decisions are in the
     [0.5.0 discovery doc](discovery/03-brigade-0.5.0.md). 0.5.1 (the same day) makes the notice's
     "older plugin" line name the catalog update first.
+13. **0.5.2, Brigade on itself** (2026-11-04): this repo adopted the workflow with its own setup
+    (merge mode). The root `tools/` is the released runner, pinned; `template/` is the next
+    version, and the runner refuses a session's edit to `tools/phase-run/`. After each release,
+    update the plugin and run `/update-workflow` here too. Ticket #9 (setup proposes Node test
+    gates) was built by a real phase run, which also found and fixed the tests' `PHASE_RUN` leak.
 
 ## Changing the workflow
 

@@ -4,7 +4,8 @@ What changed in each version, for `/update-workflow` to show a project before it
 template. Newest first. A version that changes a config file's format says so, and ships its
 migration in `scripts/migrations.mjs`.
 
-## Unreleased
+## 0.5.2 — 2026-11-04
+No config format change. The first version built by a phase run on Brigade itself.
 - **Setup proposes Node tests for a repo without `package.json`.** `detect` lists the test files
   directly inside a top-level `test/` or `tests/` folder (`*.test.mjs`, `.js`, `.cjs`) as
   `nodeTests`, and `propose` turns them into the tests row, e.g. `node --test tests/*.test.mjs`,

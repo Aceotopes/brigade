@@ -9,6 +9,16 @@ Each commit's entry goes on top, in the shape of `docs/_templates/devlog-entry.m
 message cites it (`devlog #N`). At each phase end, `node tools/doc-rotate.mjs` moves the closed
 entries into `docs/history/devlog/`.
 
+## #3 · chore · release 0.5.2, Brigade on itself
+
+**Built:**
+- `plugin.json` 0.5.2; CHANGELOG's Unreleased dated as 0.5.2 (Node test gates, the `PHASE_RUN` fix).
+- README Status and `docs/development.md` entry 13: Brigade is set up on itself, `tools/` pinned.
+**Decided:** the run's assumption 2 is kept (a lockfile without `package.json` keeps its rows, the
+Node tests row after them). Owner, 2026-11-04.
+**Verified:** the three suites and doc-check before the commit.
+**Next:** update the plugin here and run `/update-workflow`. **Record:** PR #10, devlog #2.
+
 ## #2 · feat · setup proposes Node test gates for a repo without package.json
 
 **Built:**

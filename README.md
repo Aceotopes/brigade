@@ -219,7 +219,9 @@ migrations, a browser check and the prose each session is given. Every key is de
 
 ## Status
 
-Version **0.5.1** (see [CHANGELOG.md](CHANGELOG.md)). It has been proven on throwaway repos:
+Version **0.5.2** (see [CHANGELOG.md](CHANGELOG.md)). Brigade is built with Brigade: its own
+setup adopted this repo in merge mode, and a real unattended phase run built a ticket of 0.5.2. It
+has been proven on throwaway repos:
 - **the out-of-step notice** (0.5.0): real Claude Code sessions in scratch repos showed the right
   line, or none, for a project older, newer, not set up, current, and inside a phase run; where a
   line was shown, Claude was told it and did not act on it;
