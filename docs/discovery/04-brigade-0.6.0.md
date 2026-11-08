@@ -1,5 +1,48 @@
 # Discovery: Brigade 0.6.0, measure and trim
 
+> **Addendum 2026-11-08 (the probe, #12):** run attended on Claude Code 2.1.319, in scratch git
+> repos where Brigade was the *installed* plugin, enabled at project scope.
+> - **(a) Yes: Brigade's hooks and skills survive the night's flags.**
+>   - **Flags:** `PHASE_RUN=1`, `--settings` turning off another plugin (`enabledPlugins`) and
+>     skill (`skillOverrides`), `--strict-mcp-config`, `--no-chrome`.
+>   - **Hooks:** the hooks debug log showed `version-check.mjs` (SessionStart), `guard-shell.mjs`
+>     (PreToolUse) and `stop-gate.mjs` (Stop), each labelled `(plugin brigade@aceotopes)` and run
+>     from the 0.5.2 cache, with status 0.
+>   - **Skills:** all five were listed.
+>   - **Trim:** the named plugin, skill and every MCP server were gone. Skills fell from 113 to 75,
+>     and the session's cost was about half the control's.
+> - **(b) No session type auto-updated a plugin**, for this locally served git catalog, in 2.1.319.
+>   The catalog was served as git, so installs were
+>   cached per version as from GitHub; a local *directory* catalog runs the plugin live from its
+>   folder and can't show this. Then 0.5.91 was published over an installed 0.5.90, with
+>   `autoUpdate: true`, and every session kept 0.5.90 and never refreshed the catalog
+>   (`lastUpdated` unchanged):
+>   - `-p` sessions;
+>   - `--bg` sessions (what a night runs);
+>   - two interactive sessions with a message sent, one with the catalog backdated a week.
+>
+>   A manual `claude plugin update` did move the install, and the **next** `--bg` session ran
+>   0.5.91's hooks.
+> - **(c) Not testable here:** with no auto-update firing, there was nothing for the `--settings`
+>   override to defer, so it wasn't tried.
+> - **(d) `claude plugin list --json` reads the installed version.** It lists every install, other
+>   projects' included, as `{id, version, scope, projectPath, projectEnabled}`. The runner takes
+>   the `brigade@…` row whose `projectPath` is the repo (a case-blind path compare on Windows),
+>   else a `scope: "user"` row.
+> - **Also:** a `--bg` launch in a folder never opened interactively fails "Workspace not trusted",
+>   which the runner already reports. `-p` didn't ask.
+>
+> **Changes:**
+> - D8 stands. The night override is kept as insurance, because the real GitHub catalog may behave
+>   differently (owner, 2026-11-08). The version-change stop has a proven job: an update the owner
+>   runs mid-run changes the next ticket's hooks.
+> - #25 reads the version as in (d), and loses its "no reliable way" fallback.
+> - D5 is answered.
+>
+> **Open:** auto-update itself was never seen to fire for a project-declared catalog, in any kind
+> of session. That bears on 0.5.0's D6 (auto-update in a project's settings), still "not yet seen
+> live" there. A real Brigade release will show it.
+
 **Rounds:** 2026-11-08. One grill with the owner, to port a runner upgrade one real project built
 and verified on its own runner ("2a, measure and trim": its spec 295, merged in its pull request 307,
 195 runner tests, proven on a real night). What 2a does, and why, was settled there and is not

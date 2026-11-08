@@ -9,6 +9,20 @@ Each commit's entry goes on top, in the shape of `docs/_templates/devlog-entry.m
 message cites it (`devlog #N`). At each phase end, `node tools/doc-rotate.mjs` moves the closed
 entries into `docs/history/devlog/`.
 
+## #6 · research · the 0.6.0 probe, Brigade under the night's flags
+
+**Built:**
+- Discovery doc 04's addendum: the four answers, from real sessions in scratch repos with the
+  installed plugin.
+- (a) Brigade's hooks and skills load under the night's flags, and trim works.
+- (b) No `-p`, `--bg` or interactive session auto-updated a plugin; a manual update moves the next
+  session.
+- (c) moot; (d) `claude plugin list --json`, matched on `projectPath`.
+**Decided:** D8 stands, with the override kept as insurance and the stop's job proven (owner).
+**Verified:** debug logs of 9 sessions, plus 2 interactive ones run by the owner; probe installs,
+catalog and cache removed afterwards.
+**Next:** the phase run on #11. **Record:** #12; #25 now names the version read.
+
 ## #5 · docs · 0.6.0 grilled and specced: measure and trim
 
 **Built:**
