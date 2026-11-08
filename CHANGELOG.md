@@ -10,6 +10,12 @@ migration in `scripts/migrations.mjs`.
   an optional `above` tier, and only Opus 5.5, Sonnet 5.5 and Fable 5.1 (the Haiku row is gone).
   A row missing a rate, or a `fallback` with no row, now stops it loading. A ticket's cost now
   includes its advisor passes, at the advisor's model.
+- **A ledger that outlives every run.** Each ticket, however it ends, appends one priced row to
+  `.phase-run/ledger.jsonl` (gitignored): its session, kind `night`, the stamp's Brigade version
+  and its cost by model. `node tools/phase-run/status.mjs --ledger` prints it by week, and
+  `--csv [file]` writes it as CSV. `.claude/workflow.json` accepts a new top-level `ledger`
+  section, `{ "attended"?, "weekStarts"? }` (a lowercase day, `monday` by default). A 0.5.x
+  plugin's hooks refuse that key, so update the plugin before adding it.
 
 ## 0.5.2 — 2026-11-04
 No config format change. The first version built by a phase run on Brigade itself.

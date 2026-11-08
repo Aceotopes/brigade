@@ -55,6 +55,39 @@ test("both loaders refuse a misplaced, malformed or catch-all unread list, namin
   }
 });
 
+// The ledger section is read by both loaders: the hooks' (the attended hook's switch) and the
+// runner's (the weekly view's first day).
+const withLedger = (ledger) => ({ version: 1, ledger });
+
+test("both loaders read the ledger section, defaulting to the attended hook on and weeks from Monday", () => {
+  const cases = [
+    [{ version: 1 }, { attended: true, weekStarts: "monday" }],
+    [withLedger({}), { attended: true, weekStarts: "monday" }],
+    [withLedger({ attended: false }), { attended: false, weekStarts: "monday" }],
+    [withLedger({ weekStarts: "sunday", note: "the owner's weeks" }), { attended: true, weekStarts: "sunday" }],
+  ];
+  for (const [data, ledger] of cases) {
+    assert.deepEqual(parseWorkflowConfig(data).ledger, ledger, `hooks: ${JSON.stringify(data)}`);
+    assert.deepEqual(parseRunConfig(data).ledger, ledger, `runner: ${JSON.stringify(data)}`);
+  }
+});
+
+test("both loaders refuse a malformed ledger section alike", () => {
+  const cases = [
+    [withLedger([]), /ledger must be an object/],
+    [withLedger("on"), /ledger must be an object/],
+    [withLedger({ weekStart: "monday" }), /: ledger has unknown key\(s\) weekStart; allowed: attended, weekStarts, note\.$/],
+    [withLedger({ attended: "yes" }), /ledger\.attended must be true or false/],
+    [withLedger({ weekStarts: "Monday" }), /ledger\.weekStarts must be a day in lowercase/],
+    [withLedger({ weekStarts: "mon" }), /ledger\.weekStarts must be a day in lowercase/],
+    [withLedger({ weekStarts: 1 }), /ledger\.weekStarts must be a day in lowercase/],
+  ];
+  for (const [data, error] of cases) {
+    assert.throws(() => parseWorkflowConfig(data), error, `hooks: ${JSON.stringify(data.ledger)}`);
+    assert.throws(() => parseRunConfig(data), error, `runner: ${JSON.stringify(data.ledger)}`);
+  }
+});
+
 test("Steak To Juan's example holds exactly what run.mjs hardcoded", () => {
   const stj = parseRunConfig(STJ);
   const lookup = (name) => ({ NEON_TEST_DATABASE_URL: "postgresql://u:p@localhost:5432/stj_test", NEON_DATABASE_URL: "postgresql://u:p@ep-cool-1-pooler.ap.aws.neon.tech/db" })[name];

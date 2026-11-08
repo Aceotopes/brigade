@@ -37,7 +37,8 @@ import { fileURLToPath } from "node:url";
 
 import { BROWSER_CHECK, fill, fillEnv, loadRunConfig, qaUrl, sessionEnv as pinnedEnv, targetFingerprint, targetUrl } from "./config.mjs";
 import { Screen, notify, ticketMinutes } from "./display.mjs";
-import { hookTime, loadPrices, stepKind, stepRules, ticketMetrics } from "./metrics.mjs";
+import { LEDGER_PATH, appendRow, ledgerRow, stampVersion } from "./ledger.mjs";
+import { hookTime, loadPrices, sessionCost, stepKind, stepRules, ticketMetrics } from "./metrics.mjs";
 import { DEFAULT_RULES as DEFAULT_SIZE, measureTicket as ticketSize } from "./ticket-size.mjs";
 import * as docConfig from "../doc-config.mjs";
 
@@ -1462,14 +1463,44 @@ function saveResults(run) {
   writeFileSync(resultsFile(run), `${JSON.stringify(run.all, null, 2)}\n`);
 }
 
-/** Records one ticket's result: in this run's list, and on disk at once. */
-function recordResult(run, result) {
+/**
+ * Records one ticket's result: its night row in the ledger, then the result in this run's list
+ * and on disk at once. Every way a ticket ends comes through here: built, parked, failed, and the
+ * runner's own error.
+ */
+function recordResult(run, result, at = Date.now()) {
   const stamped = { ...result, runId: run.runId, reported: false };
+  recordNight(run, stamped, at);
   run.results.push(stamped);
   run.all.push(stamped);
   saveResults(run);
   return stamped;
 }
+
+/**
+ * The ticket's night row (ledger.mjs): its session priced whole from the transcript, so a crash
+ * is priced as well as a measured result. A run keeps a ledger only when main() gave it a file.
+ * A row that cannot be written marks the result "ledger: not written" and never stops the run.
+ */
+function recordNight(run, result, at) {
+  if (!run.ledgerFile) return;
+  try {
+    const live = run.ticketSession?.number === result.number ? run.ticketSession : null;
+    if (!live) throw new Error("no session was started for this ticket");
+    // `transcript` is set only by tests; the runner finds the session's own file.
+    const transcript = live.transcript ?? transcriptPath(live.sessionId);
+    // No transcript: the session never ran (or its file is elsewhere). A $0 row would count a session that cost nothing.
+    if (!transcript || !existsSync(transcript)) throw new Error(`no transcript was found for session ${live.sessionId}`);
+    const cost = sessionCost(transcript, run.prices ?? loadPrices());
+    appendRow(run.ledgerFile, ledgerRow({ at, sessionId: live.sessionId, transcript, kind: "night", ticket: result.number, branch: run.branch, brigade: run.brigade ?? null, cost }));
+  } catch (error) {
+    result.ledger = "not written";
+    result.ledgerError = String(error?.message ?? error);
+  }
+}
+
+/** The report's line for a result whose night row was lost, or nothing. */
+const ledgerNote = (r) => (r.ledger === "not written" ? [`⚠ ledger: not written (${r.ledgerError ?? "no reason recorded"}). This ticket's cost is missing from .phase-run/ledger.jsonl.`] : []);
 
 /** The pull request's body: every ticket built on the branch, whichever night built it. */
 function pullRequestBody(all, options) {
@@ -1645,6 +1676,8 @@ async function runTicket(ticket, options, run) {
   const base = git("rev-parse", "HEAD");
   const startedAt = Date.now();
   let sessionId = randomUUID();
+  // The session the ticket's night row prices, however the ticket ends (recordNight).
+  run.ticketSession = { number: n, sessionId };
   const env = {
     ...sessionEnv(),
     PHASE_RUN: "1",
@@ -1694,6 +1727,7 @@ async function runTicket(ticket, options, run) {
 
   for (let round = 0; ; round += 1) {
     sessionId = call.sessionId ?? sessionId;
+    run.ticketSession.sessionId = sessionId;
     if (call.gaveUp) {
       await park(ticket, base, "failure", `${call.gaveUp} Nothing is wrong with the ticket itself; the run stopped here.`, run, measured(facts));
       return "stop";
@@ -1874,6 +1908,7 @@ function report(run, options, remaining, { final = true } = {}) {
     if (r.screenshots) out.push(`- Screenshots: \`${r.screenshots}\``);
     if (r.session?.denials.length) out.push(`- Commands the session was refused (${r.session.denials.length}): ${r.session.denials.slice(0, 6).map((d) => `\`${String(d).slice(0, 60)}\``).join(", ")}`);
     for (const note of r.notes) out.push(`- ⚠ ${note}`);
+    for (const note of ledgerNote(r)) out.push(`- ${note}`);
     if (r.session?.watch) out.push(`- The whole session, to read back: \`claude attach ${r.session.watch}\``);
     out.push(`- Effort: ${effort(r.session)}`, "");
   }
@@ -1897,11 +1932,11 @@ function report(run, options, remaining, { final = true } = {}) {
       : "";
 
   if (parked.length) out.push("### Parked: your decision is needed", "");
-  for (const r of parked) out.push(`**#${r.number} ${r.title}**`, "", r.detail, "", r.keptOn ? `Work kept on \`${r.keptOn}\`.` : "", unposted(r), "");
+  for (const r of parked) out.push(`**#${r.number} ${r.title}**`, "", r.detail, "", r.keptOn ? `Work kept on \`${r.keptOn}\`.` : "", unposted(r), ...ledgerNote(r), "");
 
   if (failed.length) out.push("### Failed", "");
   for (const r of failed) {
-    out.push(`**#${r.number} ${r.title}**`, "", r.detail, "", r.keptOn ? `Work kept on \`${r.keptOn}\`.` : "", unposted(r));
+    out.push(`**#${r.number} ${r.title}**`, "", r.detail, "", r.keptOn ? `Work kept on \`${r.keptOn}\`.` : "", unposted(r), ...ledgerNote(r));
     if (r.leftOnTarget?.length) out.push(`🚨 ${targetName()} holds ${r.leftOnTarget.join(", ")} from this ticket, which is not on the phase branch.`);
     if (r.session?.watch) out.push(`The whole session, to read back: \`claude attach ${r.session.watch}\``);
     out.push(`Effort: ${effort(r.session)}`, "");
@@ -1994,6 +2029,9 @@ async function main() {
     carried: [], // an earlier run's that never reached a report
     migrationsApplied: new Set(),
     pullRequest: null,
+    ledgerFile: join(ROOT, LEDGER_PATH), // one night row per ticket (recordNight)
+    brigade: stampVersion(ROOT), // the runner that judges the night: the project's stamp, null with none
+    ticketSession: null,
   };
   mkdirSync(run.dir, { recursive: true });
   run.all = loadResults(resultsFile(run));

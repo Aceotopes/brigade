@@ -17,6 +17,7 @@ import { fileURLToPath } from "node:url";
 
 import { Screen, makePaint, progressText, resultLines, scoreboard, shortStat, shortTitle, visible } from "./display.mjs";
 import { PRICES_STALE_DAYS, hookTime, loadPrices, pricesAgeDays, sessionCost, sessionCostFrom, stepKind, stepRules, ticketMetrics, toolTime } from "./metrics.mjs";
+import { appendRow, latestPerSession, ledgerCsv, ledgerRow, ledgerText, readLedger, stampVersion, weeklyView, weekOf } from "./ledger.mjs";
 import { readReceipt, receiptHolds, receiptPath, treeKey } from "./receipt.mjs";
 import { promptValues, report } from "./run.mjs";
 import { quietOutput } from "./stop-tests.mjs";
@@ -210,6 +211,169 @@ test("a ticket's minutes: the measured waits, the hook and the gates, and Claude
 
   const metrics = ticketMetrics({ transcript: file, startedAt: start, endedAt: start + 80 * 60_000, gatesMs: 7 * 60_000, hookMs: 10 * 60_000, prices });
   assert.deepEqual(metrics.minutes, { total: 80, claude: 51, tests: 5, checks: 0, browser: 3, waiting: 4, reviewing: 0, hook: 10, gates: 7 });
+});
+
+// ------------------------------------------------------------------- ledger
+
+test("a session's cost is split by model: an advisor pass under the advisor's model", () => {
+  const total = priced([reply("r1", ADVISED), reply("r2", { input_tokens: 1_000_000 })]);
+  // Own: $0.1280356 + 1M in × $4; advisor: $1.85678 (the advisor test above)
+  assert.deepEqual(total.byModel, {
+    m: { requests: 3, nanoUsd: 4_128_035_600, costUsd: 4.13 },
+    adv: { requests: 1, nanoUsd: 1_856_780_000, costUsd: 1.86 },
+  });
+});
+
+/** A fixture ledger row: a session's whole cost at `at`, all of it at one model. */
+const ledgerFixture = (at, sessionId, kind, costUsd, model = "claude-opus-5-5") => ({
+  at: at.toISOString(),
+  sessionId,
+  transcript: `/t/${sessionId}.jsonl`,
+  kind,
+  ticket: kind === "night" ? 14 : null,
+  branch: kind === "night" ? "phase-x" : null,
+  brigade: "0.6.0",
+  costUsd,
+  tokens: { calls: 1, input: 1, cacheWrite: 0, cacheRead: 0, output: 1 },
+  peakContext: 1,
+  byModel: { [model]: { requests: 1, costUsd } },
+});
+// Local noon, so a fixture's day is the same in every time zone. 2026-11-08 is a Sunday.
+const noon = (month, day, hour = 12) => new Date(2026, month - 1, day, hour);
+const FIXTURE_LEDGER = [
+  ledgerFixture(noon(11, 3, 9), "night-a", "night", 0.4), // superseded by its later row
+  ledgerFixture(noon(11, 4), "attended-b", "attended", 0.5, "claude-sonnet-5-5"),
+  ledgerFixture(noon(11, 3, 15), "night-a", "night", 1),
+  ledgerFixture(noon(11, 5), "probe-c", "probe", 0.25, "claude-fable-5-1"),
+  ledgerFixture(noon(11, 10), "night-d", "night", 2),
+];
+
+test("a ledger row has the agreed shape, from a session's cost, the session and the stamp", () => {
+  const cost = priced([reply("r1", ADVISED)]);
+  const row = ledgerRow({ at: Date.UTC(2026, 10, 8, 1), sessionId: "s1", transcript: "/t/s1.jsonl", kind: "night", ticket: 14, branch: "phase-x", brigade: "0.6.0", cost });
+  assert.deepEqual(Object.keys(row), ["at", "sessionId", "transcript", "kind", "ticket", "branch", "brigade", "costUsd", "tokens", "peakContext", "byModel"]);
+  assert.equal(row.at, "2026-11-08T01:00:00.000Z");
+  assert.equal(row.costUsd, 1.98);
+  assert.deepEqual(row.tokens, { calls: 1, input: 4, cacheWrite: 4360, cacheRead: 266_038, output: 2287 });
+  assert.deepEqual(row.byModel, { m: { requests: 2, nanoUsd: 128_035_600, costUsd: 0.13 }, adv: { requests: 1, nanoUsd: 1_856_780_000, costUsd: 1.86 } });
+});
+
+test("a model's cost is summed across rows exactly before it is rounded", () => {
+  // Three sessions of $0.004 each at one model: rounding each row first would show $0.00.
+  const tiny = (id) => ({ ...ledgerFixture(noon(11, 3), id, "night", 0), byModel: { m: { requests: 1, nanoUsd: 4_000_000, costUsd: 0 } } });
+  assert.deepEqual(weeklyView([tiny("a"), tiny("b"), tiny("c")])[0].models, { m: 0.01 });
+});
+
+test("rows are appended one line each, and a torn line is skipped on reading", () => {
+  const file = join(temp("phase-run-ledger-"), ".phase-run", "ledger.jsonl");
+  appendRow(file, FIXTURE_LEDGER[0]);
+  appendFileSync(file, '{"at":"2026-11-0');
+  appendFileSync(file, "\n");
+  appendRow(file, FIXTURE_LEDGER[1]);
+  assert.deepEqual(readLedger(file), FIXTURE_LEDGER.slice(0, 2));
+  assert.deepEqual(readLedger(join(temp("phase-run-ledger-"), "none.jsonl")), []);
+});
+
+test("a night row's version is the project's stamp, and null with no stamp", () => {
+  const stamped = temp("phase-run-stamp-");
+  mkdirSync(join(stamped, ".claude"));
+  writeFileSync(join(stamped, ".claude", "workflow-version.json"), JSON.stringify({ plugin: "brigade", version: "0.6.0" }));
+  assert.equal(stampVersion(stamped), "0.6.0");
+  assert.equal(stampVersion(temp("phase-run-stamp-")), null);
+  const broken = temp("phase-run-stamp-");
+  mkdirSync(join(broken, ".claude"));
+  writeFileSync(join(broken, ".claude", "workflow-version.json"), "{ not json");
+  assert.equal(stampVersion(broken), null);
+});
+
+test("the views keep each session's latest row by `at`, whatever order the rows were written in", () => {
+  const latest = latestPerSession(FIXTURE_LEDGER);
+  assert.deepEqual(latest.map((r) => [r.sessionId, r.costUsd]), [["night-a", 1], ["attended-b", 0.5], ["probe-c", 0.25], ["night-d", 2]]);
+  assert.deepEqual(latestPerSession([...FIXTURE_LEDGER].reverse()).map((r) => r.costUsd), [1, 0.5, 0.25, 2]);
+});
+
+test("a week starts on weekStarts, Monday by default, on the local date", () => {
+  assert.equal(weekOf(noon(11, 8)), "2026-11-02"); // a Sunday ends the Monday week
+  assert.equal(weekOf(noon(11, 9)), "2026-11-09");
+  assert.equal(weekOf(noon(11, 8), "sunday"), "2026-11-08");
+  assert.equal(weekOf(noon(11, 7), "sunday"), "2026-11-01");
+  assert.equal(weekOf(noon(11, 4), "wednesday"), "2026-11-04");
+});
+
+test("the weekly view counts by kind and by model; a kind not night or attended counts under other", () => {
+  const [first, second] = weeklyView(FIXTURE_LEDGER);
+  assert.deepEqual(first, {
+    week: "2026-11-02",
+    sessions: 3,
+    costUsd: 1.75,
+    kinds: { night: { sessions: 1, costUsd: 1 }, attended: { sessions: 1, costUsd: 0.5 }, other: { sessions: 1, costUsd: 0.25 } },
+    models: { "claude-opus-5-5": 1, "claude-sonnet-5-5": 0.5, "claude-fable-5-1": 0.25 },
+  });
+  assert.equal(second.week, "2026-11-09");
+  assert.equal(second.kinds.night.costUsd, 2);
+  const text = ledgerText(FIXTURE_LEDGER).join("\n");
+  assert.match(text, /4 session\(s\), \$3\.75 at API rates/);
+  assert.match(text, /Week of 2026-11-02 · 3 session\(s\) · \$1\.75/);
+  assert.match(text, /other\s+1\s+\$0\.25/);
+  assert.match(text, /by model\s+claude-opus-5-5 \$1\.00 · claude-sonnet-5-5 \$0\.50 · claude-fable-5-1 \$0\.25/);
+  assert.match(ledgerText([]).join("\n"), /no rows yet/);
+});
+
+test("the CSV has each session's latest row, its group under kind and its own label kept", () => {
+  const rows = [...FIXTURE_LEDGER, { ...ledgerFixture(noon(11, 6), "comma", "attended", 0.1), transcript: 'C:\\a, "b".jsonl' }];
+  const [header, ...lines] = ledgerCsv(rows).trimEnd().split("\n");
+  assert.equal(header, "at,week,kind,label,sessionId,ticket,branch,brigade,costUsd,calls,input,cacheWrite,cacheRead,output,peakContext,byModel,transcript");
+  assert.equal(lines.length, 5);
+  const probe = lines.find((line) => line.includes("probe-c")).split(",");
+  assert.deepEqual(probe.slice(1, 5), ["2026-11-02", "other", "probe", "probe-c"]);
+  assert.match(lines.find((line) => line.includes("night-a")), /,night,night,night-a,14,phase-x,0\.6\.0,1,1,1,0,0,1,1,claude-opus-5-5=1,/);
+  assert.match(lines.find((line) => line.includes(",comma,")), /,"C:\\a, ""b""\.jsonl"$/);
+  assert.equal(ledgerCsv(rows, { weekStarts: "sunday" }).split("\n")[1].split(",")[1], "2026-11-01");
+});
+
+/** A project with this folder's runner copied in and the fixture ledger in its .phase-run/. */
+function ledgerProject(ledger, rest = {}) {
+  const dir = temp("phase-run-status-");
+  for (const name of ["status.mjs", "display.mjs", "metrics.mjs", "ledger.mjs", "config.mjs", "ticket-size.mjs", "prices.json"]) {
+    mkdirSync(join(dir, "tools", "phase-run"), { recursive: true });
+    writeFileSync(join(dir, "tools", "phase-run", name), readFileSync(join(HERE, name), "utf8"));
+  }
+  mkdirSync(join(dir, ".claude"));
+  writeFileSync(join(dir, ".claude", "workflow.json"), JSON.stringify({ version: 1, ...rest, ...(ledger && { ledger }) }));
+  mkdirSync(join(dir, ".phase-run"));
+  writeFileSync(join(dir, ".phase-run", "ledger.jsonl"), lines(FIXTURE_LEDGER));
+  const status = (...args) => spawnSync(process.execPath, [join(dir, "tools/phase-run/status.mjs"), ...args], { cwd: dir, encoding: "utf8", env: { ...process.env, NO_COLOR: "1" } });
+  return { dir, status };
+}
+
+test("status --ledger prints the weekly view, from the config's weekStarts", () => {
+  const monday = ledgerProject().status("--ledger");
+  assert.equal(monday.status, 0, monday.stderr);
+  assert.match(monday.stdout, /Weeks start on Monday/);
+  assert.match(monday.stdout, /Week of 2026-11-02 · 3 session\(s\) · \$1\.75/);
+  const sunday = ledgerProject({ weekStarts: "sunday" }).status("--ledger");
+  assert.match(sunday.stdout, /Weeks start on Sunday/);
+  assert.match(sunday.stdout, /Week of 2026-11-01 · 3 session\(s\) · \$1\.75/);
+  assert.match(sunday.stdout, /Week of 2026-11-08 · 1 session\(s\) · \$2\.00/);
+  // A mistake elsewhere in the file is preflight's to report: the weeks still start on Sunday.
+  const elsewhere = ledgerProject({ weekStarts: "sunday" }, { phaseRun: { gatez: [] } }).status("--ledger");
+  assert.equal(elsewhere.status, 0, elsewhere.stderr);
+  assert.match(elsewhere.stdout, /Weeks start on Sunday/);
+  const broken = ledgerProject({ weekStarts: "Sunday" }).status("--ledger");
+  assert.match(broken.stderr, /ledger\.weekStarts must be a day in lowercase/);
+  assert.match(broken.stdout, /Weeks start on Monday/);
+});
+
+test("status --csv prints the CSV, and --csv <file> writes it", () => {
+  const project = ledgerProject();
+  const printed = project.status("--csv");
+  assert.equal(printed.status, 0, printed.stderr);
+  assert.equal(printed.stdout, ledgerCsv(FIXTURE_LEDGER));
+  assert.equal(project.status("--csv", "-").stdout, ledgerCsv(FIXTURE_LEDGER));
+  const written = project.status("--csv", "out/ledger.csv");
+  assert.equal(written.status, 0, written.stderr);
+  assert.equal(readFileSync(join(project.dir, "out", "ledger.csv"), "utf8"), ledgerCsv(FIXTURE_LEDGER));
+  assert.match(written.stdout, /4 row\(s\)/);
 });
 
 test("prices.json lists Opus 5.5, Sonnet 5.5 and Fable 5.1 only, five rates each, Opus as the fallback", () => {

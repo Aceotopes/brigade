@@ -22,6 +22,10 @@
 //                                                   (ticket-size.mjs); left out, Brigade's defaults
 //   }
 //
+// The top-level `ledger` section, `{ "attended"?, "weekStarts"? }` (ledger.mjs), is read here too,
+// with the hooks' refusals: `attended` (default true) is the attended hook's switch, and
+// `weekStarts` (a lowercase day, default "monday") cuts the ledger's weekly view.
+//
 // Placeholders, each allowed only where it makes sense (a gate cannot reach the migration target):
 // {base} the ticket's base commit, {N} the ticket number, {qaUrl} the QA database's address,
 // {targetUrl} the migration target's address, {name} a migration's name. In `qa.url` only,
@@ -38,6 +42,11 @@ import { RULE_KINDS } from "./ticket-size.mjs";
 
 export const CONFIG_PATH = ".claude/workflow.json";
 export const BROWSER_CHECK = "browser-check";
+
+/** The days a ledger week may start on, in Date.getDay() order. hooks/workflow-config.mjs keeps the same list. */
+export const WEEK_DAYS = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
+/** The top-level `ledger` section's defaults: the attended hook on, weeks from Monday. */
+export const DEFAULT_LEDGER = { attended: true, weekStarts: "monday" };
 
 const KEYS = {
   phaseRun: ["prompt", "preflight", "ports", "qa", "sessionEnv", "strayProcess", "gates", "browserCheck", "migrations", "alwaysInScope", "permissions", "steps", "ticketSize"],
@@ -129,7 +138,22 @@ export function parseRunConfig(data) {
       })),
       "stopGate.checks",
     ),
+    ledger: parseLedger(data?.ledger),
   };
+}
+
+/**
+ * The top-level `ledger` section, `{ attended?, weekStarts? }`: checked here as the hooks check it
+ * (hooks/workflow-config.mjs), with the same refusals, because the two cannot share code.
+ */
+export function parseLedger(ledger) {
+  if (ledger === undefined) return { ...DEFAULT_LEDGER };
+  keys(ledger, ["attended", "weekStarts", "note"], "ledger"); // "note" listed, so the refusal reads as the hooks' does
+  if (ledger.attended !== undefined && typeof ledger.attended !== "boolean") throw new Error("ledger.attended must be true or false.");
+  if (ledger.weekStarts !== undefined && !WEEK_DAYS.includes(ledger.weekStarts)) {
+    throw new Error(`ledger.weekStarts must be a day in lowercase, one of ${WEEK_DAYS.join(", ")} (it is ${JSON.stringify(ledger.weekStarts)}).`);
+  }
+  return { attended: ledger.attended ?? DEFAULT_LEDGER.attended, weekStarts: ledger.weekStarts ?? DEFAULT_LEDGER.weekStarts };
 }
 
 /**

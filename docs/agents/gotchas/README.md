@@ -14,4 +14,5 @@ plain. The index below is generated.
 
 **[Gotchas — Phase measure-trim: Brigade 0.6.0, measure and trim](measure-trim.md)**
 - `#13` pricing a session, `template/tools/phase-run/metrics.mjs` `sessionCost` / `sessionCostFrom`
+- `#14` the ledger, `template/tools/phase-run/ledger.mjs` `ledgerRow` / `appendRow`, `run.mjs` `recordNight`
 <!-- generated:end gotchas -->

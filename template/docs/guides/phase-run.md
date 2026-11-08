@@ -220,6 +220,13 @@ off). Piped to a file, or with `NO_COLOR`, the run prints plain lines instead. `
 plain and keeps every five-minute line. From any other terminal, `node tools/phase-run/status.mjs`
 prints the same table, and `status.mjs <ticket>` one ticket's full card.
 
+**The ledger outlives every run.** Each ticket, however it ends, adds one priced row to
+`.phase-run/ledger.jsonl` (gitignored): its session, its kind (`night`), the Brigade version that
+judged it, its cost by model. `status.mjs --ledger` prints it by week (by kind, by model), and
+`status.mjs --csv [file]` writes it as CSV, or prints it. Weeks start on `ledger.weekStarts` in
+`.claude/workflow.json` (a lowercase day, `monday` by default). A row that could not be written
+says "ledger: not written" in the report.
+
 ## Before the first night of a phase
 
 1. The phase is grilled, its prototype approved, its spec and tickets published.

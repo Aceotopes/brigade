@@ -25,3 +25,16 @@ listed in the gotchas index, `docs/agents/gotchas/README.md`.
   is counted again. pinned: `template/tools/phase-run/measure.test.mjs`.
 - Edit `template/tools/phase-run/`, never the root `tools/phase-run/`: that is the pinned released
   runner, moved only by `/update-workflow`.
+
+**`#14` — the ledger, `template/tools/phase-run/ledger.mjs` `ledgerRow` / `appendRow`, `run.mjs` `recordNight` (built 2026-11-08):**
+- A row is the session's **whole** cost at `at`, never an increment: the views keep each session's
+  latest row and drop the rest. A writer reading incrementally (`sessionCostFrom`) keeps running
+  totals (cost, per model, tokens, peak as a max) and writes them. pinned: `template/tools/phase-run/measure.test.mjs`.
+- `assert.throws(fn, /regex/)` matches against `String(error)`, `"Error: …"`: a `^` anchor fails.
+- The runner writes only when `run.ledgerFile` is set, and only `main()` sets it. A test that calls
+  `recordResult` must give its temp run its own `ledgerFile`, or it writes nothing (never the repo's
+  real ledger).
+- `config.mjs` must not import `ledger.mjs`: `measure.test.mjs`'s stop-tests project copies a fixed
+  list of runner files, and `ledger.mjs` imports `config.mjs`, not the other way.
+- The `ledger` section's refusals live in both loaders, word for word; change both, and
+  `tests/phase-run-config.test.mjs` runs each case through both.

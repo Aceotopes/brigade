@@ -9,6 +9,19 @@ Each commit's entry goes on top, in the shape of `docs/_templates/devlog-entry.m
 message cites it (`devlog #N`). At each phase end, `node tools/doc-rotate.mjs` moves the closed
 entries into `docs/history/devlog/`.
 
+## #8 · feat · the ledger: night rows and views
+
+**Built:**
+- `ledger.mjs`: the row shape, append, read, each session's latest row, weeks, by kind and model, CSV.
+- The runner writes a priced `night` row through `recordResult`, so built, parked, failed and a
+  crash each leave one; a failed append marks the result "ledger: not written" and the run goes on.
+- `brigade` is the project's stamp version, `null` without one; cost gains `byModel`.
+- Both loaders accept `ledger: {attended?, weekStarts?}` with the same refusals (Monday default).
+- `status.mjs --ledger` (weekly view) and `--csv [file]`.
+**Verified:** the new ledger, runner and loader tests; the stop-check suite; code review (4 fixes).
+Backend only: no browser check.
+**Next:** #15, the attended hook. **Record:** implementation log 003.
+
 ## #7 · feat · pricing: five rates, three models, each request on its own
 
 **Built:**

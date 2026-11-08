@@ -25,7 +25,7 @@ const RUN = { PHASE_RUN: "1" };
 // ------------------------------------------------------------------- the loader
 
 test("both shipped configs load: the blank template and Steak To Juan's example", () => {
-  assert.deepEqual(parseWorkflowConfig(JSON.parse(BLANK)), { rules: [], checks: [], wrappers: ["pnpm exec", "pnpm dlx", "pnpm", "npx"] });
+  assert.deepEqual(parseWorkflowConfig(JSON.parse(BLANK)), { rules: [], checks: [], wrappers: ["pnpm exec", "pnpm dlx", "pnpm", "npx"], ledger: { attended: true, weekStarts: "monday" } });
   const stj = parseWorkflowConfig(JSON.parse(STJ));
   assert.equal(stj.rules.length, 4);
   assert.deepEqual(stj.checks.map((c) => c.label), ["Typecheck", "Lint", "The tests your changes touch"]);

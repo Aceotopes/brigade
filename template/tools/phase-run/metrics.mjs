@@ -94,6 +94,9 @@ function requestCost(model, usage, prices) {
 
 const isAdvisor = (iteration) => iteration.type === "advisor_message";
 
+/** Nano-dollars to dollars and cents, rounded only here. */
+const dollars = (nanoUsd) => Math.round(nanoUsd / 1e7) / 100;
+
 /** The requests one response made: its iterations when it lists them (an advisor pass at its own model), else its usage. */
 function requestsOf(message) {
   const usage = message.usage;
@@ -105,14 +108,22 @@ function requestsOf(message) {
   return iterations.map((it) => ({ model: it.model ?? model, usage: it, advisor: isAdvisor(it) }));
 }
 
-const emptyCost = () => ({ nanoUsd: 0, costUsd: 0, calls: 0, advisorCalls: 0, input: 0, cacheWrite: 0, cacheRead: 0, output: 0, peakContext: 0 });
+const emptyCost = () => ({ nanoUsd: 0, costUsd: 0, calls: 0, advisorCalls: 0, input: 0, cacheWrite: 0, cacheRead: 0, output: 0, peakContext: 0, byModel: {} });
 
-/** Adds one response: its cost, the session's own tokens (top-level usage), and its context unless it called the advisor. */
+/**
+ * Adds one response: its cost (in all, and under each request's model, so an advisor pass counts
+ * under the advisor's), the session's own tokens (top-level usage), and its context unless it
+ * called the advisor.
+ */
 function addResponse(total, message, prices, ownPeak) {
   const usage = message.usage;
   total.calls += 1;
   for (const request of requestsOf(message)) {
-    total.nanoUsd += requestCost(request.model, request.usage, prices);
+    const nano = requestCost(request.model, request.usage, prices);
+    total.nanoUsd += nano;
+    const model = (total.byModel[request.model] ??= { requests: 0, nanoUsd: 0, costUsd: 0 });
+    model.requests += 1;
+    model.nanoUsd += nano;
     if (request.advisor) total.advisorCalls += 1;
   }
   total.input += usage.input_tokens ?? 0;
@@ -194,7 +205,8 @@ export function sessionCostFrom(transcript, prices, state = { files: {} }) {
     }
     files[file] = { offset: read.next, seen: [...seen] };
   });
-  cost.costUsd = Math.round(cost.nanoUsd / 1e7) / 100;
+  cost.costUsd = dollars(cost.nanoUsd);
+  for (const model of Object.values(cost.byModel)) model.costUsd = dollars(model.nanoUsd);
   return { cost, state: { files } };
 }
 

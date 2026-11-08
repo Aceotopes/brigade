@@ -8,6 +8,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { BROWSER_CHECK, fill, loadRunConfig, parseRunConfig, qaUrl, sessionEnv, targetFingerprint, targetUrl } from "./config.mjs";
+import { readLedger } from "./ledger.mjs";
 import { QUIET_MS, SETTLE_MS, applyMigrations, folderTrusted, gotchasFile, holdReason, loadResults, outsideAreas, projectGates, promptValues, pullRequestBody, recordResult, render, report, runSession, screenshotsSince, sessionSettings, turnOver } from "./run.mjs";
 
 const options = { minutes: 120, waitHours: 6, print: true, spec: 179 };
@@ -84,6 +85,67 @@ test("each result is written to results.json as it is recorded", () => {
   assert.equal(saved[0].number, 180);
   assert.equal(saved[0].runId, run.runId);
   assert.equal(saved[0].reported, false);
+});
+
+/** A run that keeps a ledger, with ticket 14's session live and its transcript written. */
+function ledgerRun({ brigade = "0.6.0", ledgerFile } = {}) {
+  const run = tempRun();
+  run.ledgerFile = ledgerFile ?? join(run.dir, "ledger.jsonl");
+  run.brigade = brigade;
+  run.prices = { checkedOn: "2026-11-07", fallback: "m", perMillion: { m: { input: 5, cacheWrite5m: 6, cacheWrite1h: 10, cacheRead: 0.5, output: 25 } } };
+  const transcript = join(run.dir, "s14.jsonl");
+  writeFileSync(transcript, `${JSON.stringify({ type: "assistant", message: { id: "r1", model: "claude-opus-5-5", usage: { input_tokens: 1_000_000 } } })}\n`);
+  run.ticketSession = { number: 14, sessionId: "s14", transcript };
+  return run;
+}
+
+const AT = Date.UTC(2026, 10, 8, 2, 30);
+const builtResult = { number: 14, title: "The ledger", status: "built", hash: "abc1234", assumptions: [], runByHand: [], foundElsewhere: [], handedForward: [], notes: [], outside: [], migrations: [], destructive: [], session: { denials: [], minutes: 9, turns: 3, calls: 1, metrics: { costUsd: 5, peakContext: 1_000_000 } } };
+const crashResult = { number: 14, title: "The ledger", status: "failed", detail: "The runner stopped on an error of its own", keptOn: null, session: null };
+
+test("a measured result and a crash each leave one priced night row in the ledger", () => {
+  for (const result of [builtResult, crashResult]) {
+    const run = ledgerRun();
+    const stamped = recordResult(run, result, AT);
+    assert.equal(stamped.ledger, undefined);
+    const rows = readLedger(run.ledgerFile);
+    assert.equal(rows.length, 1, result.status);
+    assert.deepEqual(
+      { ...rows[0], tokens: undefined, byModel: undefined },
+      { at: "2026-11-08T02:30:00.000Z", sessionId: "s14", transcript: run.ticketSession.transcript, kind: "night", ticket: 14, branch: "phase-test", brigade: "0.6.0", costUsd: 5, tokens: undefined, peakContext: 1_000_000, byModel: undefined },
+    );
+    assert.deepEqual(rows[0].byModel, { "claude-opus-5-5": { requests: 1, nanoUsd: 5e9, costUsd: 5 } }); // 1M in × $5: an unlisted model at the fallback
+  }
+});
+
+test("a night row records a null version when the project has no stamp", () => {
+  const run = ledgerRun({ brigade: null });
+  recordResult(run, crashResult, AT);
+  assert.equal(readLedger(run.ledgerFile)[0].brigade, null);
+});
+
+test("a failed append marks the result 'ledger: not written', and the result is still saved and reported", () => {
+  const run = ledgerRun();
+  run.ledgerFile = run.dir; // a folder: appending to it fails
+  const built = recordResult(run, builtResult, AT);
+  assert.equal(built.ledger, "not written");
+  assert.equal(loadResults(join(run.dir, "results.json"))[0].ledger, "not written");
+  assert.match(report(run, options, []), /ledger: not written/);
+
+  const unstarted = ledgerRun();
+  unstarted.ticketSession = null; // the runner failed before the ticket's session started
+  const failed = recordResult(unstarted, { ...crashResult, number: 15 }, AT);
+  assert.equal(failed.ledger, "not written");
+  assert.match(failed.ledgerError, /no session/);
+  assert.match(report(unstarted, options, []), /ledger: not written/);
+
+  // A session that never wrote a transcript: no $0 row counting a session that never ran.
+  const silent = ledgerRun();
+  silent.ticketSession.transcript = join(silent.dir, "never-written.jsonl");
+  const crashed = recordResult(silent, crashResult, AT);
+  assert.equal(crashed.ledger, "not written");
+  assert.match(crashed.ledgerError, /no transcript was found for session s14/);
+  assert.deepEqual(readLedger(silent.ledgerFile), []);
 });
 
 test("the pull request lists every ticket built on the branch, across nights", () => {

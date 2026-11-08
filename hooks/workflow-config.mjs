@@ -15,7 +15,9 @@
 //         "unread": ["docs/**", "*.md"] } ] },   git globs the tests never read: an edit there keeps the receipt
 //     "stack": { "language", "framework", "packageManager", "database", "migrations", "testDatabase",
 //                "storage": "<any text>", "other": ["<any text>"] },   what the project is built with
-//     "roadmap": { "artifact": "<the roadmap page's link>" }
+//     "roadmap": { "artifact": "<the roadmap page's link>" },
+//     "ledger": { "attended": true, "weekStarts": "monday" }   the attended ledger hook's switch, and the
+//                                                               day the ledger's weekly view starts on
 //   }
 //
 // `stack` is the project's declared stack, written by /setup-workflow and changed by its refresh; an
@@ -36,6 +38,10 @@ const CHECK_KEYS = ["label", "run", "receipt", "quiet", "unread", "note"];
 export const STACK_KEYS = ["language", "framework", "packageManager", "database", "migrations", "testDatabase", "storage", "other"];
 /** What the guard strips before a rule is tested, when the project names none: the wrappers it always knew. */
 export const DEFAULT_WRAPPERS = ["pnpm exec", "pnpm dlx", "pnpm", "npx"];
+/** The days a ledger week may start on; template/tools/phase-run/config.mjs keeps the same list. */
+const WEEK_DAYS = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
+/** The `ledger` section's defaults: the attended hook on, weeks from Monday. */
+export const DEFAULT_LEDGER = { attended: true, weekStarts: "monday" };
 
 /**
  * The project's rules and checks, or `error` naming what is wrong with the file. A missing file is
@@ -43,11 +49,11 @@ export const DEFAULT_WRAPPERS = ["pnpm exec", "pnpm dlx", "pnpm", "npx"];
  */
 export function loadWorkflowConfig(root) {
   const path = join(root, CONFIG_PATH);
-  if (!existsSync(path)) return { rules: [], checks: [], wrappers: DEFAULT_WRAPPERS, error: null };
+  if (!existsSync(path)) return { rules: [], checks: [], wrappers: DEFAULT_WRAPPERS, ledger: { ...DEFAULT_LEDGER }, error: null };
   try {
     return { ...parseWorkflowConfig(JSON.parse(readFileSync(path, "utf8"))), error: null };
   } catch (error) {
-    return { rules: [], checks: [], wrappers: DEFAULT_WRAPPERS, error: `${CONFIG_PATH.replaceAll("\\", "/")}: ${error.message}` };
+    return { rules: [], checks: [], wrappers: DEFAULT_WRAPPERS, ledger: { ...DEFAULT_LEDGER }, error: `${CONFIG_PATH.replaceAll("\\", "/")}: ${error.message}` };
   }
 }
 
@@ -55,7 +61,7 @@ export function loadWorkflowConfig(root) {
 export function parseWorkflowConfig(data) {
   if (data?.version !== 1) throw new Error(`"version" must be 1 (it is ${JSON.stringify(data?.version)}).`);
   // `phaseRun` is the phase runner's (template/tools/phase-run/config.mjs checks it at preflight).
-  onlyKeys(data, ["version", "guard", "stopGate", "phaseRun", "stack", "roadmap", "note"], "the file");
+  onlyKeys(data, ["version", "guard", "stopGate", "phaseRun", "stack", "roadmap", "ledger", "note"], "the file");
   onlyKeys(data.guard ?? {}, ["block", "wrappers", "note"], "guard");
   onlyKeys(data.stopGate ?? {}, ["checks", "note"], "stopGate");
   onlyKeys(data.stack ?? {}, [...STACK_KEYS, "note"], "stack");
@@ -67,6 +73,7 @@ export function parseWorkflowConfig(data) {
   }
   onlyKeys(data.roadmap ?? {}, ["artifact", "note"], "roadmap");
   if (data.roadmap?.artifact !== undefined && typeof data.roadmap.artifact !== "string") throw new Error("roadmap.artifact must be text.");
+  const ledger = parseLedger(data.ledger);
   const wrappers = data.guard?.wrappers === undefined ? DEFAULT_WRAPPERS : list(data.guard.wrappers, "guard.wrappers");
   if (!wrappers.every((w) => typeof w === "string" && w.trim())) throw new Error("guard.wrappers must be a list of command prefixes, such as \"pnpm exec\".");
   const rules = list(data.guard?.block, "guard.block").map((rule, i) => {
@@ -102,7 +109,21 @@ export function parseWorkflowConfig(data) {
     return { label: check.label, run: check.run, receipt: check.receipt === true, unread: unreadList(check, where) };
   });
   sharedUnread(checks, "stopGate.checks");
-  return { rules, checks, wrappers: wrappers.map((w) => w.trim()) };
+  return { rules, checks, wrappers: wrappers.map((w) => w.trim()), ledger };
+}
+
+/**
+ * The top-level `ledger` section, `{ attended?, weekStarts? }`: checked here as the runner checks it
+ * (template/tools/phase-run/config.mjs), with the same refusals, because the two cannot share code.
+ */
+function parseLedger(ledger) {
+  if (ledger === undefined) return { ...DEFAULT_LEDGER };
+  onlyKeys(ledger, ["attended", "weekStarts", "note"], "ledger");
+  if (ledger.attended !== undefined && typeof ledger.attended !== "boolean") throw new Error("ledger.attended must be true or false.");
+  if (ledger.weekStarts !== undefined && !WEEK_DAYS.includes(ledger.weekStarts)) {
+    throw new Error(`ledger.weekStarts must be a day in lowercase, one of ${WEEK_DAYS.join(", ")} (it is ${JSON.stringify(ledger.weekStarts)}).`);
+  }
+  return { attended: ledger.attended ?? DEFAULT_LEDGER.attended, weekStarts: ledger.weekStarts ?? DEFAULT_LEDGER.weekStarts };
 }
 
 /**
