@@ -37,6 +37,7 @@ import { fileURLToPath } from "node:url";
 
 import { BROWSER_CHECK, fill, fillEnv, loadRunConfig, qaUrl, sessionEnv as pinnedEnv, targetFingerprint, targetUrl } from "./config.mjs";
 import { Screen, notify, ticketMinutes } from "./display.mjs";
+import { brigadeCatalog, readInstalledBrigade, versionStop, withAutoUpdateOff } from "./brigade.mjs";
 import { LEDGER_PATH, appendRow, ledgerRow, stampVersion } from "./ledger.mjs";
 import { hookTime, loadPrices, sessionCost, stepKind, stepRules, ticketMetrics } from "./metrics.mjs";
 import { finishSnapshot, takeSnapshot } from "./snapshot.mjs";
@@ -973,11 +974,12 @@ function stopStray(when) {
  * gets what points 1 to 3 above call for. The denials keep a session's hands
  * off the things that check it (the runner, the project's config and the
  * prose its prompt is built from), and off the three tools that would wait
- * for a person or move the work somewhere else.
+ * for a person or move the work somewhere else. `catalog` (brigade.mjs brigadeCatalog, read at run
+ * start) switches Brigade's auto-update off for the session, keeping its catalog entry's `source`.
  */
-function sessionSettings(base, project, { branch, env, background, prompt }) {
+function sessionSettings(base, project, { branch, env, background, prompt, catalog = null }) {
   const allow = [...(base.permissions?.allow ?? []), ...project.allow];
-  return {
+  return withAutoUpdateOff({
     ...base,
     permissions: {
       ...base.permissions,
@@ -997,12 +999,12 @@ function sessionSettings(base, project, { branch, env, background, prompt }) {
     },
     env: { ...(base.env ?? {}), ...env },
     ...(background ? { worktree: { ...(base.worktree ?? {}), bgIsolation: "none" } } : {}),
-  };
+  }, catalog);
 }
 
 function writeSessionSettings(run, number, env, { background = true } = {}) {
   const base = JSON.parse(readFileSync(join(HERE, "settings.json"), "utf8"));
-  const settings = sessionSettings(base, config.permissions, { branch: run.branch, env, background, prompt: config.prompt });
+  const settings = sessionSettings(base, config.permissions, { branch: run.branch, env, background, prompt: config.prompt, catalog: run.catalog });
   const path = join(run.dir, `settings-${number}.json`);
   writeFileSync(path, `${JSON.stringify(trimmedSettings(settings, run.trim, ROOT, config.keep), null, 2)}\n`);
   return path;
@@ -2158,7 +2160,13 @@ function report(run, options, remaining, { final = true } = {}) {
   const effort = (facts) => (facts ? `${facts.minutes} min · ${facts.turns} turns · ${facts.calls} session call(s)${money(facts)}` : "");
 
   out.push(`## Phase run report: ${run.branch}`, "");
-  out.push(`${new Date().toISOString().slice(0, 16).replace("T", " ")} UTC · built ${built.length} · parked ${parked.length} · failed ${failed.length}`, "");
+  // The Brigade version whose hooks judged every ticket (brigade.mjs, D14).
+  const version = run.brigade ? ` · Brigade ${run.brigade}` : "";
+  out.push(`${new Date().toISOString().slice(0, 16).replace("T", " ")} UTC${version} · built ${built.length} · parked ${parked.length} · failed ${failed.length}`, "");
+  if (run.brigade && run.stamp && run.stamp !== run.brigade) {
+    out.push(`This project's runner is stamped ${run.stamp}; Brigade ${run.brigade} judged the run. \`/update-workflow\` brings the runner to the plugin's version.`, "");
+  }
+  if (run.catalog && !run.catalog.catalog) out.push(`⚠ Brigade's auto-update was not switched off for this run: ${run.catalog.why}`, "");
   if (!final) out.push("🕒 **In progress.** This file is rewritten after each ticket; the run had not finished when it was saved. If no later version exists, the run stopped here.", "");
   if (run.stopped) out.push(`🚨 **The run stopped early.** ${run.stopped}`, "");
   if (run.results.length) out.push(...scoreboardSection(run.results));
@@ -2280,6 +2288,17 @@ async function main() {
     return;
   }
 
+  // The Brigade version whose hooks judge the night (brigade.mjs, ADR 0005): read once here, before
+  // the lock and the branch are touched, and again before each ticket. With none installed for this
+  // repo, no ticket would run under Brigade's hooks.
+  let installed;
+  try {
+    installed = readInstalledBrigade(ROOT, exec);
+  } catch (error) {
+    die(`Brigade's installed version can't be read, so the run can't hold to one version: ${error.message}`);
+  }
+  if (!installed) die(`Brigade is not installed for this repo: \`claude plugin list --json\` lists no brigade@… install for ${ROOT}, and none at user scope. Install it, then start the run again.`);
+
   mkdirSync(STATE, { recursive: true });
   const lock = join(STATE, "lock");
   writeFileSync(lock, `pid ${process.pid}, started ${new Date().toISOString()}, branch ${branch}\n`);
@@ -2318,7 +2337,9 @@ async function main() {
     migrationsApplied: new Set(),
     pullRequest: null,
     ledgerFile: join(ROOT, LEDGER_PATH), // one night row per ticket (recordNight)
-    brigade: stampVersion(ROOT), // the runner that judges the night: the project's stamp, null with none
+    brigade: installed, // the installed Brigade version that judges the night: in the manifest, the report and every night row
+    stamp: stampVersion(ROOT), // the project's runner stamp, shown in the report when it differs
+    catalog: brigadeCatalog(ROOT), // Brigade's catalog entry, for each ticket's auto-update override (or why there is none)
     ticketSession: null,
     runner: null, // the run's frozen copy of the runner and its config (takeSnapshot, below)
     trim, // this machine's trim list (trim.mjs, D16), or null: no trim
@@ -2332,7 +2353,7 @@ async function main() {
   // One frozen copy of the runner and its config judges the whole run (snapshot.mjs, ADR 0005):
   // a restart after a crash reuses it, and is refused when the live runner's code changed since.
   try {
-    const snapshot = takeSnapshot({ root: ROOT, runDir: run.dir, runId: run.runId, commit: git("rev-parse", "HEAD"), at: Date.now() });
+    const snapshot = takeSnapshot({ root: ROOT, runDir: run.dir, runId: run.runId, commit: git("rev-parse", "HEAD"), at: Date.now(), brigade: run.brigade });
     run.runner = snapshot.dir;
     log(snapshot.reused ? `Restarted on the runner copy taken ${snapshot.manifest.takenAt} (run ${snapshot.manifest.runId}).` : `Runner copy taken at ${snapshot.manifest.commit.slice(0, 7)}.`, { routine: true });
   } catch (error) {
@@ -2369,9 +2390,10 @@ async function main() {
 
   log(
     `Run started on ${branch}: ${limit} ticket(s)${options.until ? `, stopping after #${options.until}` : ""}, ` +
-      `${options.minutes} min each, ${options.fixRounds} fix rounds.`,
+      `${options.minutes} min each, ${options.fixRounds} fix rounds, Brigade ${run.brigade}.`,
     { routine: true },
   );
+  if (!run.catalog.catalog) log(`Brigade's auto-update is not switched off for this run: ${run.catalog.why}`);
   showProgress();
 
   let outcome = "continue";
@@ -2380,6 +2402,13 @@ async function main() {
     if (!next) break;
     if (!(await waitForInternet(waitDeadline(options), `before #${next.number}`))) {
       run.stopped = `The internet connection did not come back within ${options.waitHours} hours, so #${next.number} was never started.`;
+      log(run.stopped);
+      break;
+    }
+    // An attended session elsewhere may have updated Brigade: the next ticket would be judged by other hooks.
+    const changed = versionStop(run.brigade, () => readInstalledBrigade(ROOT, exec));
+    if (changed) {
+      run.stopped = `${changed} #${next.number} was never started.`;
       log(run.stopped);
       break;
     }

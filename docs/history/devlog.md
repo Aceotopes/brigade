@@ -9,6 +9,19 @@ Each commit's entry goes on top, in the shape of `docs/_templates/devlog-entry.m
 message cites it (`devlog #N`). At each phase end, `node tools/doc-rotate.mjs` moves the closed
 entries into `docs/history/devlog/`.
 
+## #17 · feat · one run, one Brigade version
+
+**Built:**
+- `brigade.mjs`: the installed version from `claude plugin list --json` (the repo's `brigade@…` row,
+  case-blind on Windows, else user scope); the catalog from the project's `enabledPlugins`.
+- Each ticket's settings set `extraKnownMarketplaces.<catalog>.autoUpdate: false`, keeping `source`;
+  with no entry nothing is written and the report says why.
+- Run start reads the version (none installed: no ticket starts) into the manifest, the header and
+  the night rows; a change before a ticket stops the run, and a restart under another is refused.
+**Verified:** runner-seam tests for the override keeping `source`, no Brigade entry, the row pick,
+the mismatch stop, the header, the restart refusal; full suite. Backend only.
+**Next:** #24, the finish ticket's live night. **Record:** implementation log 012, adr/0005.
+
 ## #16 · feat · setup asks for tool rows
 
 **Built:**

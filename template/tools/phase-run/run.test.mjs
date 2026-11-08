@@ -9,6 +9,7 @@ import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { BROWSER_CHECK, fill, loadRunConfig, parseRunConfig, qaUrl, sessionEnv, targetFingerprint, targetUrl } from "./config.mjs";
+import { brigadeCatalog, installedBrigade, parsePluginList, readInstalledBrigade, versionStop } from "./brigade.mjs";
 import { readLedger } from "./ledger.mjs";
 import { QUIET_MS, SETTLE_MS, applyMigrations, backgroundArgs, folderTrusted, gatePlan, gotchasFile, holdReason, loadResults, outsideAreas, printArgs, projectGates, promptValues, pullRequestBody, recordResult, render, report, runSession, runVariables, screenshotsSince, sessionSettings, trimmedSettings, turnOver } from "./run.mjs";
 import { finishSnapshot, readManifest, runnerChanges, takeSnapshot } from "./snapshot.mjs";
@@ -961,7 +962,7 @@ function snapshotProject() {
   put("tools/phase-run/ticket-prompt.md", "the prompt\n");
   put(".claude/workflow.json", '{ "version": 1 }\n');
   const runDir = join(root, ".phase-run", "phase-x");
-  const take = (runId, at = AT) => takeSnapshot({ root, runDir, runId, commit: "abc123", at });
+  const take = (runId, at = AT, brigade = "0.6.0") => takeSnapshot({ root, runDir, runId, commit: "abc123", at, brigade });
   return { root, runDir, put, take };
 }
 
@@ -970,7 +971,7 @@ test("at run start the copy is taken: the runner folder and the config, with its
   const copy = take("run-1");
   assert.equal(copy.dir, join(runDir, "runner"));
   assert.equal(copy.reused, false);
-  assert.deepEqual(copy.manifest, { takenAt: new Date(AT).toISOString(), commit: "abc123", runId: "run-1", finished: false });
+  assert.deepEqual(copy.manifest, { takenAt: new Date(AT).toISOString(), commit: "abc123", runId: "run-1", brigade: "0.6.0", finished: false });
   assert.deepEqual(readManifest(copy.dir), copy.manifest);
   assert.equal(readFileSync(join(copy.dir, "tools/phase-run/run.mjs"), "utf8"), "// the runner\n");
   assert.equal(readFileSync(join(copy.dir, "tools/phase-run/ticket-prompt.md"), "utf8"), "the prompt\n");
@@ -1013,7 +1014,7 @@ test("a finished run marks its copy finished, and the next run takes a fresh one
   writeFileSync(join(first.dir, "tools/phase-run/left-over.mjs"), "// only in the old copy\n");
   const next = take("run-2", AT + 86_400_000);
   assert.equal(next.reused, false);
-  assert.deepEqual(next.manifest, { takenAt: new Date(AT + 86_400_000).toISOString(), commit: "abc123", runId: "run-2", finished: false });
+  assert.deepEqual(next.manifest, { takenAt: new Date(AT + 86_400_000).toISOString(), commit: "abc123", runId: "run-2", brigade: "0.6.0", finished: false });
   assert.equal(readFileSync(join(next.dir, "tools/phase-run/run.mjs"), "utf8"), "// the next release\n");
   assert.equal(existsSync(join(next.dir, "tools/phase-run/left-over.mjs")), false, "nothing of the old copy is left");
 });
@@ -1124,6 +1125,117 @@ test("a night ticket's merged settings keep the run's rules, variables and Edit 
   assert.equal(merged.env.PHASE_RUN_ROOT, "/repo");
   for (const rule of ["Edit(./tools/phase-run/**)", "Edit(./.claude/workflow.json)", "Read(./.env)"]) assert.ok(merged.permissions.deny.includes(rule), rule);
   rmSync(root, { recursive: true, force: true });
+});
+
+// D8, D14 (#25): one run, one Brigade version. Night settings defer Brigade's auto-update, and a
+// version change between tickets stops the run.
+function settingsRoot(settings) {
+  const root = mkdtempSync(join(tmpdir(), "phase-brigade-root-"));
+  if (settings !== undefined) {
+    mkdirSync(join(root, ".claude"), { recursive: true });
+    writeFileSync(join(root, ".claude", "settings.json"), typeof settings === "string" ? settings : JSON.stringify(settings));
+  }
+  return root;
+}
+
+const CATALOG_SOURCE = { source: "github", repo: "owner/brigade" };
+
+test("a night ticket's settings switch Brigade's auto-update off, keeping the catalog's source, for the catalog the project enables", () => {
+  const root = settingsRoot({
+    enabledPlugins: { "brigade@fork-market": true, "vercel@official": true },
+    extraKnownMarketplaces: { "fork-market": { source: CATALOG_SOURCE, autoUpdate: true }, official: { source: { source: "github", repo: "o/o" } } },
+  });
+  const brigade = brigadeCatalog(root);
+  assert.deepEqual(brigade, { catalog: "fork-market", entry: { source: CATALOG_SOURCE, autoUpdate: true } }, "the catalog is the project's own, never a literal");
+  const env = runVariables({ ticket: 7, base: "abc", spec: 5, runner: "/repo/.phase-run/phase-2/runner", root: "/repo" });
+  const base = { permissions: { allow: ["Bash(git *)"], deny: [] } };
+  const plain = sessionSettings(base, { allow: [], deny: [] }, { branch: "phase-2", env, background: true, prompt: null });
+  const night = sessionSettings(base, { allow: [], deny: [] }, { branch: "phase-2", env, background: true, prompt: null, catalog: brigade });
+  assert.deepEqual(night, { ...plain, extraKnownMarketplaces: { "fork-market": { source: CATALOG_SOURCE, autoUpdate: false } } });
+  // Trim's entries sit beside the override.
+  const trimmed = trimmedSettings(night, { plugins: ["figma@official"], skills: [], flags: [] }, root, { plugins: [], skills: [] });
+  assert.deepEqual(trimmed.extraKnownMarketplaces, night.extraKnownMarketplaces);
+  assert.deepEqual(trimmed.enabledPlugins, { "figma@official": false });
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("with no brigade@… entry, no catalog entry or no readable settings, nothing is written and the report says why", () => {
+  for (const [settings, why] of [
+    [undefined, /has no \.claude\/settings\.json/],
+    [{ enabledPlugins: { "vercel@official": true } }, /no brigade@… entry in enabledPlugins/],
+    [{ enabledPlugins: { "brigade@market": true } }, /no extraKnownMarketplaces entry for "market"/],
+    ["{ broken", /is not JSON/],
+  ]) {
+    const root = settingsRoot(settings);
+    const brigade = brigadeCatalog(root);
+    assert.equal(brigade.catalog, null, JSON.stringify(settings));
+    assert.match(brigade.why, why);
+    const night = sessionSettings({}, { allow: [], deny: [] }, { branch: "phase-2", env: {}, background: true, prompt: null, catalog: brigade });
+    assert.equal("extraKnownMarketplaces" in night, false);
+    const run = { ...tempRun(), brigade: "0.6.0", catalog: brigade };
+    assert.match(report(run, options, []), /Brigade's auto-update was not switched off for this run: /);
+    rmSync(root, { recursive: true, force: true });
+  }
+  // Read through a BOM, as trim's reader is; an entry that is on wins over one that is off.
+  const root = settingsRoot(`\uFEFF${JSON.stringify({ enabledPlugins: { "brigade@old": false, "brigade@market": true }, extraKnownMarketplaces: { market: { source: CATALOG_SOURCE } } })}`);
+  assert.equal(brigadeCatalog(root).catalog, "market");
+  rmSync(root, { recursive: true, force: true });
+});
+
+const pluginRows = [
+  { id: "brigade@market", version: "0.5.2", scope: "project", projectPath: "D:\\HGP\\other", projectEnabled: true },
+  { id: "brigade@market", version: "0.6.0", scope: "project", projectPath: "D:\\HGP\\Brigade", projectEnabled: true },
+  { id: "brigade@market", version: "0.4.0", scope: "user" },
+  { id: "vercel@official", version: "9.9.9", scope: "project", projectPath: "D:\\HGP\\Brigade" },
+];
+
+test("the installed version is the brigade@… row for this repo, compared case-blind on Windows, else the user-scope row", () => {
+  assert.equal(installedBrigade(pluginRows, "d:/hgp/brigade/", { platform: "win32" }), "0.6.0");
+  assert.equal(installedBrigade(pluginRows, "D:\\HGP\\brigade", { platform: "linux" }), "0.4.0", "off Windows a path's case counts: no project row, so the user row");
+  assert.equal(installedBrigade(pluginRows, "D:\\HGP\\Brigade", { platform: "linux" }), "0.6.0");
+  assert.equal(installedBrigade(pluginRows, "D:/HGP/elsewhere", { platform: "win32" }), "0.4.0");
+  assert.equal(installedBrigade(pluginRows.filter((row) => row.scope !== "user"), "D:/HGP/elsewhere", { platform: "win32" }), null, "no matching row: not installed for this repo");
+  assert.deepEqual(parsePluginList(JSON.stringify(pluginRows)), pluginRows);
+  assert.deepEqual(parsePluginList(JSON.stringify({ plugins: pluginRows })), pluginRows);
+  assert.throws(() => parsePluginList("Plugins:\n  brigade 0.6.0"), /isn't JSON: "Plugins:/);
+  assert.throws(() => parsePluginList('{"installed": {}}'), /a shape the runner can't read/);
+  // Through the runner's exec: a failing command throws, naming its output.
+  const exec = (stdout, ok = true) => (command, args) => (assert.deepEqual([command, ...args], ["claude", "plugin", "list", "--json"]), { ok, stdout, stderr: ok ? "" : "unknown command" });
+  assert.equal(readInstalledBrigade("/nowhere", exec(JSON.stringify(pluginRows))), "0.4.0");
+  assert.throws(() => readInstalledBrigade("/nowhere", exec("", false)), /failed: "unknown command"/);
+});
+
+test("a version change before a ticket stops the run, and so does a version that can't be read", () => {
+  assert.equal(versionStop("0.6.0", () => "0.6.0"), null);
+  assert.equal(versionStop("0.6.0", () => "0.6.1"), "Brigade updated mid-run (0.6.0 → 0.6.1), rerun.");
+  assert.equal(versionStop("0.6.0", () => null), "Brigade updated mid-run (0.6.0 → not installed), rerun.");
+  assert.match(versionStop("0.6.0", () => { throw new Error("spawn claude ENOENT"); }), /could not be read \(spawn claude ENOENT\)/);
+  const run = { ...tempRun(), brigade: "0.6.0", stopped: versionStop("0.6.0", () => "0.6.1") };
+  assert.match(report(run, options, []), /The run stopped early\.\*\* Brigade updated mid-run \(0\.6\.0 → 0\.6\.1\), rerun\./);
+});
+
+test("the morning report's header names the Brigade version that judged the run, and the stamp when it differs", () => {
+  const header = (run) => report({ ...tempRun(), ...run }, options, []).split("\n").slice(0, 3).join("\n");
+  assert.match(header({ brigade: "0.6.0", stamp: "0.6.0" }), /UTC · Brigade 0\.6\.0 · built 0/);
+  const text = report({ ...tempRun(), brigade: "0.6.0", stamp: "0.5.2", catalog: { catalog: "market", entry: {} } }, options, []);
+  assert.match(text, /This project's runner is stamped 0\.5\.2; Brigade 0\.6\.0 judged the run/);
+  assert.doesNotMatch(text, /auto-update was not switched off/);
+});
+
+test("a restart is refused when another Brigade version is installed than the copy was taken under", () => {
+  const { take, runDir } = snapshotProject();
+  take("run-1");
+  assert.equal(take("run-2", AT, "0.6.0").reused, true);
+  assert.throws(() => take("run-3", AT, "0.6.1"), (error) => {
+    assert.match(error.message, /taken under Brigade 0\.6\.0, and 0\.6\.1 is installed now/);
+    assert.ok(error.message.includes(join(runDir, "runner")), "it says which copy to delete for a fresh start");
+    return true;
+  });
+  // A copy whose manifest has no version (taken before #25) has nothing to compare: it is reused.
+  const manifest = readManifest(join(runDir, "runner"));
+  delete manifest.brigade;
+  writeFileSync(join(runDir, "runner", "manifest.json"), JSON.stringify(manifest));
+  assert.equal(take("run-4", AT, "0.6.1").reused, true);
 });
 
 test("trim's flags go on a session's first launch; a -p resume passes them again, a background resume passes no flag", () => {

@@ -177,3 +177,21 @@ listed in the gotchas index, `docs/agents/gotchas/README.md`.
 - The scan flags fixture paths a test writes into a temp repo (`tests/setup.test.mjs` is full of
   `"docs/…"`). That is the warning's known noise, not a bug to fix in `pathOf`.
 - The template's phase-run guide is CRLF; `unread-scan.mjs` is LF, as `unread.mjs` is.
+
+**`#25` — one run, one Brigade version, `template/tools/phase-run/brigade.mjs` `brigadeCatalog` / `withAutoUpdateOff` / `installedBrigade` / `versionStop`, `run.mjs` `sessionSettings` / `main`, `snapshot.mjs` `takeSnapshot` (built 2026-11-08):**
+- `run.brigade` is the **installed plugin** version, as the attended hook's rows are, never the
+  project's stamp (`run.stamp`, shown in the report only when it differs). Night and attended rows
+  must say the same thing.
+- Never write a catalog entry without the project's `source`: a `--settings` entry stands in for
+  the project's, and one with only `autoUpdate` is a catalog with nowhere to come from. No project
+  entry means no override, and the report says why. pinned: `run.test.mjs`.
+- The catalog is read from `enabledPlugins`' `brigade@<catalog>` key, never a literal: a fork's
+  catalog has another name.
+- Test the version pick through `installedBrigade(rows, root, { platform })`, never by spawning
+  `claude`: a night session's allow list refuses `claude plugin list`, and its output on another
+  machine is not a fixture.
+- A version that can't be read before a ticket stops the run (`versionStop`): it can't prove the next
+  ticket's hooks are the run's. A reused manifest with no `brigade` key is the one case let through.
+- Fixtures under `template/` name no real catalog or owner (`market`, `owner/brigade`), and a
+  template doc names no project file in backticks: `tests/no-project-specifics.test.mjs` and the
+  template's day-one doc-check refuse both.

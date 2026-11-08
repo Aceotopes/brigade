@@ -5,11 +5,15 @@
 // settings point at it (PHASE_RUN_RUNNER), so nothing written mid-night (a shell write, the
 // owner's edit) changes the rules for later tickets.
 //
-//   manifest.json  { takenAt, commit, runId, finished }
+//   manifest.json  { takenAt, commit, runId, brigade, finished }
+//
+// `brigade` is the Brigade version installed when the copy was taken (brigade.mjs): the plugin's
+// hooks judge the night beside the copy.
 //
 // A run that died restarts on its unfinished copy, so the night is still judged by one runner. The
 // restart is refused, naming the files, when the live runner's code (`.mjs`, not its tests) has
-// changed since: the owner then chooses, by finishing on the old code or deleting the copy. A run
+// changed since, or when another Brigade version is installed now: the owner then chooses, by
+// finishing on the old code (or version) or deleting the copy. A run
 // that reaches its report marks the copy finished, and the next run takes a fresh one.
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
@@ -64,9 +68,11 @@ export function runnerChanges(root, dir) {
 
 /**
  * The run's copy: an unfinished one reused (a restart), else a fresh one taken from `root`. Throws
- * when an unfinished copy's runner code no longer matches the live tree's.
+ * when an unfinished copy's runner code no longer matches the live tree's, or its Brigade version
+ * the one installed now (`brigade`). A copy whose manifest has no version (taken before 0.6.0) has
+ * nothing to compare, so its restart goes on.
  */
-export function takeSnapshot({ root, runDir, runId, commit, at }) {
+export function takeSnapshot({ root, runDir, runId, commit, at, brigade = null }) {
   const dir = join(runDir, SNAPSHOT_FOLDER);
   const manifest = readManifest(dir);
   if (manifest && manifest.finished === false) {
@@ -78,6 +84,13 @@ export function takeSnapshot({ root, runDir, runId, commit, at }) {
           `Put the code back to finish that run on its copy, or delete ${dir} to start a fresh run on the new code.`,
       );
     }
+    if (typeof manifest.brigade === "string" && manifest.brigade !== brigade) {
+      throw new Error(
+        `This branch's last run died; its copy was taken under Brigade ${manifest.brigade}, and ${brigade ?? "no version"} is installed now. ` +
+          `A run is judged by one Brigade version from its first ticket to its last, so it will not restart on another. ` +
+          `Put Brigade ${manifest.brigade} back to finish that run on its copy, or delete ${dir} to start a fresh run on ${brigade ?? "the installed one"}.`,
+      );
+    }
     return { dir, manifest, reused: true };
   }
   rmSync(dir, { recursive: true, force: true });
@@ -87,7 +100,7 @@ export function takeSnapshot({ root, runDir, runId, commit, at }) {
   mkdirSync(dirname(join(dir, CONFIG)), { recursive: true });
   if (existsSync(join(root, CONFIG))) cpSync(join(root, CONFIG), join(dir, CONFIG));
   else writeFileSync(join(dir, CONFIG), NO_CONFIG);
-  const fresh = { takenAt: new Date(at).toISOString(), commit, runId, finished: false };
+  const fresh = { takenAt: new Date(at).toISOString(), commit, runId, brigade, finished: false };
   writeManifest(dir, fresh);
   return { dir, manifest: fresh, reused: false };
 }

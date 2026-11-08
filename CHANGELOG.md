@@ -11,8 +11,8 @@ migration in `scripts/migrations.mjs`.
   A row missing a rate, or a `fallback` with no row, now stops it loading. A ticket's cost now
   includes its advisor passes, at the advisor's model.
 - **A ledger that outlives every run.** Each ticket, however it ends, appends one priced row to
-  `.phase-run/ledger.jsonl` (gitignored): its session, kind `night`, the stamp's Brigade version
-  and its cost by model. `node tools/phase-run/status.mjs --ledger` prints it by week, and
+  `.phase-run/ledger.jsonl` (gitignored): its session, kind `night`, the installed Brigade version
+  the run started on, and its cost by model. `node tools/phase-run/status.mjs --ledger` prints it by week, and
   `--csv [file]` writes it as CSV. `.claude/workflow.json` accepts a new top-level `ledger`
   section, `{ "attended"?, "weekStarts"? }` (a lowercase day, `monday` by default). A 0.5.x
   plugin's hooks refuse that key, so update the plugin before adding it.
@@ -24,12 +24,18 @@ migration in `scripts/migrations.mjs`.
   in a phase run, and `"ledger": { "attended": false }` turns it off.
 - **One frozen runner judges a whole run** (ADR 0005). At run start the runner copies
   `tools/phase-run/` and `.claude/workflow.json` to `.phase-run/<branch>/runner/`, with a
-  `manifest.json` (`takenAt`, `commit`, `runId`, `finished`). Each ticket's settings carry
+  `manifest.json` (`takenAt`, `commit`, `runId`, `brigade`, `finished`). Each ticket's settings carry
   `PHASE_RUN_RUNNER` (the copy) and `PHASE_RUN_ROOT` (the repo); the stop gate and the shell guard
   then read the copy's config and import its receipt code, and the session runs the copy's
   `stop-tests.mjs`. A crashed run restarts on its copy, and refuses to when the runner's `.mjs`
   files changed since, naming them; a run that reaches its report marks the copy finished. A
   0.5.x plugin's hooks ignore the variable, so update the plugin with the template.
+- **One run, one Brigade version** (ADR 0005). At run start the runner reads the installed version
+  from `claude plugin list --json` (the `brigade@…` install for the repo, else the user-scope one)
+  and records it in the manifest, the report's header and every night row. With none installed
+  the run doesn't start. Each ticket's settings switch auto-update off for the catalog the
+  project's `enabledPlugins` names, keeping its `source`. A version change between tickets stops
+  the run ("Brigade updated mid-run (a → b), rerun"), and a crashed run won't restart on another.
 - **Update offers the new keys, row by row.** `/update-workflow` ends by listing what refresh
   would add to the config's rows (`offers`): a `name`, `receipt: true` and `unread: ["**/*.md"]`
   on the typecheck and lint stop checks the stack suggests, a `name` on the tests row, and

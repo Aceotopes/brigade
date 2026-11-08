@@ -10,6 +10,7 @@ what was built, why it works that way, and how to say it out loud. The index bel
 <!-- generated:start implementation-log -->
 ### Current phase
 
+- [012](012-one-brigade-version.md) · `#25` · 2026-11-08 · One run, one Brigade version
 - [011](011-setup-tool-rows.md) · `#22` · 2026-11-08 · Setup asks for tool rows
 - [010](010-trim-keep-list.md) · `#21` · 2026-11-08 · Trim, with a project keep list
 - [009](009-tampering-gate.md) · `#20` · 2026-11-08 · The tampering gate

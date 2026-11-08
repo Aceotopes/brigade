@@ -442,7 +442,9 @@ and the runner's own checks):
   `.phase-run/`). Behind that, the run is judged by one frozen copy: at its start the runner copies
   `tools/phase-run/` and `.claude/workflow.json` to `.phase-run/<branch>/runner/`, and the run's
   gates, every ticket's stop check, shell guard and test command use the copy. A change to the live
-  files made mid-night (by you, or by a shell write) judges the next run, not this one;
+  files made mid-night (by you, or by a shell write) judges the next run, not this one. The run also
+  holds to one Brigade version: each ticket's settings switch Brigade's auto-update off (for the
+  catalog your project's Claude Code settings enable it from), and the report's header names the version;
 - print `.env` into its transcript (`cat`, `head`, `grep` and the like on that file);
 - start when GitHub cannot say which tickets wait on which (the runner refuses, and builds nothing
   in a guessed order);
@@ -464,6 +466,10 @@ and the runner's own checks):
 | "Something is listening on :\<port\>" | A dev or QA server from `phaseRun.ports` is still running | Stop it (Ctrl+C in its terminal), start again |
 | "A run is already going (or one crashed)" | The lock file from a run is still there | If no run is going, delete `.phase-run/lock` |
 | "This branch's last run died, and the runner's code changed since its copy was taken" | A crashed run restarts on its frozen copy, and the runner's `.mjs` files it names changed since (an `/update-workflow`, say) | To finish on the old runner, put the code back; to start fresh on the new one, delete the `.phase-run/<branch>/runner` folder it names |
+| "Brigade is not installed for this repo" | `claude plugin list --json` lists no `brigade@…` install for this folder, nor one at user scope | Install Brigade (`/plugin`), start again |
+| "Brigade updated mid-run (\<a\> → \<b\>), rerun" | Brigade's version changed between two tickets (an update run in another window, say), so the run stopped before the next one | Start the run again: it carries on under the new version |
+| "…its copy was taken under Brigade \<a\>, and \<b\> is installed now" | A crashed run would restart under another Brigade version | Put Brigade \<a\> back to finish on it, or delete the `.phase-run/<branch>/runner` folder it names |
+| "Brigade's auto-update was not switched off for this run" | Your project's Claude Code settings have no `brigade@…` entry in `enabledPlugins`, or no `extraKnownMarketplaces` entry for its catalog | Nothing, for this run: a version change still stops it. To fix, re-run `/setup-workflow` |
 | "…runs here have used \<another host\> as \<the migration target\>" | The migration target's address changed since the first run | If you meant to change it, delete `.phase-run/migration-target`; if not, fix the address |
 | Every ticket says "not labelled run-ready" | `/ticket-check` has not passed them | Run `/ticket-check <spec>` |
 | A ticket says "waiting on #N" | A ticket it depends on is not built yet, or was set aside | Answer or fix `#N` first |
