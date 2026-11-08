@@ -1,7 +1,7 @@
 ---
 job: The owner's guide to the unattended phase run: evening and morning checklists, merging, undoing a ticket.
 kind: living
-max-lines: 560
+max-lines: 700
 ---
 # The phase run — the owner's practical guide
 
@@ -164,25 +164,78 @@ The runner knows only the workflow. Everything about your project is in `.claude
   passed. An optional `"quiet": { "totals", "failures" }` pair of patterns on that row says which
   lines of the test output a session needs (for vitest, `^\s*(Test Files|Tests|Duration)\s` and
   `^\s*FAIL\s`); without it the session sees the last lines of a pass and the tail of a failure.
-  An `"unread"` list of git globs on that row names what the tests never read (setup writes
-  `["docs/**", "*.md"]`; `*.md` is the root only), so a session's devlog written after the pass
-  keeps the receipt. The config refuses a glob that names no folder or file, such as `**`. Each
-  stop check logs `"receipt": "held"`, `"stale"` or `"none"` in `.phase-run/stop-check-log.jsonl`.
+  An `"unread"` list of globs on that row names what the tests never read (setup writes
+  `["docs/**", "*.md"]`; `*.md` is the root only, `**/*.md` every folder's, and a leading `!` puts
+  a path back), so a session's devlog written after the pass keeps the receipt. Any other row may
+  carry `"receipt": true` and its own `"unread"` too (typecheck and lint with `["**/*.md"]`, say),
+  plus a `"name"`: each keeps its own receipt, `.phase-run/<name>-receipt-<ticket>.json` (rows
+  without a name share `test-receipt-<ticket>.json`, and so one list). The config refuses a glob
+  that names no folder or file, such as `**`. Each stop check logs `"receipt": "held"`, `"stale"`
+  or `"none"`, and the checks it skipped, in `.phase-run/stop-check-log.jsonl`.
 - `phaseRun.steps`: `{ "kind", "match" }` rows that name what a session's commands were (your
   browser walks as `browser`, say), for the report's time split.
 - `phaseRun.ticketSize`: the size budget `/ticket-check` warns on (`checkboxes` or `bullets` under a
   section, or `words`); left out, 8 criteria, 8 Areas entries and 800 words.
-- `phaseRun.gates`: the checks the runner itself makes, in order, after a session finishes; a gate
-  with `when` runs only if the ticket touched matching files.
+- `phaseRun.gates`: the checks the runner itself makes after a session finishes, side by side; a gate
+  with `when` runs only if the ticket touched matching files. `after: "<label>"` waits for that gate
+  to pass (build, then typecheck); `alone: true` runs a gate by itself after the rest, with strays
+  stopped first (a suite that owns ports or a database); `unreadOf: "<stop check name>"` skips a
+  gate when every changed file is on that check's `unread` list (the suite skip); `{cache}` in a
+  command is a folder emptied before the gates run, for a tool's cache flag.
+- `phaseRun.tampering`: the first gate, read from the ticket's base commit. It fails added skip
+  `markers` in `testFiles`, a net loss of `assertions`, or a change to a `guarded` file or script; a
+  line under the ticket's `override.heading` that names the file and says why, written before the
+  run, lets it through ("Weakening a test on purpose", below).
 - `phaseRun.preflight` and `phaseRun.ports`: what must be running, and what must be free, before a
   run starts.
 - `phaseRun.qa`, `sessionEnv`, `migrations`: the databases above, and the values pinned in a session.
 - `phaseRun.browserCheck`: where a ticket that changes a screen saves its screenshots, and how many.
 - `phaseRun.permissions`: commands a session may run beyond the rules every project gets
   (`tools/phase-run/settings.json`).
+- `phaseRun.keep`: `{plugins, skills}` that your machine's trim list never switches off here.
 - `phaseRun.prompt`: your project's own instructions to each session (how to build, how to walk a
   screen, how to review it), a markdown file in `docs/agents/` with `## Read`, `## Build`,
   `## Browser check`, `## Review` and `## Fix` sections.
+
+**Worked examples, never defaults.** Setup writes no tool's rows (`propose` gives only what your
+`package.json` scripts name); it asks about your tools, and Claude writes their rows. The project
+Brigade was lifted from, a Next.js app on pnpm with Vitest, ESLint and tsc, has these 0.6.0 rows.
+Check every flag in your own tools' docs before you copy one:
+
+```json
+"stopGate": { "checks": [
+  { "label": "Typecheck", "name": "typecheck", "run": "pnpm typecheck", "receipt": true, "unread": ["**/*.md"] },
+  { "label": "Lint", "name": "lint", "run": "pnpm lint --cache", "receipt": true, "unread": ["**/*.md"] },
+  { "label": "Tests", "name": "tests", "run": "pnpm exec vitest run --changed {base} --passWithNoTests", "receipt": true, "unread": ["docs/**", "*.md"] }
+] },
+"phaseRun": {
+  "gates": [
+    { "label": "build", "run": "pnpm exec next build", "when": "^(src/|public/|package\\.json$|pnpm-lock\\.yaml$|next\\.config\\.|tsconfig)" },
+    { "label": "typecheck", "run": "pnpm typecheck --incremental --tsBuildInfoFile {cache}/tsbuildinfo", "after": "build", "when": "^(src/|public/|package\\.json$|pnpm-lock\\.yaml$|next\\.config\\.|tsconfig)" },
+    { "label": "lint", "run": "pnpm lint --cache --cache-location {cache}/eslintcache", "unreadOf": "lint" },
+    { "label": "tests", "run": "pnpm test", "alone": true, "unreadOf": "tests" }
+  ],
+  "tampering": {
+    "testFiles": ["**/*.test.ts", "**/*.test.tsx"],
+    "markers": [{ "name": "skip", "pattern": "\\b(describe|it|test)\\.(skip|todo)\\(" }, { "name": "focus", "pattern": "\\b(describe|it|test)\\.only\\(" }],
+    "assertions": { "pattern": "\\bexpect\\(", "maxNetRemoved": 0 },
+    "guarded": ["vitest.config.ts", ".claude/workflow.json"],
+    "override": { "heading": "Test override" }
+  }
+}
+```
+
+- **Vitest's `--changed {base}`** runs only the tests the ticket's changes reach, on the stop check;
+  the suite gate still runs them all. A runner with no such flag runs its suite.
+- **The build's `when`** names the paths that feed it, so a docs-only ticket skips it. Next.js
+  writes types the typecheck reads, so typecheck waits for the build (`after`) and copies its
+  `when`, and the two skip together.
+- **The cache flags** point ESLint's and tsc's caches into `{cache}`, which the runner empties
+  before the gates, so no gate trusts a cache a session wrote. Each goes after the script's own
+  command, and the row keeps its name (a gate's is its label), so setup's refresh still knows it.
+- **The tampering rows** are Vitest's: its skip and focus calls, and `expect(` as the assertion.
+  Their `testFiles` is also the list setup's verify scans: a test file naming a path on the tests
+  row's `unread` list is a warning, as the list probably leaves out something the tests read.
 
 A mistake in that section stops the run before it starts (dry runs too), and says what is wrong.
 
@@ -219,6 +272,38 @@ when the run ends or a ticket fails or parks (`PHASE_RUN_NOTIFY=0` before the co
 off). Piped to a file, or with `NO_COLOR`, the run prints plain lines instead. `run.log` is always
 plain and keeps every five-minute line. From any other terminal, `node tools/phase-run/status.mjs`
 prints the same table, and `status.mjs <ticket>` one ticket's full card.
+
+**The ledger outlives every run.** Each ticket, however it ends, adds one priced row to
+`.phase-run/ledger.jsonl` (gitignored): its session, its kind (`night`), the Brigade version that
+judged it, its cost by model. `status.mjs --ledger` prints it by week (by kind, by model), and
+`status.mjs --csv [file]` writes it as CSV, or prints it. Weeks start on `ledger.weekStarts` in
+`.claude/workflow.json` (a lowercase day, `monday` by default). A row that could not be written
+says "ledger: not written" in the report. Your own sessions are priced into it too: at the end of
+every reply, the plugin's Stop hook adds the session's running total as an `attended` row, at the
+plugin's version. It is silent, and `"ledger": { "attended": false }` turns it off.
+
+## Weakening a test on purpose
+
+With `phaseRun.tampering` set, the first gate fails a ticket that adds a skip or focus marker to a
+test file, removes more assertions than it adds (past `assertions.maxNetRemoved`), or changes a
+`guarded` file or script. When a ticket truly must (a flaky case retired, a test replaced, the test
+config changed), write a **test override** in the ticket body before the run, under the heading
+your config names (`override.heading`):
+
+```md
+## Tests removed or weakened
+
+- `<folder>/old-flow.test.mjs`: replaced by `<folder>/new-flow.test.mjs`; #31 removed the old flow.
+```
+
+- One line per path, written as it is in the repo, and why. The path is matched as a whole word, so
+  `a.test.mjs.bak` or a bare file name names nothing, and a line with only the path lets nothing
+  through: the gate says so.
+- The body is read as it was when the run started; an edit during the night counts next run.
+- A reason a session writes in its commit message never counts. The gate refuses it, and the
+  morning report says the session tried.
+- The rules are read from the ticket's base commit, so a ticket can't loosen what judges it, and a
+  broken section stops the ticket rather than passing it. No `tampering` section, no gate.
 
 ## Before the first night of a phase
 
@@ -272,9 +357,9 @@ Useful options:
    exactly this code (their receipt) are not run again. The script waits for that check to end
    before it does anything of its own, and its own checks trust no receipt.
 6. The script itself then checks, in order: exactly one commit, nothing left uncommitted, an
-   implementation log; then your project's gates (`phaseRun.gates`: typically typecheck, lint, a
-   build when the ticket touched what it compiles, the browser check's screenshots, the whole test
-   suite); then the docs check. If the ticket added a migration, it is applied to the migration
+   implementation log; then the tampering gate and your project's gates (`phaseRun.gates`: typically typecheck, lint and a
+   build when the ticket touched what it compiles, side by side, then the whole test suite alone,
+   then the browser check's screenshots). The first failure stops the rest; then the docs check. If the ticket added a migration, it is applied to the migration
    target last, once everything else is green.
 7. **A check failed:** its output goes back to the same session to fix, up to three times.
 8. **All passed:** the branch is pushed and the pull request is updated. Next ticket.
@@ -378,7 +463,13 @@ and the runner's own checks):
   it has no way to ask a question;
 - edit the runner, the project's config or its own settings (`tools/phase-run/`,
   `.claude/workflow.json`, `.claude/spec-issues.json`, the prompt file, the run's folder under
-  `.phase-run/`);
+  `.phase-run/`). Behind that, the run is judged by one frozen copy: at its start the runner copies
+  `tools/phase-run/` and `.claude/workflow.json` to `.phase-run/<branch>/runner/`, and the run's
+  gates, every ticket's stop check, shell guard, test command, base settings and prompts use the copy. A change to the live
+  files made mid-night (by you, or by a shell write) judges the next run, not this one. The run also
+  holds to one Brigade version: each ticket's settings switch Brigade's auto-update off (for the
+  catalog your project's Claude Code settings enable it from), and the report's header names the version.
+  Should it change anyway between two tickets, the run stops before the next one;
 - print `.env` into its transcript (`cat`, `head`, `grep` and the like on that file);
 - start when GitHub cannot say which tickets wait on which (the runner refuses, and builds nothing
   in a guessed order);
@@ -396,9 +487,16 @@ and the runner's own checks):
 | "Not ready to run: The working tree has uncommitted changes" | A run starts only from a clean folder | Commit or put away the changes it lists |
 | "main and origin/main differ" | `main` on your laptop has commits GitHub doesn't, or the reverse | `git push` (or `git pull`) on `main`, then start again |
 | "Not ready to run: .claude/workflow.json: …" | A mistake in the `phaseRun` section (a mistyped key, a bad pattern, a placeholder where it is not allowed) | Fix the line it names, start again |
+| At a session's start: "Brigade's hooks can't read .claude/workflow.json: …" | A key this plugin doesn't know (the file is from a newer Brigade), or a mistake outside the `guard` section. Shell commands still run; a run won't start | If the file is newer, update the plugin; otherwise fix the line it names |
+| "…until then no shell command runs" | A mistake in the `guard` section itself, or a file that isn't JSON: the guard can't tell what to refuse | Fix the line it names with the Edit tool, which still works |
 | "\<a preflight label\> failed" | Something a `phaseRun.preflight` row needs is not running (a database container, say); its hint says what | Start it, start again |
 | "Something is listening on :\<port\>" | A dev or QA server from `phaseRun.ports` is still running | Stop it (Ctrl+C in its terminal), start again |
 | "A run is already going (or one crashed)" | The lock file from a run is still there | If no run is going, delete `.phase-run/lock` |
+| "This branch's last run died, and the runner's code changed since its copy was taken" | A crashed run restarts on its frozen copy, and the runner's `.mjs` files it names changed since (an `/update-workflow`, say) | To finish on the old runner, put the code back; to start fresh on the new one, delete the `.phase-run/<branch>/runner` folder it names |
+| "Brigade is not installed for this repo" | `claude plugin list --json` lists no `brigade@…` install for this folder, nor one at user scope | Install Brigade (`/plugin`), start again |
+| "Brigade updated mid-run (\<a\> → \<b\>), rerun" | Brigade's version changed between two tickets (an update run in another window, say), so the run stopped before the next one | Start the run again: it carries on under the new version |
+| "…its copy was taken under Brigade \<a\>, and \<b\> is installed now" | A crashed run would restart under another Brigade version | Put Brigade \<a\> back to finish on it, or delete the `.phase-run/<branch>/runner` folder it names |
+| "Brigade's auto-update was not switched off for this run" | Your project's Claude Code settings have no `brigade@…` entry in `enabledPlugins`, or no `extraKnownMarketplaces` entry for its catalog | Nothing, for this run: a version change still stops it. To fix, re-run `/setup-workflow` |
 | "…runs here have used \<another host\> as \<the migration target\>" | The migration target's address changed since the first run | If you meant to change it, delete `.phase-run/migration-target`; if not, fix the address |
 | Every ticket says "not labelled run-ready" | `/ticket-check` has not passed them | Run `/ticket-check <spec>` |
 | A ticket says "waiting on #N" | A ticket it depends on is not built yet, or was set aside | Answer or fix `#N` first |
@@ -477,3 +575,24 @@ size beside cost is what you retune `phaseRun.ticketSize` from. What you do spen
 usage allowance, and a long night can reach its limit. When that
 happens the run is meant to wait and resume by itself, up to `--wait-hours`; that has never
 happened in a real run, so treat it as unproven.
+
+**Trim: lighter night sessions.** Every night session loads what this machine has installed:
+plugins, skills, MCP servers. A trim list, `~/.claude/brigade/trim.json` (under `CLAUDE_CONFIG_DIR`
+when that is set), names what night sessions start without:
+
+```json
+{ "plugins": ["<name>@<catalog>"], "skills": ["<skill name>"], "flags": ["--strict-mcp-config", "--no-chrome"] }
+```
+
+- Plugin ids are as `claude plugin list` prints them, skills by the name a session lists. Only those
+  two flags are accepted: `--strict-mcp-config` drops every MCP server, your project's own
+  `.mcp.json` ones too (leave it out if your nights need them), and `--no-chrome` the browser
+  extension's tools.
+- Night sessions only: your own sessions load everything. A `brigade@…` row is refused, since it
+  would switch off the night's own hooks, and a missing file means no trim.
+- A project never loses what it enables: a plugin its own Claude Code settings turn on, a skill in
+  its `.claude/skills/`, and what its `phaseRun.keep` names (`{ "plugins", "skills" }`), for a user
+  skill one project's nights need. Keep the skills the run's prompts call (`tdd`, `code-review`)
+  off the list; Brigade's own skills can't be listed.
+- A list the runner refuses stops the run at preflight. On one machine, trim took a night session's
+  first prompt from 37K to 46K tokens down to 31K (113 skills to 64, three MCP servers to none).

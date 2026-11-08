@@ -9,11 +9,7 @@
       {
         "label": "The plugin's and the template's tests",
         "run": "node --test tests/*.test.mjs template/tools/doc-tools.test.mjs template/tools/phase-run/run.test.mjs template/tools/phase-run/measure.test.mjs",
-        "receipt": true,
-        "unread": [
-          "docs/**",
-          "*.md"
-        ]
+        "receipt": true
       }
     ]
   },
@@ -31,6 +27,38 @@
         "label": "template runner tests",
         "run": "node --test template/tools/phase-run/run.test.mjs template/tools/phase-run/measure.test.mjs"
       }
-    ]
+    ],
+    "tampering": {
+      "note": "Brigade's own tests are node:test files; the gate reads these rules from each ticket's base commit.",
+      "testFiles": [
+        "tests/**/*.test.mjs",
+        "template/**/*.test.mjs",
+        "tools/**/*.test.mjs"
+      ],
+      "markers": [
+        {
+          "name": "skip",
+          "pattern": "\\.skip\\s*\\(|[{,]\\s*skip\\s*:"
+        },
+        {
+          "name": "only",
+          "pattern": "\\.only\\s*\\(|[{,]\\s*only\\s*:"
+        },
+        {
+          "name": "todo",
+          "pattern": "\\.todo\\s*\\(|[{,]\\s*todo\\s*:"
+        }
+      ],
+      "assertions": {
+        "pattern": "\\bassert\\.",
+        "maxNetRemoved": 3
+      },
+      "guarded": [
+        ".claude/workflow.json"
+      ],
+      "override": {
+        "heading": "Tests removed or weakened"
+      }
+    }
   }
 }

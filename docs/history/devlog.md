@@ -9,6 +9,17 @@ Each commit's entry goes on top, in the shape of `docs/_templates/devlog-entry.m
 message cites it (`devlog #N`). At each phase end, `node tools/doc-rotate.mjs` moves the closed
 entries into `docs/history/devlog/`.
 
+## #21 · chore · update the workflow to 0.6.1
+
+**Built:** `/update-workflow` from 0.5.2 to 0.6.1: ten runner files and the phase-run guide
+re-copied, seven runner files added. The config drops the tests row's `unread` list, since
+`tests/docs-links` and `tests/no-project-specifics` read `docs/`. It adds `phaseRun.tampering`:
+`node:test`'s skip, only and todo markers, `assert.` with 3 net removed, and the config guarded.
+**Verified:** `setup.mjs verify` all ok. The runner's `readInstalledBrigade` read 0.6.1 from
+`claude plugin list --json`, and `brigadeCatalog` found the catalog. The dry run stops at preflight
+(no branch), so it never reaches that read. Not done: the row's `name`, until a 0.6.1 session.
+**Next:** a fresh session, then the row's name. **Record:** this entry only.
+
 ## #20 · fix · 0.6.1: the guide's override example names no real folder
 
 **Built:** the template phase-run guide's test-override example uses `<folder>/…` placeholder

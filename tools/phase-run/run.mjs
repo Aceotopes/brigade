@@ -37,14 +37,24 @@ import { fileURLToPath } from "node:url";
 
 import { BROWSER_CHECK, fill, fillEnv, loadRunConfig, qaUrl, sessionEnv as pinnedEnv, targetFingerprint, targetUrl } from "./config.mjs";
 import { Screen, notify, ticketMinutes } from "./display.mjs";
-import { hookTime, loadPrices, stepKind, stepRules, ticketMetrics } from "./metrics.mjs";
+import { brigadeCatalog, readInstalledBrigade, versionStop, withAutoUpdateOff } from "./brigade.mjs";
+import { LEDGER_PATH, appendRow, ledgerRow, stampVersion } from "./ledger.mjs";
+import { hookTime, loadPrices, sessionCost, stepKind, stepRules, ticketMetrics } from "./metrics.mjs";
+import { finishSnapshot, takeSnapshot } from "./snapshot.mjs";
 import { DEFAULT_RULES as DEFAULT_SIZE, measureTicket as ticketSize } from "./ticket-size.mjs";
+import { PATCH_ARGS, tamperingVerdict } from "./tampering.mjs";
+import { projectKeeps, readTrim, trimEntries, trimPath, withTrim } from "./trim.mjs";
+import { unreadMatcher } from "./unread.mjs";
 import * as docConfig from "../doc-config.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, "..", "..");
 const STATE = join(ROOT, ".phase-run");
 const WINDOWS = process.platform === "win32";
+/** The gates' `{cache}`: emptied before each gate run, so no tool trusts a cache a session wrote (D14). */
+const GATE_CACHE = join(STATE, "gate-cache").replaceAll("\\", "/");
+/** How often the gates' parallel group is looked at: a failure stops the rest on the next look. */
+const GATE_TICK_MS = 250;
 
 const PARK_LABEL = { question: "needs-info", failure: "ready-for-human" };
 /** What Claude Code answers a background session in a folder nobody has trusted yet. */
@@ -178,6 +188,12 @@ function git(...args) {
 
 function gitTry(...args) {
   return exec("git", args);
+}
+
+/** A file's text at a commit, or null when it isn't there (or can't be read): the tampering gate's reader. */
+function atCommit(rev, path) {
+  const result = gitTry("show", `${rev}:${path}`);
+  return result.ok ? result.stdout : null;
 }
 
 function gh(...args) {
@@ -333,6 +349,67 @@ function killTree(child) {
   if (WINDOWS) exec("taskkill", ["/pid", String(child.pid), "/T", "/F"]);
   else child.kill("SIGKILL");
 }
+
+/**
+ * Starts one gate's command through the shell, as `shell` runs one, but without waiting:
+ * `done` resolves to `{ ok, output }` once it has exited, and `stop()` kills its whole process tree
+ * and waits for it. Off Windows the job leads its own process group, so the kill reaches what the
+ * shell started; on Windows `taskkill /T` walks the tree. A job's own group no longer hears the
+ * terminal's Ctrl-C, so every job still open is killed when the runner exits.
+ */
+function startJob(commandLine, env = {}) {
+  const child = spawn(commandLine, { cwd: ROOT, shell: true, env: { ...process.env, ...env }, detached: !WINDOWS, windowsHide: true });
+  let stdout = "";
+  let stderr = "";
+  let closed = false;
+  child.stdout.on("data", (chunk) => (stdout += chunk));
+  child.stderr.on("data", (chunk) => (stderr += chunk));
+  // Until `close`, something may still hold the job's output open: a shell that exited can leave
+  // a child behind it, so the kill is decided on "closed", never on "exited" (Windows aside, where
+  // a gone pid's tree can't be walked).
+  const kill = () => {
+    if (closed) return;
+    if (WINDOWS) {
+      if (child.exitCode === null && child.signalCode === null) exec("taskkill", ["/pid", String(child.pid), "/T", "/F"]);
+      return;
+    }
+    try {
+      process.kill(-child.pid, "SIGKILL");
+    } catch {
+      // the whole group is gone already
+    }
+  };
+  openJobs.add(kill);
+  if (!jobsKilledOnExit) {
+    jobsKilledOnExit = true;
+    process.on("exit", () => {
+      for (const open of openJobs) open();
+    });
+  }
+  const done = new Promise((resolve) => {
+    child.on("error", (error) => {
+      if (child.pid === undefined) {
+        closed = true; // it never started, so no `close` follows
+        openJobs.delete(kill);
+      }
+      resolve({ ok: false, output: error.message });
+    });
+    child.on("close", (code) => {
+      closed = true;
+      openJobs.delete(kill);
+      resolve({ ok: code === 0, output: `${stdout}\n${stderr}`.replace(/\r\n/g, "\n").trim() });
+    });
+  });
+  const stop = async () => {
+    kill();
+    await done;
+  };
+  return { done, stop };
+}
+
+/** Each gate job not yet closed, by its kill: the runner's exit kills them all. */
+const openJobs = new Set();
+let jobsKilledOnExit = false;
 
 // ------------------------------------------------------------------- GitHub
 
@@ -531,6 +608,15 @@ async function preflight(options) {
     }
   }
 
+  // This machine's trim list (trim.mjs, D16), read live, never snapshotted: a refused file stops the run here.
+  let trim = null;
+  try {
+    trim = readTrim(trimPath());
+    if (trim) projectKeeps(ROOT); // what the project enables must be readable, or trim could switch it off
+  } catch (error) {
+    problems.push(`The trim list is refused: ${error.message}`);
+  }
+
   const lock = join(STATE, "lock");
   if (existsSync(lock)) {
     problems.push(`A run is already going (or one crashed): ${readFileSync(lock, "utf8").trim()}. If none is running, delete .phase-run/lock.`);
@@ -541,7 +627,7 @@ async function preflight(options) {
     if (!options.dryRun) die(`Not ready to run:\n\n- ${problems.join("\n- ")}`);
     console.log(`\nA real run would refuse to start:\n\n- ${problems.join("\n- ")}`);
   }
-  return { branch: branch ?? "(no branch named)", current, remote };
+  return { branch: branch ?? "(no branch named)", current, remote, trim };
 }
 
 // ------------------------------------------------------------------ session
@@ -551,10 +637,34 @@ function gotchasFile(branch) {
   return fill(docConfig.GOTCHAS_FILE ?? "docs/agents/gotchas/{phase}.md", { phase: branch.replace(/^phase-/, "") });
 }
 
-/** What the prompt says an edit after the pass does, by the tests row's unread list. */
+/**
+ * What the prompt says an edit after the pass does, by the receipt rows' unread lists: one list when
+ * they share it, else each list with the checks that keep it (0.6.0's named rows keep their own).
+ */
 function unreadNote(stopChecks) {
-  const unread = stopChecks.find((c) => c.receipt)?.unread ?? [];
-  return unread.length ? `except to ${unread.map((glob) => `\`${glob}\``).join(", ")}, which the tests never read` : "docs included";
+  const receipts = stopChecks.filter((c) => c.receipt);
+  const lists = new Map();
+  for (const check of receipts) {
+    const key = JSON.stringify(check.unread ?? []);
+    lists.set(key, [...(lists.get(key) ?? []), check.label]);
+  }
+  const globs = (key) => JSON.parse(key).map((glob) => `\`${glob}\``).join(", ");
+  if (lists.size === 1) {
+    const [key] = lists.keys();
+    return key === "[]" ? "docs included" : `except to ${globs(key)}, which ${receipts.length === 1 ? "the tests" : "they"} never read`;
+  }
+  const parts = [...lists].map(([key, labels]) => `${key === "[]" ? "nothing" : globs(key)} for ${labels.join(" and ")}`);
+  return `except to ${parts.slice(0, -1).join(", ")}, and ${parts.at(-1)}, which they never read`;
+}
+
+/** The stop checks as the prompt lists them: stop-tests.mjs once for every receipt row, the rest as their commands. */
+function stopCheckLine(stopChecks, stopTests, base) {
+  const receipts = stopChecks.filter((c) => c.receipt);
+  const which = receipts.length === 1 ? "the tests" : receipts.map((c) => c.label).join(", ");
+  return stopChecks
+    .filter((c) => !c.receipt || c === receipts[0])
+    .map((c) => (c.receipt ? `${stopTests} (${which})` : `\`${c.run.replaceAll("{base}", base)}\``))
+    .join(", ");
 }
 
 function render(template, values) {
@@ -598,6 +708,9 @@ function proseSections(text) {
  */
 function promptValues(project, prose, ticket) {
   const { BASE: base, N } = ticket;
+  // The session's own check command is the run's copy's (ticket.RUNNER, from the repo's root), so
+  // its receipt is made by the code the stop hook judges with (ADR 0005). Live with no copy.
+  const stopTests = `\`node ${ticket.RUNNER ? `${ticket.RUNNER}/` : ""}tools/phase-run/stop-tests.mjs\``;
   const sections = proseSections(prose);
   const spliced = Object.fromEntries(Object.entries(PROSE_SECTIONS).map(([name, key]) => [key, render(sections[name] ?? "", ticket)]));
   const target = project.migrations?.target.name ?? null;
@@ -610,11 +723,10 @@ function promptValues(project, prose, ticket) {
     QA: project.qa ? `\`${project.qa.name}\`` : "local data",
     TARGET: target ?? "a shared database",
     // The tests (a `receipt` row) are run through stop-tests.mjs, so their pass leaves the receipt the stop check reads.
-    STOP_CHECKS: project.stopChecks.length
-      ? project.stopChecks.map((c) => (c.receipt ? "`node tools/phase-run/stop-tests.mjs` (the tests)" : `\`${c.run.replaceAll("{base}", base)}\``)).join(", ")
-      : "nothing, as this project names no stop checks",
+    // It runs every receipt row, so it is named once, where the first one stands.
+    STOP_CHECKS: project.stopChecks.length ? stopCheckLine(project.stopChecks, stopTests, base) : "nothing, as this project names no stop checks",
     RECEIPT: project.stopChecks.some((c) => c.receipt)
-      ? " Run the tests through `node tools/phase-run/stop-tests.mjs`, never by hand: it prints a short summary (the failures and the totals), and on a pass records a receipt, so a second run on the same code (or the stop check) skips them. Any edit since makes them run again, " +
+      ? ` Run the tests through ${stopTests}, never by hand: it prints a short summary (the failures and the totals), and on a pass records a receipt, so a second run on the same code (or the stop check) skips them. Any edit since makes them run again, ` +
         unreadNote(project.stopChecks) +
         ": so write your docs and logs first, and run the tests last."
       : "",
@@ -630,12 +742,9 @@ function promptValues(project, prose, ticket) {
   };
 }
 
-// "You've hit your session limit · resets 3:30pm" is the wording past transcripts on this machine hold.
-const LIMIT_PATTERN = /usage limit|rate.?limit|limit reached|hit your (\w+ )?limit|out of (extra )?usage|resets? (at|in)\b|overloaded/i;
-
-/** A hidden `claude -p` session (`--print`): nothing to watch, one summary at the end. */
-function runPrint({ prompt, sessionId, resume, options, env, settings, transcript }) {
-  const args = [
+/** A `-p` call's arguments. Each call is a process of its own, so trim's flags go on a resume too. */
+function printArgs({ sessionId, resume, options, settings, flags = [] }) {
+  return [
     "-p",
     "--output-format",
     "json",
@@ -647,7 +756,26 @@ function runPrint({ prompt, sessionId, resume, options, env, settings, transcrip
     settings,
     ...(resume ? ["--resume", sessionId] : ["--session-id", sessionId]),
     ...(options.model ? ["--model", options.model] : []),
+    ...flags,
   ];
+}
+
+/**
+ * A background session's arguments. Trim's flags go on the first launch only: a resume takes no
+ * flag at all (point 5 below: any flag starts a copy), and the session keeps its launch flags, as
+ * it keeps its `--settings`.
+ */
+function backgroundArgs({ sessionId, resume, name, options, settings, ask, flags = [] }) {
+  if (resume) return ["--bg", "--resume", sessionId, ask];
+  return ["--bg", "--name", name, "--permission-mode", "dontAsk", "--settings", settings, ...(options.model ? ["--model", options.model] : []), ...flags, ask];
+}
+
+// "You've hit your session limit · resets 3:30pm" is the wording past transcripts on this machine hold.
+const LIMIT_PATTERN = /usage limit|rate.?limit|limit reached|hit your (\w+ )?limit|out of (extra )?usage|resets? (at|in)\b|overloaded/i;
+
+/** A hidden `claude -p` session (`--print`): nothing to watch, one summary at the end. */
+function runPrint({ prompt, sessionId, resume, options, env, settings, transcript, flags }) {
+  const args = printArgs({ sessionId, resume, options, settings, flags });
   return new Promise((done) => {
     const child = spawn("claude", args, { cwd: ROOT, env: { ...process.env, ...env }, stdio: ["pipe", "pipe", "pipe"] });
     let stdout = "";
@@ -846,11 +974,12 @@ function stopStray(when) {
  * gets what points 1 to 3 above call for. The denials keep a session's hands
  * off the things that check it (the runner, the project's config and the
  * prose its prompt is built from), and off the three tools that would wait
- * for a person or move the work somewhere else.
+ * for a person or move the work somewhere else. `catalog` (brigade.mjs brigadeCatalog, read at run
+ * start) switches Brigade's auto-update off for the session, keeping its catalog entry's `source`.
  */
-function sessionSettings(base, project, { branch, env, background, prompt }) {
+function sessionSettings(base, project, { branch, env, background, prompt, catalog = null }) {
   const allow = [...(base.permissions?.allow ?? []), ...project.allow];
-  return {
+  return withAutoUpdateOff({
     ...base,
     permissions: {
       ...base.permissions,
@@ -870,15 +999,41 @@ function sessionSettings(base, project, { branch, env, background, prompt }) {
     },
     env: { ...(base.env ?? {}), ...env },
     ...(background ? { worktree: { ...(base.worktree ?? {}), bgIsolation: "none" } } : {}),
-  };
+  }, catalog);
+}
+
+/**
+ * A file of the runner's that a session's rules come from (its base settings, its prompts): the run's
+ * frozen copy's (ADR 0005), so a shell write to the live tools/phase-run/ mid-night changes nothing
+ * for later tickets. With no copy yet (a dry run), the runner's own.
+ */
+function runnerFile(runner, name) {
+  return runner ? join(runner, "tools", "phase-run", name) : join(HERE, name);
 }
 
 function writeSessionSettings(run, number, env, { background = true } = {}) {
-  const base = JSON.parse(readFileSync(join(HERE, "settings.json"), "utf8"));
-  const settings = sessionSettings(base, config.permissions, { branch: run.branch, env, background, prompt: config.prompt });
+  const base = JSON.parse(readFileSync(runnerFile(run.runner, "settings.json"), "utf8"));
+  const settings = sessionSettings(base, config.permissions, { branch: run.branch, env, background, prompt: config.prompt, catalog: run.catalog });
   const path = join(run.dir, `settings-${number}.json`);
-  writeFileSync(path, `${JSON.stringify(settings, null, 2)}\n`);
+  writeFileSync(path, `${JSON.stringify(trimmedSettings(settings, run.trim, ROOT, config.keep), null, 2)}\n`);
   return path;
+}
+
+/**
+ * A night ticket's settings with trim's entries (trim.mjs, D16), minus what the project enables or
+ * keeps. A project settings file that can't be read (preflight refused it, so a session broke it
+ * since) trims nothing that ticket: never what the project may need.
+ */
+function trimmedSettings(settings, trim, root, keep) {
+  if (!trim) return settings;
+  let project;
+  try {
+    project = projectKeeps(root);
+  } catch (error) {
+    log(`Trim skipped for this ticket: ${error.message}`);
+    return settings;
+  }
+  return withTrim(settings, trimEntries(trim, { project, keep }));
 }
 
 /** Where Claude Code keeps a session's transcript: one `.jsonl` per session, under a folder per project. */
@@ -970,7 +1125,7 @@ function readTurn(sessionId, fromLine) {
  * `runPrint` does. It is stopped after every turn: point 5 needs that before
  * a fix round, and a stopped session can still be opened and read.
  */
-async function runBackground({ prompt, sessionId, resume, options, settings, name, transcript, number }) {
+async function runBackground({ prompt, sessionId, resume, options, settings, name, transcript, number, flags }) {
   const promptFile = transcript.replace(/\.json$/, ".prompt.md");
   writeFileSync(promptFile, prompt);
   const ask = `Read the file ${relative(ROOT, promptFile).replace(/\\/g, "/")} and follow it exactly. It is your whole task for this turn.`;
@@ -981,7 +1136,7 @@ async function runBackground({ prompt, sessionId, resume, options, settings, nam
     id = sessionId.slice(0, 8);
     stopBackground(id);
     fromLine = transcriptLines(sessionId).length;
-    const woke = exec("claude", ["--bg", "--resume", sessionId, ask]);
+    const woke = exec("claude", backgroundArgs({ sessionId, resume, ask }));
     const said = `${woke.stdout}\n${woke.stderr}`;
     const copy = said.match(/started a copy(?: of that conversation)? as ([0-9a-f]{8})/);
     if (copy) stopBackground(copy[1]);
@@ -995,8 +1150,7 @@ async function runBackground({ prompt, sessionId, resume, options, settings, nam
       return { timedOut: false, json: null, raw: message };
     }
   } else {
-    const args = ["--bg", "--name", name, "--permission-mode", "dontAsk", "--settings", settings, ...(options.model ? ["--model", options.model] : []), ask];
-    const started = exec("claude", args);
+    const started = exec("claude", backgroundArgs({ name, options, settings, ask, flags }));
     const said = `${started.stdout}\n${started.stderr}`;
     id = said.match(/backgrounded · ([0-9a-f]{8})/)?.[1] ?? null;
     if (!started.ok || !id) return { timedOut: false, json: null, raw: said };
@@ -1298,23 +1452,129 @@ function browserCheckProblem(ticket, changed, startedAt) {
 }
 
 /**
- * The project's gates (phaseRun.gates), in order: the first failure as
- * `{ gate, output }`, or null. A gate whose `when` matches no changed file is
- * skipped. The shell and the side jobs are parameters, so a test can stand in
- * for them.
+ * Every path a `git diff --name-status -M -z` names, once each, in its order. A rename or a copy
+ * (`R087`, `C075`) names two paths, and both count: a doc moved into the source is a source change.
  */
-async function projectGates(gates, { changed, values, browserCheck, run = shell, freePorts = freeTicketPorts, stopStray: stop = () => 0 }) {
-  for (const gate of gates) {
-    if (gate.builtin === BROWSER_CHECK) {
-      const problem = browserCheck();
-      if (problem) return { gate: "browser check", output: problem };
-      continue;
+function diffPaths(nameStatus) {
+  const fields = nameStatus.split("\0");
+  const paths = [];
+  for (let i = 0; i < fields.length; i++) {
+    const status = fields[i].trim();
+    if (!status) continue;
+    const count = /^[RC]/.test(status) ? 2 : 1;
+    paths.push(...fields.slice(i + 1, i + 1 + count));
+    i += count;
+  }
+  return [...new Set(paths.filter(Boolean))];
+}
+
+/**
+ * Which of the project's gates run on this ticket, which skip, and the tampering verdict: the one
+ * decision function. `diff` is `git diff --name-status -M -z <base>..HEAD`.
+ * A gate skips on `when` when no changed path matches it, and on `unreadOf` (the suite skip, D13)
+ * when the diff is non-empty and every path is on that stop check's `unread` list, through the
+ * one matcher (unread.mjs). An empty diff never takes the suite skip.
+ * `tampering` (D15, tampering.mjs) is null when the run has no tampering section; its rules are read
+ * at `base` through `readAt(rev, path)`, from the `patch` (PATCH_ARGS), the ticket `body` as fetched
+ * at run start and the commit `message`.
+ */
+function gatePlan({ base, diff, config: { gates, stopChecks = [], tampering = null }, patch = "", readAt = null, body = "", message = "" }) {
+  const paths = diffPaths(diff);
+  const unread = new Map(stopChecks.filter((check) => check.name).map((check) => [check.name, unreadMatcher(check.unread)]));
+  const skipOf = (gate) => {
+    if (gate.builtin) return null;
+    if (gate.when && !paths.some((path) => gate.when.test(path))) return "when";
+    if (gate.unreadOf && paths.length > 0 && paths.every(unread.get(gate.unreadOf))) return "unreadOf";
+    return null;
+  };
+  return {
+    base,
+    paths,
+    gates: gates.map((gate) => ({ gate, skip: skipOf(gate) })),
+    tampering: tamperingVerdict({ base, rules: tampering, paths, patch, readAt, body, message }),
+  };
+}
+
+/** Why a gate skipped, by `gatePlan`'s skip: one line each, so a new skip can't borrow another's words. */
+const SKIP_REASONS = {
+  when: () => "no changed file matches its `when`",
+  unreadOf: (gate) => `every changed file is on the ${gate.unreadOf} check's unread list (the suite skip)`,
+};
+
+/**
+ * Runs `gates` side by side (D12): every one without a pending `after` starts at once, and an
+ * `after` gate starts once its gate passed (a gate not in this group, a skipped one, holds nobody
+ * up). Finished jobs are collected each tick; on a failure, every failure of that tick is reported,
+ * the jobs still running are killed and waited for, and the ones not started never start.
+ */
+async function gateGroup(gates, { values, start, tickMs }) {
+  const labels = new Set(gates.map((gate) => gate.label));
+  const passed = new Set();
+  const running = new Map();
+  let waiting = [...gates];
+  const startReady = () => {
+    const ready = (gate) => !gate.after || !labels.has(gate.after) || passed.has(gate.after);
+    for (const gate of waiting.filter(ready)) {
+      const entry = { job: start(fill(gate.run, values), fillEnv(gate.env, values)), result: null };
+      entry.job.done.then((result) => (entry.result = result));
+      running.set(gate, entry);
     }
-    if (gate.when && !changed.some((file) => gate.when.test(file))) continue;
+    waiting = waiting.filter((gate) => !ready(gate));
+  };
+  startReady();
+  while (running.size > 0) {
+    await sleep(tickMs);
+    const failures = [];
+    for (const [gate, entry] of running) {
+      if (!entry.result) continue;
+      running.delete(gate);
+      if (entry.result.ok) passed.add(gate.label);
+      else failures.push({ gate: gate.label, output: entry.result.output });
+    }
+    if (failures.length > 0) {
+      await Promise.all([...running.values()].map((entry) => entry.job.stop()));
+      if (failures.length === 1) return failures[0];
+      return {
+        gate: failures.map((failure) => failure.gate).join(", "),
+        output: failures.map((failure) => `── ${failure.gate} ──\n${tail(failure.output, 3000)}`).join("\n\n"),
+      };
+    }
+    startReady();
+  }
+  // The loaders rule this out (gateOrder); a gate left unstarted must still never read as a pass.
+  if (waiting.length > 0) {
+    return { gate: waiting.map((gate) => gate.label).join(", "), output: `Never started: each waits on an \`after\` that never passed (${waiting.map((gate) => `${gate.label} after ${gate.after}`).join(", ")}).` };
+  }
+  return null;
+}
+
+/**
+ * The project's gates (phaseRun.gates), as `gatePlan` decided them: the tampering verdict first (D12),
+ * then the parallel group, then each `alone` gate by itself (strays stopped first), then the browser
+ * check, wherever the config places it. The first failure is returned as `{ gate, output }`, or null.
+ * `{cache}` is emptied before any gate starts. The job starter and the side jobs are parameters, so
+ * a test can stand in for them.
+ */
+async function projectGates(plan, { values, browserCheck, start = startJob, tickMs = GATE_TICK_MS, freePorts = freeTicketPorts, stopStray: stop = () => 0 }) {
+  if (plan.tampering && !plan.tampering.ok) return { gate: "tampering", output: plan.tampering.output };
+  if (values.cache) {
+    rmSync(values.cache, { recursive: true, force: true });
+    mkdirSync(values.cache, { recursive: true });
+  }
+  const live = plan.gates.filter(({ gate, skip }) => !gate.builtin && !skip).map(({ gate }) => gate);
+  const group = live.filter((gate) => !gate.alone);
+  if (group.some((gate) => gate.freePorts)) await freePorts();
+  const failed = await gateGroup(group, { values, start, tickMs });
+  if (failed) return failed;
+  for (const gate of live.filter((g) => g.alone)) {
     if (gate.freePorts) await freePorts();
-    if (gate.alone) stop(`before the ${gate.label} gate`);
-    const result = run(fill(gate.run, values), fillEnv(gate.env, values));
-    if (!result.ok) return { gate: gate.label, output: result.output };
+    stop(`before the ${gate.label} gate`);
+    const alone = await gateGroup([gate], { values, start, tickMs });
+    if (alone) return alone;
+  }
+  if (plan.gates.some(({ gate }) => gate.builtin === BROWSER_CHECK)) {
+    const problem = browserCheck();
+    if (problem) return { gate: "browser check", output: problem };
   }
   return null;
 }
@@ -1352,10 +1612,26 @@ async function runGates(ticket, base, options, run, startedAt) {
     return fail("docs", "The commit adds no docs/history/implementation-log/NNN-*.md entry. Every ticket gets one, in full.");
   }
 
-  const changed = git("diff", "--name-only", `${base}..HEAD`).split("\n").filter(Boolean);
-  const failed = await projectGates(config.gates, {
-    changed,
-    values: { base, N: n, qaUrl: qaUrl(config, lookup) },
+  // One rename-aware diff decides every gate's skip and feeds the browser check, so they agree. The
+  // tampering verdict reads its rules at the base, never from the tree the ticket could edit.
+  const plan = gatePlan({
+    base,
+    diff: git("diff", "--name-status", "-M", "-z", `${base}..HEAD`),
+    config,
+    ...(config.tampering ? { patch: git(...PATCH_ARGS, `${base}..HEAD`), readAt: atCommit, body: ticket.body ?? "", message } : {}),
+  });
+  const changed = plan.paths;
+  for (const { gate, skip } of plan.gates.filter((g) => g.skip)) {
+    log(`#${n}: the ${gate.label} gate is skipped: ${SKIP_REASONS[skip](gate)}.`, { routine: true });
+  }
+  if (plan.tampering?.overridden.length) log(`#${n}: the tampering gate let ${plan.tampering.overridden.join(", ")} through, by the ticket's test override.`);
+  if (plan.tampering?.refusedNote) {
+    // Kept for the result (recordResult), whichever round or gate ends the ticket.
+    run.tamperingNotes ??= new Map();
+    run.tamperingNotes.set(n, plan.tampering.refusedNote);
+  }
+  const failed = await projectGates(plan, {
+    values: { base, N: n, qaUrl: qaUrl(config, lookup), cache: GATE_CACHE },
     browserCheck: () => browserCheckProblem(ticket, changed, startedAt),
     stopStray: (when) => stopStray(`${when} for #${n}`),
   });
@@ -1462,14 +1738,56 @@ function saveResults(run) {
   writeFileSync(resultsFile(run), `${JSON.stringify(run.all, null, 2)}\n`);
 }
 
-/** Records one ticket's result: in this run's list, and on disk at once. */
-function recordResult(run, result) {
-  const stamped = { ...result, runId: run.runId, reported: false };
+/**
+ * Records one ticket's result: its night row in the ledger, then the result in this run's list
+ * and on disk at once. Every way a ticket ends comes through here: built, parked, failed, and the
+ * runner's own error.
+ */
+function recordResult(run, result, at = Date.now()) {
+  const stamped = { ...withTamperingNote(run, result), runId: run.runId, reported: false };
+  recordNight(run, stamped, at);
   run.results.push(stamped);
   run.all.push(stamped);
   saveResults(run);
   return stamped;
 }
+
+/**
+ * A result with the tampering gate's refusal of a commit-message reason, if any round of this ticket
+ * had one: a built ticket's notes, or a parked or failed ticket's detail (the report renders no notes
+ * for those). Kept even when a later round passed, since the session tried to excuse itself.
+ */
+function withTamperingNote(run, result) {
+  const note = run.tamperingNotes?.get(result.number);
+  if (!note) return result;
+  if (result.status === "built") return { ...result, notes: [...(result.notes ?? []), note] };
+  return { ...result, detail: `${result.detail ?? ""}\n\n${note}` };
+}
+
+/**
+ * The ticket's night row (ledger.mjs): its session priced whole from the transcript, so a crash
+ * is priced as well as a measured result. A run keeps a ledger only when main() gave it a file.
+ * A row that cannot be written marks the result "ledger: not written" and never stops the run.
+ */
+function recordNight(run, result, at) {
+  if (!run.ledgerFile) return;
+  try {
+    const live = run.ticketSession?.number === result.number ? run.ticketSession : null;
+    if (!live) throw new Error("no session was started for this ticket");
+    // `transcript` is set only by tests; the runner finds the session's own file.
+    const transcript = live.transcript ?? transcriptPath(live.sessionId);
+    // No transcript: the session never ran (or its file is elsewhere). A $0 row would count a session that cost nothing.
+    if (!transcript || !existsSync(transcript)) throw new Error(`no transcript was found for session ${live.sessionId}`);
+    const cost = sessionCost(transcript, run.prices ?? loadPrices());
+    appendRow(run.ledgerFile, ledgerRow({ at, sessionId: live.sessionId, transcript, kind: "night", ticket: result.number, branch: run.branch, brigade: run.brigade ?? null, cost }));
+  } catch (error) {
+    result.ledger = "not written";
+    result.ledgerError = String(error?.message ?? error);
+  }
+}
+
+/** The report's line for a result whose night row was lost, or nothing. */
+const ledgerNote = (r) => (r.ledger === "not written" ? [`⚠ ledger: not written (${r.ledgerError ?? "no reason recorded"}). This ticket's cost is missing from .phase-run/ledger.jsonl.`] : []);
 
 /** The pull request's body: every ticket built on the branch, whichever night built it. */
 function pullRequestBody(all, options) {
@@ -1640,18 +1958,30 @@ function sessionFacts(result, previous) {
   };
 }
 
+/**
+ * The run's variables in one ticket's session. PHASE_RUN_RUNNER points the plugin's hooks at the
+ * run's frozen copy of the runner and its config (snapshot.mjs, ADR 0005); PHASE_RUN_ROOT points
+ * the copy's own scripts (stop-tests.mjs) back at the repo they check.
+ */
+function runVariables({ ticket, base, spec, runner, root }) {
+  return {
+    PHASE_RUN: "1",
+    PHASE_RUN_TICKET: String(ticket),
+    PHASE_RUN_BASE: base,
+    ...(spec ? { PHASE_RUN_SPEC: String(spec) } : {}),
+    PHASE_RUN_RUNNER: runner,
+    PHASE_RUN_ROOT: root,
+  };
+}
+
 async function runTicket(ticket, options, run) {
   const n = ticket.number;
   const base = git("rev-parse", "HEAD");
   const startedAt = Date.now();
   let sessionId = randomUUID();
-  const env = {
-    ...sessionEnv(),
-    PHASE_RUN: "1",
-    PHASE_RUN_TICKET: String(n),
-    PHASE_RUN_BASE: base,
-    ...(options.spec ? { PHASE_RUN_SPEC: String(options.spec) } : {}),
-  };
+  // The session the ticket's night row prices, however the ticket ends (recordNight).
+  run.ticketSession = { number: n, sessionId };
+  const env = { ...sessionEnv(), ...runVariables({ ticket: n, base, spec: options.spec, runner: run.runner, root: ROOT }) };
   rmSync(join(STATE, `verdict-${n}.json`), { force: true });
   rmSync(stopCheckMarker(n), { force: true });
   // What every call for this ticket shares. Its settings file (the run's
@@ -1664,6 +1994,7 @@ async function runTicket(ticket, options, run) {
     number: n,
     name: `ticket-${n}-${slug}`,
     settings: writeSessionSettings(run, n, env, { background: !options.print }),
+    flags: run.trim?.flags ?? [], // trim's launch flags (trim.mjs, D16)
   };
   const values = {
     N: n,
@@ -1674,6 +2005,7 @@ async function runTicket(ticket, options, run) {
     SPEC: options.spec ? `#${options.spec}` : "none (a one-off ticket)",
     BASE: base,
     FRONTEND: ticket.labels.includes("frontend") ? "yes" : "no",
+    RUNNER: relative(ROOT, run.runner).replaceAll("\\", "/"), // the copy, as the session's shell names it
   };
   Object.assign(values, promptValues(config, projectProse, values));
 
@@ -1685,7 +2017,7 @@ async function runTicket(ticket, options, run) {
   const measured = (facts) => ({ ...facts, metrics: measureTicketRun(ticket, startedAt, sessionId, gatesMs) });
   let call = await runSession({
     ...session,
-    prompt: render(readFileSync(join(HERE, "ticket-prompt.md"), "utf8"), values),
+    prompt: render(readFileSync(runnerFile(run.runner, "ticket-prompt.md"), "utf8"), values),
     sessionId,
     resume: false,
     transcript: join(run.dir, `ticket-${n}-build.json`),
@@ -1694,6 +2026,7 @@ async function runTicket(ticket, options, run) {
 
   for (let round = 0; ; round += 1) {
     sessionId = call.sessionId ?? sessionId;
+    run.ticketSession.sessionId = sessionId;
     if (call.gaveUp) {
       await park(ticket, base, "failure", `${call.gaveUp} Nothing is wrong with the ticket itself; the run stopped here.`, run, measured(facts));
       return "stop";
@@ -1745,7 +2078,7 @@ async function runTicket(ticket, options, run) {
     setCurrent({ stage: `fix round ${round + 1}`, steps: 0 });
     showProgress();
     call = await runSession({
-      prompt: render(readFileSync(join(HERE, "fix-prompt.md"), "utf8"), {
+      prompt: render(readFileSync(runnerFile(run.runner, "fix-prompt.md"), "utf8"), {
         ...values,
         GATE: gates.gate,
         OUTPUT: tail(gates.output),
@@ -1836,7 +2169,13 @@ function report(run, options, remaining, { final = true } = {}) {
   const effort = (facts) => (facts ? `${facts.minutes} min · ${facts.turns} turns · ${facts.calls} session call(s)${money(facts)}` : "");
 
   out.push(`## Phase run report: ${run.branch}`, "");
-  out.push(`${new Date().toISOString().slice(0, 16).replace("T", " ")} UTC · built ${built.length} · parked ${parked.length} · failed ${failed.length}`, "");
+  // The Brigade version whose hooks judged every ticket (brigade.mjs, D14).
+  const version = run.brigade ? ` · Brigade ${run.brigade}` : "";
+  out.push(`${new Date().toISOString().slice(0, 16).replace("T", " ")} UTC${version} · built ${built.length} · parked ${parked.length} · failed ${failed.length}`, "");
+  if (run.brigade && run.stamp && run.stamp !== run.brigade) {
+    out.push(`This project's runner is stamped ${run.stamp}; Brigade ${run.brigade} judged the run. \`/update-workflow\` brings the runner to the plugin's version.`, "");
+  }
+  if (run.catalog && !run.catalog.catalog) out.push(`⚠ Brigade's auto-update was not switched off for this run: ${run.catalog.why}`, "");
   if (!final) out.push("🕒 **In progress.** This file is rewritten after each ticket; the run had not finished when it was saved. If no later version exists, the run stopped here.", "");
   if (run.stopped) out.push(`🚨 **The run stopped early.** ${run.stopped}`, "");
   if (run.results.length) out.push(...scoreboardSection(run.results));
@@ -1874,6 +2213,7 @@ function report(run, options, remaining, { final = true } = {}) {
     if (r.screenshots) out.push(`- Screenshots: \`${r.screenshots}\``);
     if (r.session?.denials.length) out.push(`- Commands the session was refused (${r.session.denials.length}): ${r.session.denials.slice(0, 6).map((d) => `\`${String(d).slice(0, 60)}\``).join(", ")}`);
     for (const note of r.notes) out.push(`- ⚠ ${note}`);
+    for (const note of ledgerNote(r)) out.push(`- ${note}`);
     if (r.session?.watch) out.push(`- The whole session, to read back: \`claude attach ${r.session.watch}\``);
     out.push(`- Effort: ${effort(r.session)}`, "");
   }
@@ -1897,11 +2237,11 @@ function report(run, options, remaining, { final = true } = {}) {
       : "";
 
   if (parked.length) out.push("### Parked: your decision is needed", "");
-  for (const r of parked) out.push(`**#${r.number} ${r.title}**`, "", r.detail, "", r.keptOn ? `Work kept on \`${r.keptOn}\`.` : "", unposted(r), "");
+  for (const r of parked) out.push(`**#${r.number} ${r.title}**`, "", r.detail, "", r.keptOn ? `Work kept on \`${r.keptOn}\`.` : "", unposted(r), ...ledgerNote(r), "");
 
   if (failed.length) out.push("### Failed", "");
   for (const r of failed) {
-    out.push(`**#${r.number} ${r.title}**`, "", r.detail, "", r.keptOn ? `Work kept on \`${r.keptOn}\`.` : "", unposted(r));
+    out.push(`**#${r.number} ${r.title}**`, "", r.detail, "", r.keptOn ? `Work kept on \`${r.keptOn}\`.` : "", unposted(r), ...ledgerNote(r));
     if (r.leftOnTarget?.length) out.push(`🚨 ${targetName()} holds ${r.leftOnTarget.join(", ")} from this ticket, which is not on the phase branch.`);
     if (r.session?.watch) out.push(`The whole session, to read back: \`claude attach ${r.session.watch}\``);
     out.push(`Effort: ${effort(r.session)}`, "");
@@ -1926,7 +2266,7 @@ function report(run, options, remaining, { final = true } = {}) {
 
 async function main() {
   const options = parseArgs(process.argv.slice(2));
-  const { branch, current, remote } = await preflight(options);
+  const { branch, current, remote, trim } = await preflight(options);
   // Only a dry run gets here without a remote, and its tickets are on GitHub.
   if (!remote) {
     console.log("\nNo tickets listed: they are read from GitHub, and this repo has no remote yet.\n");
@@ -1956,6 +2296,17 @@ async function main() {
     console.log(`\nA real run would build ${limit} of the READY tickets, in this order.\n`);
     return;
   }
+
+  // The Brigade version whose hooks judge the night (brigade.mjs, ADR 0005): read once here, before
+  // the lock and the branch are touched, and again before each ticket. With none installed for this
+  // repo, no ticket would run under Brigade's hooks.
+  let installed;
+  try {
+    installed = readInstalledBrigade(ROOT, exec);
+  } catch (error) {
+    die(`Brigade's installed version can't be read, so the run can't hold to one version: ${error.message}`);
+  }
+  if (!installed) die(`Brigade is not installed for this repo: \`claude plugin list --json\` lists no brigade@… install for ${ROOT}, and none at user scope. Install it, then start the run again.`);
 
   mkdirSync(STATE, { recursive: true });
   const lock = join(STATE, "lock");
@@ -1994,6 +2345,13 @@ async function main() {
     carried: [], // an earlier run's that never reached a report
     migrationsApplied: new Set(),
     pullRequest: null,
+    ledgerFile: join(ROOT, LEDGER_PATH), // one night row per ticket (recordNight)
+    brigade: installed, // the installed Brigade version that judges the night: in the manifest, the report and every night row
+    stamp: stampVersion(ROOT), // the project's runner stamp, shown in the report when it differs
+    catalog: brigadeCatalog(ROOT), // Brigade's catalog entry, for each ticket's auto-update override (or why there is none)
+    ticketSession: null,
+    runner: null, // the run's frozen copy of the runner and its config (takeSnapshot, below)
+    trim, // this machine's trim list (trim.mjs, D16), or null: no trim
   };
   mkdirSync(run.dir, { recursive: true });
   run.all = loadResults(resultsFile(run));
@@ -2001,6 +2359,20 @@ async function main() {
   const reportFile = join(run.dir, `report-${run.runId.slice(0, 16).replace(/[:T]/g, "-")}.md`);
   mkdirSync(join(STATE, "tmp"), { recursive: true }); // where a session keeps its scratch files
   logFile = join(run.dir, "run.log");
+  // One frozen copy of the runner and its config judges the whole run (snapshot.mjs, ADR 0005):
+  // a restart after a crash reuses it, and is refused when the live runner's code changed since.
+  try {
+    const snapshot = takeSnapshot({ root: ROOT, runDir: run.dir, runId: run.runId, commit: git("rev-parse", "HEAD"), at: Date.now(), brigade: run.brigade });
+    run.runner = snapshot.dir;
+    log(snapshot.reused ? `Restarted on the runner copy taken ${snapshot.manifest.takenAt} (run ${snapshot.manifest.runId}).` : `Runner copy taken at ${snapshot.manifest.commit.slice(0, 7)}.`, { routine: true });
+  } catch (error) {
+    die(error.message);
+  }
+  // The runner's own gates and the prompt's checks come from the copy too, as the hooks' do: on a
+  // restart the live config may have changed since the copy was taken.
+  const frozen = loadRunConfig(run.runner);
+  if (frozen.error) die(`The run's copy of the config cannot be read (${run.runner}): ${frozen.error}`);
+  config = frozen.config;
   liveFile = join(run.dir, "live.json");
   const appliedFile = join(run.dir, "migrations-applied.json");
   if (existsSync(appliedFile)) for (const name of JSON.parse(readFileSync(appliedFile, "utf8"))) run.migrationsApplied.add(name);
@@ -2027,9 +2399,10 @@ async function main() {
 
   log(
     `Run started on ${branch}: ${limit} ticket(s)${options.until ? `, stopping after #${options.until}` : ""}, ` +
-      `${options.minutes} min each, ${options.fixRounds} fix rounds.`,
+      `${options.minutes} min each, ${options.fixRounds} fix rounds, Brigade ${run.brigade}.`,
     { routine: true },
   );
+  if (!run.catalog.catalog) log(`Brigade's auto-update is not switched off for this run: ${run.catalog.why}`);
   showProgress();
 
   let outcome = "continue";
@@ -2038,6 +2411,13 @@ async function main() {
     if (!next) break;
     if (!(await waitForInternet(waitDeadline(options), `before #${next.number}`))) {
       run.stopped = `The internet connection did not come back within ${options.waitHours} hours, so #${next.number} was never started.`;
+      log(run.stopped);
+      break;
+    }
+    // An attended session elsewhere may have updated Brigade: the next ticket would be judged by other hooks.
+    const changed = versionStop(run.brigade, () => readInstalledBrigade(ROOT, exec));
+    if (changed) {
+      run.stopped = `${changed} #${next.number} was never started.`;
       log(run.stopped);
       break;
     }
@@ -2070,6 +2450,7 @@ async function main() {
   writeFileSync(reportFile, text);
   for (const result of run.all) result.reported = true;
   saveResults(run);
+  finishSnapshot(run.runner); // the run reached its report: the next one takes a fresh copy
   if (run.pullRequest) exec("gh", ["pr", "comment", branch, "--body-file", reportFile]);
   log(`Run finished. Report: ${reportFile}${run.pullRequest ? ` · pull request: ${run.pullRequest}` : ""}`);
   rmSync(liveFile, { force: true });
@@ -2084,12 +2465,15 @@ export {
   QUIET_MS,
   SETTLE_MS,
   applyMigrations,
+  backgroundArgs,
   fetchBlockers,
+  gatePlan,
   gotchasFile,
   holdReason,
   loadResults,
   online,
   outsideAreas,
+  printArgs,
   projectGates,
   promptValues,
   pullRequestBody,
@@ -2098,11 +2482,15 @@ export {
   recordResult,
   report,
   runSession,
+  runVariables,
+  runnerFile,
   screenshotsSince,
   sessionEnv,
   sessionSettings,
+  startJob,
   stopCheckRunning,
   stopStray,
+  trimmedSettings,
   turnOver,
   waitForInternet,
   writeSessionSettings,
