@@ -27,6 +27,8 @@
 //                    "guarded"?, "guardedScripts"?: [{ "file", "script" }], "override"?: { "heading" } }
 //                                                   the tampering gate (tampering.mjs), first of the gates;
 //                                                   its rules are read from the base commit, never the tree
+//     "keep": { "plugins"?: [], "skills"?: [] }      user plugins and skills this project's nights keep,
+//                                                   whatever the machine's trim.json says (trim.mjs, D16)
 //   }
 //
 // The top-level `ledger` section, `{ "attended"?, "weekStarts"? }` (ledger.mjs), is read here too,
@@ -57,7 +59,7 @@ export const WEEK_DAYS = ["sunday", "monday", "tuesday", "wednesday", "thursday"
 export const DEFAULT_LEDGER = { attended: true, weekStarts: "monday" };
 
 const KEYS = {
-  phaseRun: ["prompt", "preflight", "ports", "qa", "sessionEnv", "strayProcess", "gates", "browserCheck", "migrations", "alwaysInScope", "permissions", "steps", "ticketSize", "tampering"],
+  phaseRun: ["prompt", "preflight", "ports", "qa", "sessionEnv", "strayProcess", "gates", "browserCheck", "migrations", "alwaysInScope", "permissions", "steps", "ticketSize", "tampering", "keep"],
   preflight: ["label", "run", "hint"],
   port: ["port", "what", "freeAfterEachTicket"],
   qa: ["name", "url"],
@@ -68,6 +70,7 @@ const KEYS = {
   target: ["name", "urlFrom", "direct"],
   command: ["run", "env"],
   permissions: ["allow", "deny"],
+  keep: ["plugins", "skills"],
   step: ["kind", "match"],
   sizeRule: ["key", "kind", "section", "max", "label"],
 };
@@ -152,6 +155,7 @@ export function parseRunConfig(data) {
     ticketSize: run.ticketSize === undefined ? null : list(run.ticketSize, `${where}.ticketSize`).map((row, i) => parseSizeRule(row, `${where}.ticketSize[${i}]`)),
     stopChecks,
     tampering: tamperingRules(run.tampering, `${where}.tampering`),
+    keep: parseKeep(run.keep === undefined ? {} : run.keep, `${where}.keep`),
     ledger: parseLedger(data?.ledger),
   };
 }
@@ -436,6 +440,18 @@ function parsePermissions(value, at) {
   keys(value, KEYS.permissions, at);
   const rules = (name) => list(value[name], `${at}.${name}`).map((rule, i) => text(rule, `${at}.${name}[${i}]`));
   return { allow: rules("allow"), deny: rules("deny") };
+}
+
+/** `phaseRun.keep` (D16): the user plugins (`name@marketplace`) and skills this project's nights never trim. */
+function parseKeep(value, at) {
+  keys(value, KEYS.keep, at);
+  const names = (name) => list(value[name], `${at}.${name}`).map((entry, i) => text(entry, `${at}.${name}[${i}]`).trim());
+  const plugins = names("plugins");
+  // trim.mjs's isPluginId, written out: config.mjs imports nothing the stop-tests copy lacks (measure.test.mjs).
+  for (const id of plugins) {
+    if (!/^[^@\s]+@[^@\s]+$/.test(id)) throw new Error(`${at}.plugins: "${id}" is not a plugin id (name@marketplace, as \`claude plugin list\` prints it).`);
+  }
+  return { plugins, skills: names("skills") };
 }
 
 // ------------------------------------------------------------------ the values

@@ -167,6 +167,26 @@ test("both loaders refuse a malformed ledger section alike", () => {
   }
 });
 
+// 0.6.0 (#21, D16): `phaseRun.keep` names the user plugins and skills a project's nights keep from
+// the machine's trim list. The hooks pass over it (it judges nothing); the runner checks its shape.
+test("both loaders accept phaseRun.keep; the runner refuses a malformed one", () => {
+  const keep = { plugins: ["notion@official"], skills: ["dataviz"], note: "our docs need these" };
+  assert.doesNotThrow(() => parseWorkflowConfig({ version: 1, phaseRun: { keep } }));
+  assert.deepEqual(parseRunConfig({ version: 1, phaseRun: { keep } }).keep, { plugins: ["notion@official"], skills: ["dataviz"] });
+  assert.deepEqual(parseRunConfig({ version: 1 }).keep, { plugins: [], skills: [] });
+  for (const [bad, error] of [
+    [{ flags: ["--no-chrome"] }, /phaseRun\.keep has unknown key\(s\) flags/],
+    [{ skills: "dataviz" }, /phaseRun\.keep\.skills must be a list/],
+    [{ plugins: [""] }, /phaseRun\.keep\.plugins\[0\] is missing/],
+    [{ plugins: ["figma"] }, /phaseRun\.keep\.plugins: "figma" is not a plugin id/],
+  ]) {
+    assert.throws(() => parseRunConfig({ version: 1, phaseRun: { keep: bad } }), error, JSON.stringify(bad));
+  }
+  for (const bad of [null, []]) {
+    assert.throws(() => parseRunConfig({ version: 1, phaseRun: { keep: bad } }), /phaseRun\.keep must be an object/, JSON.stringify(bad));
+  }
+});
+
 // 0.6.0 (#20, D15): `phaseRun.tampering` is checked in full by both loaders, with the same words: a
 // broken rule must stop the night wherever the file is read, never be quietly skipped. This is the
 // one part of phaseRun the hooks refuse on any shape.

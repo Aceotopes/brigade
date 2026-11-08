@@ -9,6 +9,20 @@ Each commit's entry goes on top, in the shape of `docs/_templates/devlog-entry.m
 message cites it (`devlog #N`). At each phase end, `node tools/doc-rotate.mjs` moves the closed
 entries into `docs/history/devlog/`.
 
+## #15 · feat · trim, with a project keep list
+
+**Built:**
+- `trim.mjs`: `~/.claude/brigade/trim.json` (or under `CLAUDE_CONFIG_DIR`), `{plugins, skills,
+  flags}`. Flags only from `TRIM_FLAGS`; `brigade@*` refused. Missing file, no trim.
+- Read at preflight; `writeSessionSettings` merges `enabledPlugins: false` / `skillOverrides: "off"`,
+  minus the project's enabled plugins, its `.claude/skills` and the new `phaseRun.keep`.
+- Flags on the first launch (`printArgs`, `backgroundArgs`); a `-p` resume repeats them, a `--bg`
+  resume takes none. Only the runner reads trim: attended sessions are untouched.
+**Verified:** runner-seam tests for a missing file, a refused flag and `brigade@*`, a project
+plugin and skill kept, a keep-listed one kept, the merged settings, the launch args; `phaseRun.keep`
+through both loaders; full stop-check suite. Backend only.
+**Next:** #24 measures the saving live. **Record:** implementation log 010.
+
 ## #14 · feat · the tampering gate
 
 **Built:**

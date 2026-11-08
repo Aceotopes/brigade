@@ -146,3 +146,19 @@ listed in the gotchas index, `docs/agents/gotchas/README.md`.
   parked and failed results render no notes. Never add it at a call site. pinned: `run.test.mjs`.
 - A pure rename has no `---`/`+++` lines, only `rename from`/`rename to`: read those, or a test file
   renamed out of `testFiles` drops its assertions uncounted. pinned: `run.test.mjs`.
+
+**`#21` — trim, `template/tools/phase-run/trim.mjs` `readTrim` / `trimEntries` / `withTrim`, `run.mjs` `trimmedSettings` / `printArgs` / `backgroundArgs` (built 2026-11-08):**
+- A `--bg --resume` takes **no** flag, trim's included: any flag quietly starts a copy (point 5 in
+  `run.mjs`). The flags go on the first launch only; a `-p` resume is a new process and repeats
+  them. pinned: `run.test.mjs` ("trim's flags go on a session's first launch").
+- Trim wraps the settings writer (`trimmedSettings`), never `sessionSettings` itself: #25 changes that
+  function, and the merged-settings test compares the two field for field.
+- Only `run.mjs` may import `trim.mjs`: a hook or setup script reading it would trim attended
+  sessions. pinned: `run.test.mjs` ("only the runner reads trim").
+- A test passes its own home and root (`trimPath({}, home)`, `trimmedSettings(…, root, …)`); never
+  read the real `~/.claude/brigade/trim.json` or this repo's `.claude/settings.json`.
+- The hooks' loader must not check `phaseRun.keep`: a refusal there blocks every shell command, and
+  keep judges nothing. The runner's `parseKeep` checks it.
+- A project settings file that can't be read must never read as "nothing enabled": that trims what
+  the project needs. Strip a BOM (PowerShell 5.1 writes one); otherwise throw, and a ticket then
+  trims nothing. pinned: `run.test.mjs` ("read through a BOM").

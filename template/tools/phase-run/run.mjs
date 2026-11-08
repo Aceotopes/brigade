@@ -42,6 +42,7 @@ import { hookTime, loadPrices, sessionCost, stepKind, stepRules, ticketMetrics }
 import { finishSnapshot, takeSnapshot } from "./snapshot.mjs";
 import { DEFAULT_RULES as DEFAULT_SIZE, measureTicket as ticketSize } from "./ticket-size.mjs";
 import { PATCH_ARGS, tamperingVerdict } from "./tampering.mjs";
+import { projectKeeps, readTrim, trimEntries, trimPath, withTrim } from "./trim.mjs";
 import { unreadMatcher } from "./unread.mjs";
 import * as docConfig from "../doc-config.mjs";
 
@@ -606,6 +607,15 @@ async function preflight(options) {
     }
   }
 
+  // This machine's trim list (trim.mjs, D16), read live, never snapshotted: a refused file stops the run here.
+  let trim = null;
+  try {
+    trim = readTrim(trimPath());
+    if (trim) projectKeeps(ROOT); // what the project enables must be readable, or trim could switch it off
+  } catch (error) {
+    problems.push(`The trim list is refused: ${error.message}`);
+  }
+
   const lock = join(STATE, "lock");
   if (existsSync(lock)) {
     problems.push(`A run is already going (or one crashed): ${readFileSync(lock, "utf8").trim()}. If none is running, delete .phase-run/lock.`);
@@ -616,7 +626,7 @@ async function preflight(options) {
     if (!options.dryRun) die(`Not ready to run:\n\n- ${problems.join("\n- ")}`);
     console.log(`\nA real run would refuse to start:\n\n- ${problems.join("\n- ")}`);
   }
-  return { branch: branch ?? "(no branch named)", current, remote };
+  return { branch: branch ?? "(no branch named)", current, remote, trim };
 }
 
 // ------------------------------------------------------------------ session
@@ -731,12 +741,9 @@ function promptValues(project, prose, ticket) {
   };
 }
 
-// "You've hit your session limit · resets 3:30pm" is the wording past transcripts on this machine hold.
-const LIMIT_PATTERN = /usage limit|rate.?limit|limit reached|hit your (\w+ )?limit|out of (extra )?usage|resets? (at|in)\b|overloaded/i;
-
-/** A hidden `claude -p` session (`--print`): nothing to watch, one summary at the end. */
-function runPrint({ prompt, sessionId, resume, options, env, settings, transcript }) {
-  const args = [
+/** A `-p` call's arguments. Each call is a process of its own, so trim's flags go on a resume too. */
+function printArgs({ sessionId, resume, options, settings, flags = [] }) {
+  return [
     "-p",
     "--output-format",
     "json",
@@ -748,7 +755,26 @@ function runPrint({ prompt, sessionId, resume, options, env, settings, transcrip
     settings,
     ...(resume ? ["--resume", sessionId] : ["--session-id", sessionId]),
     ...(options.model ? ["--model", options.model] : []),
+    ...flags,
   ];
+}
+
+/**
+ * A background session's arguments. Trim's flags go on the first launch only: a resume takes no
+ * flag at all (point 5 below: any flag starts a copy), and the session keeps its launch flags, as
+ * it keeps its `--settings`.
+ */
+function backgroundArgs({ sessionId, resume, name, options, settings, ask, flags = [] }) {
+  if (resume) return ["--bg", "--resume", sessionId, ask];
+  return ["--bg", "--name", name, "--permission-mode", "dontAsk", "--settings", settings, ...(options.model ? ["--model", options.model] : []), ...flags, ask];
+}
+
+// "You've hit your session limit · resets 3:30pm" is the wording past transcripts on this machine hold.
+const LIMIT_PATTERN = /usage limit|rate.?limit|limit reached|hit your (\w+ )?limit|out of (extra )?usage|resets? (at|in)\b|overloaded/i;
+
+/** A hidden `claude -p` session (`--print`): nothing to watch, one summary at the end. */
+function runPrint({ prompt, sessionId, resume, options, env, settings, transcript, flags }) {
+  const args = printArgs({ sessionId, resume, options, settings, flags });
   return new Promise((done) => {
     const child = spawn("claude", args, { cwd: ROOT, env: { ...process.env, ...env }, stdio: ["pipe", "pipe", "pipe"] });
     let stdout = "";
@@ -978,8 +1004,25 @@ function writeSessionSettings(run, number, env, { background = true } = {}) {
   const base = JSON.parse(readFileSync(join(HERE, "settings.json"), "utf8"));
   const settings = sessionSettings(base, config.permissions, { branch: run.branch, env, background, prompt: config.prompt });
   const path = join(run.dir, `settings-${number}.json`);
-  writeFileSync(path, `${JSON.stringify(settings, null, 2)}\n`);
+  writeFileSync(path, `${JSON.stringify(trimmedSettings(settings, run.trim, ROOT, config.keep), null, 2)}\n`);
   return path;
+}
+
+/**
+ * A night ticket's settings with trim's entries (trim.mjs, D16), minus what the project enables or
+ * keeps. A project settings file that can't be read (preflight refused it, so a session broke it
+ * since) trims nothing that ticket: never what the project may need.
+ */
+function trimmedSettings(settings, trim, root, keep) {
+  if (!trim) return settings;
+  let project;
+  try {
+    project = projectKeeps(root);
+  } catch (error) {
+    log(`Trim skipped for this ticket: ${error.message}`);
+    return settings;
+  }
+  return withTrim(settings, trimEntries(trim, { project, keep }));
 }
 
 /** Where Claude Code keeps a session's transcript: one `.jsonl` per session, under a folder per project. */
@@ -1071,7 +1114,7 @@ function readTurn(sessionId, fromLine) {
  * `runPrint` does. It is stopped after every turn: point 5 needs that before
  * a fix round, and a stopped session can still be opened and read.
  */
-async function runBackground({ prompt, sessionId, resume, options, settings, name, transcript, number }) {
+async function runBackground({ prompt, sessionId, resume, options, settings, name, transcript, number, flags }) {
   const promptFile = transcript.replace(/\.json$/, ".prompt.md");
   writeFileSync(promptFile, prompt);
   const ask = `Read the file ${relative(ROOT, promptFile).replace(/\\/g, "/")} and follow it exactly. It is your whole task for this turn.`;
@@ -1082,7 +1125,7 @@ async function runBackground({ prompt, sessionId, resume, options, settings, nam
     id = sessionId.slice(0, 8);
     stopBackground(id);
     fromLine = transcriptLines(sessionId).length;
-    const woke = exec("claude", ["--bg", "--resume", sessionId, ask]);
+    const woke = exec("claude", backgroundArgs({ sessionId, resume, ask }));
     const said = `${woke.stdout}\n${woke.stderr}`;
     const copy = said.match(/started a copy(?: of that conversation)? as ([0-9a-f]{8})/);
     if (copy) stopBackground(copy[1]);
@@ -1096,8 +1139,7 @@ async function runBackground({ prompt, sessionId, resume, options, settings, nam
       return { timedOut: false, json: null, raw: message };
     }
   } else {
-    const args = ["--bg", "--name", name, "--permission-mode", "dontAsk", "--settings", settings, ...(options.model ? ["--model", options.model] : []), ask];
-    const started = exec("claude", args);
+    const started = exec("claude", backgroundArgs({ name, options, settings, ask, flags }));
     const said = `${started.stdout}\n${started.stderr}`;
     id = said.match(/backgrounded · ([0-9a-f]{8})/)?.[1] ?? null;
     if (!started.ok || !id) return { timedOut: false, json: null, raw: said };
@@ -1941,6 +1983,7 @@ async function runTicket(ticket, options, run) {
     number: n,
     name: `ticket-${n}-${slug}`,
     settings: writeSessionSettings(run, n, env, { background: !options.print }),
+    flags: run.trim?.flags ?? [], // trim's launch flags (trim.mjs, D16)
   };
   const values = {
     N: n,
@@ -2206,7 +2249,7 @@ function report(run, options, remaining, { final = true } = {}) {
 
 async function main() {
   const options = parseArgs(process.argv.slice(2));
-  const { branch, current, remote } = await preflight(options);
+  const { branch, current, remote, trim } = await preflight(options);
   // Only a dry run gets here without a remote, and its tickets are on GitHub.
   if (!remote) {
     console.log("\nNo tickets listed: they are read from GitHub, and this repo has no remote yet.\n");
@@ -2278,6 +2321,7 @@ async function main() {
     brigade: stampVersion(ROOT), // the runner that judges the night: the project's stamp, null with none
     ticketSession: null,
     runner: null, // the run's frozen copy of the runner and its config (takeSnapshot, below)
+    trim, // this machine's trim list (trim.mjs, D16), or null: no trim
   };
   mkdirSync(run.dir, { recursive: true });
   run.all = loadResults(resultsFile(run));
@@ -2383,6 +2427,7 @@ export {
   QUIET_MS,
   SETTLE_MS,
   applyMigrations,
+  backgroundArgs,
   fetchBlockers,
   gatePlan,
   gotchasFile,
@@ -2390,6 +2435,7 @@ export {
   loadResults,
   online,
   outsideAreas,
+  printArgs,
   projectGates,
   promptValues,
   pullRequestBody,
@@ -2405,6 +2451,7 @@ export {
   startJob,
   stopCheckRunning,
   stopStray,
+  trimmedSettings,
   turnOver,
   waitForInternet,
   writeSessionSettings,

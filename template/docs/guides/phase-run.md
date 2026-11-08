@@ -191,6 +191,7 @@ The runner knows only the workflow. Everything about your project is in `.claude
 - `phaseRun.browserCheck`: where a ticket that changes a screen saves its screenshots, and how many.
 - `phaseRun.permissions`: commands a session may run beyond the rules every project gets
   (`tools/phase-run/settings.json`).
+- `phaseRun.keep`: `{plugins, skills}` that your machine's trim list never switches off here.
 - `phaseRun.prompt`: your project's own instructions to each session (how to build, how to walk a
   screen, how to review it), a markdown file in `docs/agents/` with `## Read`, `## Build`,
   `## Browser check`, `## Review` and `## Fix` sections.

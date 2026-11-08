@@ -2,7 +2,7 @@
 // GitHub, no Claude session. Run: pnpm test:runner (node --test tools/phase-run/).
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -10,9 +10,10 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { BROWSER_CHECK, fill, loadRunConfig, parseRunConfig, qaUrl, sessionEnv, targetFingerprint, targetUrl } from "./config.mjs";
 import { readLedger } from "./ledger.mjs";
-import { QUIET_MS, SETTLE_MS, applyMigrations, folderTrusted, gatePlan, gotchasFile, holdReason, loadResults, outsideAreas, projectGates, promptValues, pullRequestBody, recordResult, render, report, runSession, runVariables, screenshotsSince, sessionSettings, turnOver } from "./run.mjs";
+import { QUIET_MS, SETTLE_MS, applyMigrations, backgroundArgs, folderTrusted, gatePlan, gotchasFile, holdReason, loadResults, outsideAreas, printArgs, projectGates, promptValues, pullRequestBody, recordResult, render, report, runSession, runVariables, screenshotsSince, sessionSettings, trimmedSettings, turnOver } from "./run.mjs";
 import { finishSnapshot, readManifest, runnerChanges, takeSnapshot } from "./snapshot.mjs";
 import { PATCH_ARGS } from "./tampering.mjs";
+import { TRIM_FLAGS, readTrim, trimPath } from "./trim.mjs";
 
 const options = { minutes: 120, waitHours: 6, print: true, spec: 179 };
 const call = (claude, extra = {}) => ({ options, prompt: "Build it.", sessionId: "s-1", resume: false, claude, online: async () => true, sleep: async () => {}, ...extra });
@@ -1036,6 +1037,119 @@ test("each ticket's env points the hooks at the copy and the copy at the repo", 
   const settings = sessionSettings({}, { allow: [], deny: [] }, { branch: "phase-2", env, background: true, prompt: null });
   assert.equal(settings.env.PHASE_RUN_RUNNER, "/repo/.phase-run/phase-2/runner");
   for (const rule of ["Edit(./tools/phase-run/**)", "Edit(./.claude/workflow.json)", "Edit(./.phase-run/phase-2/**)"]) assert.ok(settings.permissions.deny.includes(rule), rule);
+});
+
+// D16 (#21): trim. A per-machine list switches off what the owner's nights don't need, and a
+// project never loses what it enables itself or keeps.
+function trimHome(trim) {
+  const home = mkdtempSync(join(tmpdir(), "phase-trim-"));
+  if (trim !== undefined) {
+    mkdirSync(join(home, ".claude", "brigade"), { recursive: true });
+    writeFileSync(join(home, ".claude", "brigade", "trim.json"), typeof trim === "string" ? trim : JSON.stringify(trim));
+  }
+  return home;
+}
+
+test("trim.json lives under ~/.claude, or under CLAUDE_CONFIG_DIR when that is set; a missing file means no trim", () => {
+  assert.equal(trimPath({}, "/home/me"), join("/home/me", ".claude", "brigade", "trim.json"));
+  assert.equal(trimPath({ CLAUDE_CONFIG_DIR: "/cfg" }, "/home/me"), join("/cfg", "brigade", "trim.json"));
+  const home = trimHome();
+  assert.equal(readTrim(trimPath({}, home)), null);
+  // No file, no entries: the settings come back as they went in.
+  const settings = { permissions: { allow: ["Bash(git *)"], deny: [] } };
+  assert.deepEqual(trimmedSettings(settings, null, home, { plugins: [], skills: [] }), settings);
+  rmSync(home, { recursive: true, force: true });
+});
+
+test("trim.json refuses a flag off the runner's list, a brigade@* plugin and a malformed file, naming what it refuses", () => {
+  assert.deepEqual(TRIM_FLAGS, ["--strict-mcp-config", "--no-chrome"]);
+  for (const [trim, error] of [
+    [{ flags: ["--no-chrome", "--dangerously-skip-permissions"] }, /"--dangerously-skip-permissions" is not a flag trim may add; allowed: --strict-mcp-config, --no-chrome/],
+    [{ plugins: ["brigade@market"] }, /"brigade@market" is Brigade itself/],
+    [{ plugins: ["Brigade@other"] }, /"Brigade@other" is Brigade itself/],
+    [{ skills: ["brigade:doc-sync"] }, /"brigade:doc-sync" is one of Brigade's own/],
+    [{ plugins: ["figma"] }, /"figma" is not a plugin id/],
+    [{ plugin: [] }, /unknown key\(s\) plugin; allowed: plugins, skills, flags/],
+    [{ skills: "frontend-design" }, /skills must be a list of names/],
+    ["{ not json", /is not JSON/],
+  ]) {
+    const home = trimHome(trim);
+    assert.throws(() => readTrim(trimPath({}, home)), error, JSON.stringify(trim));
+    rmSync(home, { recursive: true, force: true });
+  }
+  const home = trimHome({ plugins: ["figma@official"], skills: ["frontend-design"], flags: ["--strict-mcp-config", "--no-chrome"], note: "mine" });
+  assert.deepEqual(readTrim(trimPath({}, home)), { plugins: ["figma@official"], skills: ["frontend-design"], flags: ["--strict-mcp-config", "--no-chrome"] });
+  rmSync(home, { recursive: true, force: true });
+});
+
+test("trim writes no entry for a plugin the project enables, its own skills, or what phaseRun.keep names", () => {
+  const root = mkdtempSync(join(tmpdir(), "phase-trim-root-"));
+  mkdirSync(join(root, ".claude", "skills", "release-notes"), { recursive: true });
+  writeFileSync(join(root, ".claude", "settings.json"), JSON.stringify({ enabledPlugins: { "vercel@official": true, "figma@official": false } }));
+  const trim = {
+    plugins: ["vercel@official", "figma@official", "slack@official", "notion@official"],
+    skills: ["release-notes", "frontend-design", "vercel:nextjs", "slack:post", "dataviz", "pdf"],
+    flags: ["--strict-mcp-config"],
+  };
+  const keep = runConfig({ keep: { plugins: ["notion@official"], skills: ["dataviz"] } }).keep;
+  const settings = trimmedSettings({ enabledPlugins: { "mine@local": true } }, trim, root, keep);
+  // vercel is the project's own (and so are its skills); figma is set false there, not enabled, so trim may still write it.
+  assert.deepEqual(settings.enabledPlugins, { "mine@local": true, "figma@official": false, "slack@official": false });
+  assert.deepEqual(settings.skillOverrides, { "frontend-design": "off", "slack:post": "off", pdf: "off" });
+  // A kept plugin skill keeps its plugin: a skill whose plugin is off is gone too.
+  const withSkill = trimmedSettings({}, { plugins: ["figma@official"], skills: [], flags: [] }, root, { plugins: [], skills: ["figma:figma-use"] });
+  assert.equal(withSkill.enabledPlugins, undefined);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("the project's settings are read through a BOM; one that isn't JSON trims nothing rather than everything", () => {
+  const root = mkdtempSync(join(tmpdir(), "phase-trim-root-"));
+  mkdirSync(join(root, ".claude"), { recursive: true });
+  const trim = { plugins: ["vercel@official", "figma@official"], skills: [], flags: [] };
+  writeFileSync(join(root, ".claude", "settings.json"), `﻿${JSON.stringify({ enabledPlugins: { "vercel@official": true } })}`);
+  assert.deepEqual(trimmedSettings({}, trim, root, { plugins: [], skills: [] }).enabledPlugins, { "figma@official": false });
+  writeFileSync(join(root, ".claude", "settings.json"), "{ broken");
+  assert.deepEqual(trimmedSettings({ env: {} }, trim, root, { plugins: [], skills: [] }), { env: {} });
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("a night ticket's merged settings keep the run's rules, variables and Edit denials beside trim's entries", () => {
+  const root = mkdtempSync(join(tmpdir(), "phase-trim-root-"));
+  const env = runVariables({ ticket: 7, base: "abc", spec: 5, runner: "/repo/.phase-run/phase-2/runner", root: "/repo" });
+  const base = { permissions: { allow: ["Bash(git *)"], deny: ["Read(./.env)"] } };
+  const plain = sessionSettings(base, { allow: [], deny: [] }, { branch: "phase-2", env, background: true, prompt: null });
+  const merged = trimmedSettings(plain, { plugins: ["figma@official"], skills: ["pdf"], flags: [] }, root, { plugins: [], skills: [] });
+  assert.deepEqual(merged, { ...plain, enabledPlugins: { "figma@official": false }, skillOverrides: { pdf: "off" } });
+  assert.equal(merged.env.PHASE_RUN_RUNNER, "/repo/.phase-run/phase-2/runner");
+  assert.equal(merged.env.PHASE_RUN_ROOT, "/repo");
+  for (const rule of ["Edit(./tools/phase-run/**)", "Edit(./.claude/workflow.json)", "Read(./.env)"]) assert.ok(merged.permissions.deny.includes(rule), rule);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("trim's flags go on a session's first launch; a -p resume passes them again, a background resume passes no flag", () => {
+  const flags = ["--strict-mcp-config", "--no-chrome"];
+  const options = { permissionMode: "dontAsk", model: "opus" };
+  const first = printArgs({ sessionId: "s-1", resume: false, options, settings: "settings-7.json", flags });
+  const again = printArgs({ sessionId: "s-1", resume: true, options, settings: "settings-7.json", flags });
+  for (const args of [first, again]) assert.deepEqual(args.slice(-2), flags);
+  assert.ok(again.includes("--resume"));
+  assert.deepEqual(printArgs({ sessionId: "s-1", resume: false, options, settings: "s.json" }).slice(-2), ["--model", "opus"]);
+  const launch = backgroundArgs({ name: "ticket-7", options, settings: "settings-7.json", ask: "Read the file", flags });
+  assert.deepEqual(launch, ["--bg", "--name", "ticket-7", "--permission-mode", "dontAsk", "--settings", "settings-7.json", "--model", "opus", ...flags, "Read the file"]);
+  // Point 5: a resume with any flag quietly starts a copy, so it carries the id and the ask only.
+  assert.deepEqual(backgroundArgs({ sessionId: "abcd1234-full", resume: true, name: "ticket-7", options, settings: "s.json", ask: "Read the file", flags }), ["--bg", "--resume", "abcd1234-full", "Read the file"]);
+});
+
+test("only the runner reads trim: no hook or setup script imports trim.mjs, so attended sessions get no trim", () => {
+  const plugin = join(HERE, "..", "..", "..");
+  if (!existsSync(join(plugin, "hooks", "hooks.json"))) return; // a project's copy of the runner, with no plugin around it
+  const readers = ["hooks", "scripts"].flatMap((folder) =>
+    readdirSync(join(plugin, folder), { recursive: true })
+      .filter((name) => String(name).endsWith(".mjs") && !String(name).includes("fixtures"))
+      .map((name) => join(plugin, folder, String(name))),
+  );
+  assert.ok(readers.length > 0);
+  for (const file of readers) assert.doesNotMatch(readFileSync(file, "utf8"), /trim\.mjs/, file);
 });
 
 test("the session is told to run its check command from the copy", () => {
