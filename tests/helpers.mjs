@@ -38,11 +38,12 @@ export const FAILING_DOC_CHECK = { "tools/doc-check.mjs": 'console.error("doc-ch
 
 /**
  * Runs `hooks/<name>` with `input` on stdin. The phase-run variables are cleared first, so a test
- * run from inside a phase run sees an attended session unless it sets them itself.
+ * run from inside a phase run sees an attended session unless it sets them itself. `plugin` is the
+ * plugin folder to run it from: this repo, or a test's altered copy of it.
  */
-export function runHook(name, input, env = {}) {
+export function runHook(name, input, env = {}, { plugin = PLUGIN } = {}) {
   const clean = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^PHASE_RUN/.test(key)));
-  const result = spawnSync(process.execPath, [join(PLUGIN, "hooks", name)], {
+  const result = spawnSync(process.execPath, [join(plugin, "hooks", name)], {
     input: JSON.stringify(input),
     encoding: "utf8",
     env: { ...clean, ...env },

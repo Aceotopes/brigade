@@ -16,6 +16,12 @@ migration in `scripts/migrations.mjs`.
   `--csv [file]` writes it as CSV. `.claude/workflow.json` accepts a new top-level `ledger`
   section, `{ "attended"?, "weekStarts"? }` (a lowercase day, `monday` by default). A 0.5.x
   plugin's hooks refuse that key, so update the plugin before adding it.
+- **Attended sessions are priced too.** A new Stop hook (`hooks/ledger.mjs`) adds an `attended`
+  row to the same ledger at the end of every reply in a set-up project: the session's running
+  total, priced with the plugin's own runner code and price list (so it works while a project is
+  out of step), at the plugin's version. It reads only what the transcript gained since its last
+  run, keeping its place in `.phase-run/ledger-state/`. It never prints or blocks, does nothing
+  in a phase run, and `"ledger": { "attended": false }` turns it off.
 
 ## 0.5.2 — 2026-11-04
 No config format change. The first version built by a phase run on Brigade itself.

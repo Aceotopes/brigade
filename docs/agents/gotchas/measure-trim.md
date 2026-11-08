@@ -38,3 +38,19 @@ listed in the gotchas index, `docs/agents/gotchas/README.md`.
   list of runner files, and `ledger.mjs` imports `config.mjs`, not the other way.
 - The `ledger` section's refusals live in both loaders, word for word; change both, and
   `tests/phase-run-config.test.mjs` runs each case through both.
+
+**`#15` — the attended ledger hook, `hooks/ledger.mjs` `record` / `readState` / `attendedOn`, `metrics.mjs` `addCost` (built 2026-11-08):**
+- Import from the plugin's `../template/tools/phase-run/`, never a project's `tools/phase-run/`:
+  the project's copy may be 0.5.x, with no `sessionCostFrom`. pinned: `tests/ledger-hook.test.mjs`.
+- Every import beyond `node:` builtins is a dynamic `await import` after the `PHASE_RUN` check and
+  inside the try. A static import is hoisted above the check, and one that throws prints a stack.
+  pinned: `tests/ledger-hook.test.mjs` (a marker module in a plugin copy).
+- The state file holds the offsets **and** the running totals; save them together, after the row.
+  Splitting them, or saving before the append, can lose or double an increment. A state of the
+  wrong shape must be dropped (`readState`), never kept: `sessionCostFrom` throws on an entry with
+  no offset, and the session would record nothing again. pinned: `tests/ledger-hook.test.mjs`.
+- A workflow.json the plugin's loader refuses still counts if it parses (a project a release
+  ahead); only a file that isn't JSON, or `ledger.attended: false`, turns the hook off.
+- To test a broken price list, copy the plugin (`pluginCopy`) and alter the copy;
+  `runHook(..., { plugin })` runs the copy. Never add an env override for the path.
+- Claude Code may print the hook's stdout: it must stay empty on every path, warnings included.

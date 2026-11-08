@@ -16,7 +16,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { Screen, makePaint, progressText, resultLines, scoreboard, shortStat, shortTitle, visible } from "./display.mjs";
-import { PRICES_STALE_DAYS, hookTime, loadPrices, pricesAgeDays, sessionCost, sessionCostFrom, stepKind, stepRules, ticketMetrics, toolTime } from "./metrics.mjs";
+import { PRICES_STALE_DAYS, addCost, hookTime, loadPrices, pricesAgeDays, sessionCost, sessionCostFrom, stepKind, stepRules, ticketMetrics, toolTime } from "./metrics.mjs";
 import { appendRow, latestPerSession, ledgerCsv, ledgerRow, ledgerText, readLedger, stampVersion, weeklyView, weekOf } from "./ledger.mjs";
 import { readReceipt, receiptHolds, receiptPath, treeKey } from "./receipt.mjs";
 import { promptValues, report } from "./run.mjs";
@@ -158,6 +158,22 @@ test("the incremental form knows a file however its path is spelled, and never c
   assert.equal(two.cost.nanoUsd, 0);
   appendFileSync(file, lines([reply("r3", { input_tokens: 1_000_000 })]));
   assert.equal(sessionCostFrom(file, prices, two.state).cost.nanoUsd, 4e9);
+});
+
+test("a running total adds each step's cost exactly, per model too, and keeps the peak as a max", () => {
+  const dir = temp("phase-run-running-");
+  const file = join(dir, "s.jsonl");
+  const usage = { input_tokens: 10, cache_creation_input_tokens: 5_000, cache_read_input_tokens: 70_000, output_tokens: 300 };
+  writeFileSync(file, lines([reply("r1", { ...usage, cache_read_input_tokens: 90_000 }), reply("r2", ADVISED)]));
+  const one = sessionCostFrom(file, prices);
+  appendFileSync(file, lines([reply("r3", usage, "adv")]));
+  const two = sessionCostFrom(file, prices, one.state);
+
+  const total = addCost(addCost(undefined, one.cost), two.cost);
+  const whole = sessionCost(file, prices);
+  assert.deepEqual(total, whole);
+  assert.equal(total.peakContext, 95_010); // the first step's, not the sum
+  assert.deepEqual(addCost(total, sessionCostFrom(file, prices, two.state).cost), whole); // nothing new adds nothing
 });
 
 test("each kind of step gets a plain word, from Brigade's rows", () => {

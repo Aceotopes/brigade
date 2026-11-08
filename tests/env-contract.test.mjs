@@ -14,6 +14,7 @@ const PLUGIN = join(dirname(fileURLToPath(import.meta.url)), "..");
 const RUNNER = "template/tools/phase-run/run.mjs";
 const READERS = [
   "hooks/guard-shell.mjs",
+  "hooks/ledger.mjs",
   "hooks/stop-gate.mjs",
   "hooks/version-check.mjs",
   "template/tools/doc-check.mjs",

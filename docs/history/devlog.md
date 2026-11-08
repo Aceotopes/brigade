@@ -9,6 +9,20 @@ Each commit's entry goes on top, in the shape of `docs/_templates/devlog-entry.m
 message cites it (`devlog #N`). At each phase end, `node tools/doc-rotate.mjs` moves the closed
 entries into `docs/history/devlog/`.
 
+## #9 · feat · the attended ledger hook
+
+**Built:**
+- `hooks/ledger.mjs`, a Stop group of its own: each reply in a set-up project appends the
+  session's running total as an `attended` row, at the plugin's version.
+- Off with `ledger.attended: false` or no workflow.json; a config from a later release still
+  counts. `PHASE_RUN=1` exits before any import. Silent, exit 0 on every path.
+- Plugin-local pricing; reads only the bytes added, its state in `.phase-run/ledger-state/`, saved
+  after the row with a rename. `metrics.mjs` gains `addCost`.
+**Verified:** `tests/ledger-hook.test.mjs` 12/12 through the real hook process (a 0.5.x project,
+a broken price list, a marker proving no load under PHASE_RUN); stop-check suite; review (5 fixes).
+Backend only: no browser check.
+**Next:** the next ticket of #11. **Record:** implementation log 004.
+
 ## #8 · feat · the ledger: night rows and views
 
 **Built:**

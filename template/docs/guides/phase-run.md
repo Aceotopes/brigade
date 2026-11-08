@@ -225,7 +225,9 @@ prints the same table, and `status.mjs <ticket>` one ticket's full card.
 judged it, its cost by model. `status.mjs --ledger` prints it by week (by kind, by model), and
 `status.mjs --csv [file]` writes it as CSV, or prints it. Weeks start on `ledger.weekStarts` in
 `.claude/workflow.json` (a lowercase day, `monday` by default). A row that could not be written
-says "ledger: not written" in the report.
+says "ledger: not written" in the report. Your own sessions are priced into it too: at the end of
+every reply, the plugin's Stop hook adds the session's running total as an `attended` row, at the
+plugin's version. It is silent, and `"ledger": { "attended": false }` turns it off.
 
 ## Before the first night of a phase
 

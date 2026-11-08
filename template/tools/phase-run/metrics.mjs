@@ -205,9 +205,37 @@ export function sessionCostFrom(transcript, prices, state = { files: {} }) {
     }
     files[file] = { offset: read.next, seen: [...seen] };
   });
+  return { cost: priceInDollars(cost), state: { files } };
+}
+
+/** A cost's dollar figures, its own and each model's, set from its nano-dollars (rounded only here). */
+function priceInDollars(cost) {
   cost.costUsd = dollars(cost.nanoUsd);
   for (const model of Object.values(cost.byModel)) model.costUsd = dollars(model.nanoUsd);
-  return { cost, state: { files } };
+  return cost;
+}
+
+/** The counters two costs add (addCost): every number in a cost but the peak and the rounded dollars. */
+const SUMMED = Object.keys(emptyCost()).filter((key) => !["costUsd", "peakContext", "byModel"].includes(key));
+
+/**
+ * Two costs added, for a reader that steps through a session (sessionCostFrom) and keeps its whole
+ * cost: sums in nano-dollars, rounded only for costUsd; the peak context as a max. `total` may be
+ * undefined, nothing counted yet. Returns a new cost; neither argument is changed.
+ */
+export function addCost(total, step) {
+  const sum = emptyCost();
+  for (const part of [total, step]) {
+    if (!part) continue;
+    for (const key of SUMMED) sum[key] += part[key] ?? 0;
+    sum.peakContext = Math.max(sum.peakContext, part.peakContext ?? 0);
+    for (const [name, m] of Object.entries(part.byModel ?? {})) {
+      const model = (sum.byModel[name] ??= { requests: 0, nanoUsd: 0, costUsd: 0 });
+      model.requests += m.requests ?? 0;
+      model.nanoUsd += m.nanoUsd ?? 0;
+    }
+  }
+  return priceInDollars(sum);
 }
 
 /** A whole session's cost and tokens: its transcript and its subagents', each request priced on its own. */
