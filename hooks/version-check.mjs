@@ -14,16 +14,19 @@ if (process.env.PHASE_RUN === "1") process.exit(0);
 /** A version this can compare; anything else (a missing or hand-edited one) means say nothing. */
 const VERSION_SHAPE = /^\d+(\.\d+)*$/;
 
-/** The owner's line, or null when there is nothing to say. */
-function notice({ STAMP, catalogName, compareVersions, pluginId, pluginVersion }) {
+/** The project, not this file's folder: inside a plugin that is the plugin's cache. */
+function projectRoot() {
   let input = {};
   try {
     input = JSON.parse(readFileSync(0, "utf8")) ?? {};
   } catch {
     input = {};
   }
-  // The project, not this file's folder: inside a plugin that is the plugin's cache.
-  const root = resolve(process.env.CLAUDE_PROJECT_DIR || (typeof input.cwd === "string" && input.cwd) || process.cwd());
+  return resolve(process.env.CLAUDE_PROJECT_DIR || (typeof input.cwd === "string" && input.cwd) || process.cwd());
+}
+
+/** The owner's version line, or null when there is nothing to say. */
+function notice(root, { STAMP, catalogName, compareVersions, pluginId, pluginVersion }) {
   const stampPath = join(root, STAMP);
   if (!existsSync(stampPath)) return "Brigade is on here, but this repo isn't set up yet. Type /setup-workflow.";
   const installed = pluginVersion();
@@ -40,8 +43,27 @@ function notice({ STAMP, catalogName, compareVersions, pluginId, pluginVersion }
   return null;
 }
 
+/**
+ * A workflow.json these hooks refuse, named (#24, the reverse out-of-step): the shell guard reads
+ * only its own part and lets the rest go, so this is where a fault elsewhere is said.
+ */
+function configLine(root, { loadJudgeGuard }) {
+  // Attended (this hook is silent in a run), so the guard reads the project's own file.
+  const { error, elsewhere } = loadJudgeGuard(root, {});
+  if (error) return `Brigade's hooks can't read ${error.replace(/\.$/, "")}. The guard can't tell what to refuse, so no shell command runs until it is fixed (the Edit tool still works).`;
+  if (elsewhere) return `Brigade's hooks can't read ${elsewhere.replace(/\.$/, "")}. Shell commands still run, but a phase run won't start until it is fixed; if the file is from a newer Brigade, update the plugin.`;
+  return null;
+}
+
 try {
-  const line = notice(await import("../scripts/versions.mjs"));
+  const root = projectRoot();
+  const lines = [notice(root, await import("../scripts/versions.mjs"))];
+  try {
+    lines.push(configLine(root, await import("./workflow-config.mjs")));
+  } catch {
+    // The config line is a courtesy; the version line still goes out.
+  }
+  const line = lines.filter(Boolean).join(" ");
   if (line) {
     const context = `Brigade notice, shown to the owner at the start of this session: ${line} Do not act on it unless the owner asks; \`/update-workflow\` and \`/setup-workflow\` are the owner's to type.`;
     process.stdout.write(`${JSON.stringify({ systemMessage: line, hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: context } })}\n`);

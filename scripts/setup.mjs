@@ -2,19 +2,24 @@
 // is this stack right, may I write this); this script does what must be the same every time, and is
 // tested (tests/setup.test.mjs).
 //
-//   node scripts/setup.mjs detect <dir>                          what is there: git, stack, docs, a stamp
+//   node scripts/setup.mjs detect <dir>                          what is there: git, stack, docs, compose files, a stamp
 //   node scripts/setup.mjs propose <dir>                         the .claude/workflow.json its stack suggests
 //   node scripts/setup.mjs plan <dir> --answers <f> --out <f> [--preview <d>]
 //                                                                what setup would do, summed up; --preview writes the
 //                                                                proposed text of each changed or conflicting file under <d>
 //   node scripts/setup.mjs apply <dir> --plan <f>                do it, if the repo is still as planned
-//   node scripts/setup.mjs verify <dir>                          doc-check, the template's tests, both config loaders
+//   node scripts/setup.mjs verify <dir>                          doc-check, the template's tests, both config loaders, and
+//                                                                the unread list's honesty warnings (never a failure)
 //   node scripts/setup.mjs update <dir> [--apply] [--remove] [--auto-update]
 //                                                                re-copy template/ into a set-up project; --auto-update
-//                                                                also turns on auto-update for Brigade's catalog
-//   node scripts/setup.mjs refresh <dir> [--stack <f>] [--apply] [--accept <id,id>]
+//                                                                also turns on auto-update for Brigade's catalog; the
+//                                                                report lists refresh's offers (written by refresh)
+//   node scripts/setup.mjs refresh <dir> [--stack <f>] [--apply] [--accept <id,id>] [--only-accepted]
 //                                                                bring the config in line with the stack (--stack: the new
-//                                                                one); --apply writes the additions and the accepted ids
+//                                                                one); --apply writes the additions and the accepted ids;
+//                                                                --only-accepted, the accepted ids alone; its `warnings`
+//                                                                are the unread list's honesty warnings, its `compose`
+//                                                                the root's compose files (detect's)
 //   node scripts/setup.mjs docker                                is Docker installed, and running
 //   node scripts/setup.mjs automode --settings <f> --lines <f> [--apply]   the project's autoMode lines
 //   node scripts/setup.mjs labels                                the GitHub labels the workflow reads
@@ -32,6 +37,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, s
 import { basename, dirname, join, posix } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import { scanLines, unreadScan } from "../template/tools/phase-run/unread-scan.mjs";
 import { MIGRATIONS } from "./migrations.mjs";
 import { STAMP, catalog, compareVersions, pluginVersion } from "./versions.mjs";
 
@@ -166,6 +172,30 @@ function gitIn(dir) {
   };
 }
 
+/** The project's files: git's tracked and untracked-not-ignored ones, or the walk outside git. */
+function projectFiles(dir) {
+  const git = gitIn(dir);
+  if (git("rev-parse", "--git-dir") === null) return walk(dir);
+  return (git("ls-files", "--cached", "--others", "--exclude-standard") ?? "").split("\n").filter(Boolean);
+}
+
+/**
+ * The unread list's honesty warnings (D19): each path a test file names on the tests row's `unread`
+ * list, or the one line saying `phaseRun.tampering.testFiles` is not set. Never a failure: a scan that
+ * cannot run says so as a warning too. The scan is the plugin's copy, so a project a release behind
+ * gets it before /update-workflow copies it in. The tests row is the stop check in the stack's tests
+ * role (`roleMatcher`), whatever its name; without one, the scan's own `testsRow`.
+ */
+export function unreadWarnings(dir, config, det = detect(dir)) {
+  try {
+    const { stopRole } = roleMatchers(det, config);
+    const row = (config.stopGate?.checks ?? []).find((c) => stopRole(c)?.key === "test" && Array.isArray(c.unread) && c.unread.length);
+    return scanLines(unreadScan({ config, row, files: projectFiles(dir), read: (file) => readText(join(dir, file)) }));
+  } catch (error) {
+    return [`the unread list could not be checked: ${error.message}`];
+  }
+}
+
 /** True when `.claude/settings.json` differs from HEAD only in what a plugin install writes. */
 function installOnlyChange(dir, git) {
   const path = join(dir, ".claude", "settings.json");
@@ -200,9 +230,7 @@ export function detect(dir) {
   const changes = status.split("\n").filter(Boolean);
   const tolerated = isRepo && installOnlyChange(dir, git);
   const dirty = changes.filter((line) => !(tolerated && line.slice(3) === ".claude/settings.json"));
-  const files = isRepo
-    ? (git("ls-files", "--cached", "--others", "--exclude-standard") ?? "").split("\n").filter(Boolean)
-    : walk(dir);
+  const files = projectFiles(dir);
   // Discovery docs come before setup (docs/agents/workflow.md), so a repo holding only them is still new.
   const meaningful = files.filter(
     (f) => !/^(README(\.md)?|LICENSE(\..+)?|\.gitignore|\.gitattributes|\.claude\/settings\.json)$/i.test(f) && !/^docs\/discovery\/[^/]+\.md$/.test(f),
@@ -270,6 +298,8 @@ export function detect(dir) {
     stackFromFiles,
     stackDisagreements: stackDisagreements(declared?.stack, stackFromFiles),
     prototypeDir: suggestPrototypeDir(deps, (d) => existsSync(join(dir, d))),
+    // The root's compose files and their services (D20): setup reuses one, never writes a second.
+    compose: composeFiles(dir),
     docs,
     agentFiles: ["CLAUDE.md", "AGENTS.md", ...GLOSSARY_NAMES].filter((f) => existsSync(join(dir, f))),
     // One folder down (a docs/CLAUDE.md): a project's rules, which Claude reads only on demand.
@@ -421,6 +451,149 @@ export function dockerStatus(run = spawnSync) {
   const info = run("docker", ["info", "--format", "{{.ServerVersion}}"], { encoding: "utf8" });
   const running = !info.error && info.status === 0;
   return { installed: true, running, version: String(running ? info.stdout : version.stdout).trim(), help };
+}
+
+// ------------------------------------------------------------------ an existing compose file (D20)
+
+/** The compose files at a repo's root, in the order `docker compose` picks one: the first is the one it runs. */
+export const COMPOSE_FILES = ["compose.yaml", "compose.yml", "docker-compose.yml", "docker-compose.yaml"];
+
+const indentOf = (line) => line.text.match(/^ */)[0].length;
+const listItem = (line) => /^\s*-(\s|$)/.test(line.text);
+
+/** A line's text without its comment, trimmed; throws on a quote it never closes. */
+function uncomment(line) {
+  const text = line.text;
+  let quote = null;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (quote) {
+      if (c === quote) quote = null;
+    } else if ((c === '"' || c === "'") && (i === 0 || /[\s[,]/.test(text[i - 1]))) quote = c;
+    else if (c === "#" && /\s/.test(text[i - 1] ?? " ")) return text.slice(0, i).trim();
+  }
+  if (quote) throw new Error(`line ${line.n}: an unclosed quote`);
+  return text.trim();
+}
+
+const unquote = (value) => value.replace(/^"(.*)"$|^'(.*)'$/, (_, a, b) => a ?? b);
+
+/** `key: value` (or `key:`) as `{ key, value }`, the value uncommented and unquoted; null for any other line. */
+function keyLine(line) {
+  const match = uncomment(line).match(/^("[^"]*"|'[^']*'|[^\s"'#-][^:]*?)\s*:(?:\s+(.*))?$/);
+  return match ? { key: unquote(match[1]), value: unquote((match[2] ?? "").trim()) } : null;
+}
+
+/**
+ * A block's entries: each line at the block's own indent, with the deeper lines under it. A list item
+ * at a key's own indent (`ports:` then `- "5432:5432"` under it, unindented) belongs to that key.
+ */
+function entries(block) {
+  const out = [];
+  const at = block.length ? indentOf(block[0]) : 0;
+  for (const line of block) {
+    const depth = indentOf(line);
+    if (depth < at) throw new Error(`line ${line.n}: indented less than the lines above it`);
+    if (depth > at || (listItem(line) && out.length && !listItem(out.at(-1).line))) out.at(-1).body.push(line);
+    else out.push({ line, body: [] });
+  }
+  return out;
+}
+
+/** The host port a published port maps (`5432:5432`, `127.0.0.1:5433:5432/tcp`), or null when it has no fixed one. */
+function hostPort(spec) {
+  const parts = String(spec).replace(/\/(tcp|udp|sctp)$/i, "").split(":");
+  const host = parts.length > 1 ? parts[parts.length - 2] : "";
+  return /^\d+$/.test(host) && Number(host) >= 1 && Number(host) <= 65535 ? Number(host) : null;
+}
+
+/** A service's `ports:`, as host ports, and the entries it could not turn into one. */
+function servicePorts(name, entry, skipped) {
+  const own = keyLine(entry.line).value;
+  const specs = [];
+  if (own) {
+    const flow = own.match(/^\[(.*)\]$/);
+    if (!flow) throw new Error(`line ${entry.line.n}: ${name}.ports is not a list`);
+    specs.push(...flow[1].split(",").map((s) => unquote(s.trim())).filter(Boolean).map((spec) => ({ spec, port: hostPort(spec) })));
+  } else {
+    for (const item of entries(entry.body)) {
+      if (!listItem(item.line)) throw new Error(`line ${item.line.n}: ${name}.ports is not a list`);
+      const first = { n: item.line.n, text: item.line.text.replace(/^(\s*)-\s*/, "$1  ") };
+      const long = keyLine(first);
+      if (long && !/^\d/.test(long.key)) {
+        // The long syntax: `- target: 5432` with `published: "5433"` under it.
+        const keys = [long, ...entries(item.body).map((e) => keyLine(e.line)).filter(Boolean)];
+        const published = keys.find((k) => k.key === "published")?.value;
+        specs.push({ spec: `${long.key}: ${long.value}`, port: published === undefined ? null : hostPort(`${published}:0`) });
+      } else {
+        const spec = unquote(uncomment(first));
+        specs.push({ spec, port: hostPort(spec) });
+      }
+    }
+  }
+  for (const { spec, port } of specs.filter((s) => s.port === null)) skipped.push(`${name}.ports ${spec} (no fixed host port)`);
+  return specs.map((s) => s.port).filter((port) => port !== null);
+}
+
+/**
+ * The `services:` of a compose file, no YAML library: each service's name, `image:` and the host ports
+ * its `ports:` publish. Everything else is listed in `skipped` by name (`db.environment`, `volumes`),
+ * and a port with no fixed host port by its entry. Throws, with the line, on what it can't read: a tab
+ * in the indentation, no `services:` block, a one-line `services:`, an unclosed quote.
+ */
+export function parseCompose(text) {
+  const lines = lf(text)
+    .split("\n")
+    .map((t, i) => ({ n: i + 1, text: t }))
+    .filter((line) => !/^\s*(#.*)?$/.test(line.text));
+  // A document marker before the first key (`---`), as YAML allows: not a key.
+  if (lines.length && /^---\s*(#.*)?$/.test(lines[0].text)) lines.shift();
+  const tab = lines.find((line) => /^ *\t/.test(line.text));
+  if (tab) throw new Error(`line ${tab.n}: a tab in the indentation`);
+  if (lines.length && indentOf(lines[0])) throw new Error(`line ${lines[0].n}: indented, with nothing above it`);
+  const skipped = [];
+  let services = null;
+  for (const { line, body } of entries(lines)) {
+    const top = keyLine(line);
+    if (!top) throw new Error(`line ${line.n}: not a key`);
+    if (top.key !== "services") skipped.push(top.key);
+    else if (top.value) throw new Error(`line ${line.n}: services: is not a block`);
+    else services = composeServices(body, skipped);
+  }
+  if (!services) throw new Error("no services: block");
+  return { services, skipped };
+}
+
+/** The services under `services:`, each `{ name, image, ports }`; what it skips goes on `skipped`. */
+function composeServices(block, skipped) {
+  return entries(block).map(({ line, body }) => {
+    const head = keyLine(line);
+    if (!head || head.value) throw new Error(`line ${line.n}: ${head?.key ?? uncomment(line).replace(/^-\s*/, "")} is not a service`);
+    const service = { name: head.key, image: null, ports: [] };
+    for (const entry of entries(body)) {
+      const field = keyLine(entry.line);
+      if (!field) throw new Error(`line ${entry.line.n}: not a key`);
+      if (field.key === "image") service.image = field.value || null;
+      else if (field.key === "ports") service.ports = servicePorts(head.key, entry, skipped);
+      else skipped.push(`${head.key}.${field.key}`);
+    }
+    return service;
+  });
+}
+
+/** Each service as one line, for the owner: `db: postgres:16, 5432`. */
+export const composeLines = ({ services }) => services.map((s) => `${s.name}: ${[s.image ?? "no image", ...s.ports].join(", ")}`);
+
+/** The root's compose files (COMPOSE_FILES), each read by `parseCompose`, or `{ file, error }`: never thrown. */
+function composeFiles(dir) {
+  return COMPOSE_FILES.filter((file) => existsSync(join(dir, file))).map((file) => {
+    try {
+      const parsed = parseCompose(readText(join(dir, file)));
+      return { file, services: parsed.services, lines: composeLines(parsed), skipped: parsed.skipped };
+    } catch (error) {
+      return { file, error: `could not read: ${error.message}` };
+    }
+  });
 }
 
 /** The template's doc-config.mjs, pointed at the project's code folders and (merge) its existing docs. */
@@ -767,22 +940,139 @@ function stackSection(plugin) {
 }
 
 /**
+ * The keys 0.6.0 gives a row the stack suggests, by the row's role (`stackChecks`' key), for a project
+ * whose rows predate them: refresh offers each row's missing keys as one yes (D11). They go together,
+ * because a receipt with its own list needs the name that gives it its own file. A value
+ * `{ nameOf: role }` is the name of the stop check in that role. Setup's own rows stay 0.5.x-shaped
+ * (`proposeWorkflow`); a new project's tools get these keys from setup's checklist (#22).
+ */
+export const ROW_OFFERS = {
+  "stopGate.checks": {
+    typecheck: { name: "typecheck", receipt: true, unread: ["**/*.md"] },
+    lint: { name: "lint", receipt: true, unread: ["**/*.md"] },
+    test: { name: "tests" },
+  },
+  "phaseRun.gates": {
+    test: { unreadOf: { nameOf: "test" } },
+  },
+};
+
+/** Why each key is offered, for the item's summary: the first key an offer holds, in this order, says it. */
+const OFFER_WHY = {
+  unreadOf: "so a diff wholly on that check's unread list skips it",
+  receipt: "so the stop check skips it on code it already passed",
+  name: "so its receipt is its own and a gate can point at it",
+};
+
+/**
+ * Which stack role (a `stackChecks` row) a list's row holds (#22): its exact `run`, as in 0.5.x; or,
+ * for a row with a name, the suggested command with flags added after it (`pnpm lint --cache …`),
+ * when no row holds that role by its exact run. A stop check's name is its `name`; a gate's is its
+ * `label`, which `after` points at. So a named row whose command gained a flag (a cache flag,
+ * `{base}`) is still the row it was, a nameless stop check is matched by its run alone, and a row
+ * whose command the stack no longer suggests at all (another package manager) is still a stranger.
+ * Returns row → `{ key, label, run }`, or null.
+ */
+function roleMatcher(det, rows, nameOf) {
+  // Longest first, so a command that extends two suggested ones is the longer one's.
+  const suggested = stackChecks(det).sort((a, b) => b.run.length - a.run.length);
+  const byRun = new Map(suggested.map((check) => [check.run, check]));
+  const held = new Set(rows.filter((row) => byRun.has(row.run)).map((row) => byRun.get(row.run).key));
+  return (row) => {
+    if (byRun.has(row.run)) return byRun.get(row.run);
+    if (!nameOf(row) || typeof row.run !== "string") return null;
+    return suggested.find((check) => !held.has(check.key) && row.run.startsWith(`${check.run} `)) ?? null;
+  };
+}
+
+/** The role matchers for the config's stop checks (named by `name`) and gates (by `label`). */
+function roleMatchers(det, config) {
+  return {
+    stopRole: roleMatcher(det, config.stopGate?.checks ?? [], (row) => row.name),
+    gateRole: roleMatcher(det, config.phaseRun?.gates ?? [], (row) => row.label),
+  };
+}
+
+/**
+ * Refresh's offers (D11): for each existing row that holds a stack role (`roleMatcher`), the
+ * ROW_OFFERS keys it lacks, as one `offer` item. A row of the project's own gets none, a key it
+ * already has is never changed, and a name another row already holds is never offered (nor the row's
+ * keys that need it).
+ */
+function rowOffers(current, { stopRole, gateRole }, item, rowIn) {
+  const checks = current.stopGate?.checks ?? [];
+  const taken = new Set(checks.map((c) => c.name).filter(Boolean));
+  // The name a stop check in `role` has, or would get with its offer: null when it has no row or the name is taken.
+  const nameOf = (role) => {
+    const row = checks.find((c) => stopRole(c)?.key === role);
+    if (!row) return null;
+    if (row.name) return { name: row.name, row, naming: false };
+    const name = ROW_OFFERS["stopGate.checks"][role]?.name;
+    return name && !taken.has(name) ? { name, row, naming: true } : null;
+  };
+  const show = (keys) => Object.entries(keys).map(([key, value]) => `${JSON.stringify(key)}: ${JSON.stringify(value)}`).join(", ");
+  // The first of OFFER_WHY's keys the offer holds says why: its order is the reasons' weight.
+  const why = (keys) => OFFER_WHY[Object.keys(OFFER_WHY).find((key) => key in keys)] ?? "as this release sets it up";
+
+  for (const row of checks) {
+    const offer = ROW_OFFERS["stopGate.checks"][stopRole(row)?.key];
+    if (!offer || (offer.name && !row.name && taken.has(offer.name))) continue;
+    const keys = Object.fromEntries(Object.entries(offer).filter(([key]) => row[key] === undefined));
+    // A list belongs to the receipt offered with it: beside a row's own receipt (0.4.1's add gives its
+    // list) or its `receipt: false` (the loaders refuse a list there), none is offered.
+    if (!("receipt" in keys)) delete keys.unread;
+    if (!Object.keys(keys).length) continue;
+    item(`stopGate.checks.offer+${row.run}`, "offer", `stopGate.checks: ${row.label} gets ${show(keys)}, ${why(keys)} (only on a yes)`, (config) => {
+      Object.assign(rowIn(config, row.run), keys);
+    });
+  }
+  for (const gate of (current.phaseRun?.gates ?? []).filter((g) => g.run)) {
+    const offer = ROW_OFFERS["phaseRun.gates"][gateRole(gate)?.key];
+    if (!offer) continue;
+    const keys = {};
+    const naming = [];
+    for (const [key, value] of Object.entries(offer)) {
+      if (gate[key] !== undefined) continue;
+      const ref = value?.nameOf ? nameOf(value.nameOf) : null;
+      if (value?.nameOf && !ref) continue;
+      keys[key] = ref ? ref.name : value;
+      if (ref?.naming) naming.push(ref);
+    }
+    if (!Object.keys(keys).length) continue;
+    // The check a key points at must carry that name, so the gate's yes names it too when it has none.
+    const also = naming.map((ref) => ` (and names the ${ref.row.label} check ${JSON.stringify(ref.name)}, which it points at)`).join("");
+    item(`phaseRun.gates.offer+${gate.run}`, "offer", `phaseRun.gates: ${gate.label} gets ${show(keys)}, ${why(keys)}${also} (only on a yes)`, (config) => {
+      const target = config.phaseRun?.gates?.find((g) => g.run === gate.run);
+      // An accepted removal took the row, or the check it points at: nothing to point at, so nothing written.
+      const named = naming.map((ref) => config.stopGate?.checks?.find((c) => c.run === ref.row.run));
+      if (!target || named.some((check) => !check)) return;
+      Object.assign(target, keys);
+      named.forEach((check, i) => (check.name ??= naming[i].name));
+    });
+  }
+}
+
+/**
  * Brings a set-up project's config in line with its stack: the config's own `stack`, or `stack` given,
  * the owner's answer to "what changed?". Each item is one of:
  *   set     the stack itself, as the owner gave it
  *   add     something the stack suggests that is missing; --apply writes it
  *   change, remove   written only when its id is in `accept`: a hand-written row is never dropped silently
+ *   offer   keys a newer release gives a row the stack suggests (ROW_OFFERS), one item per row; written
+ *           only when its id is in `accept`
  * It covers the stack, the guard's wrappers, the stop gate's checks, the runner's gates and allow
  * rules, the design rung's prompt file, PROTOTYPE_DIR, CLAUDE.md's Stack section and checks.yml.
+ * With `onlyAccepted`, --apply writes the accepted items and nothing else.
  */
-export function refresh(dir, { stack, apply = false, accept = [] } = {}, plugin = PLUGIN) {
+export function refresh(dir, { stack, apply = false, accept = [], onlyAccepted = false } = {}, plugin = PLUGIN) {
   const det = detect(dir);
   if (!det.stamp) throw new Error(`No ${STAMP}: this project was not set up by /setup-workflow. Run that first.`);
   const current = JSON.parse(readText(join(dir, ".claude", "workflow.json")));
   const chosen = orderStack(stack ?? current.stack ?? {});
   const proposed = proposeWorkflow(det, plugin, { stack: chosen });
-  // A tests row added whole shares the project's own unread list, if it has one: the loaders refuse two lists.
-  const projectUnread = (current.stopGate?.checks ?? []).find((c) => c.receipt && Array.isArray(c.unread))?.unread;
+  // A tests row added whole shares the nameless receipt rows' list, if they have one: they share one
+  // receipt file, so the loaders refuse two lists among them. A named row keeps its own (0.6.0).
+  const projectUnread = (current.stopGate?.checks ?? []).find((c) => c.receipt && !c.name && Array.isArray(c.unread))?.unread;
   if (projectUnread) for (const row of proposed.stopGate.checks.filter((c) => c.receipt)) row.unread = [...projectUnread];
   const items = [];
   const item = (id, op, summary, edit) => items.push({ id, op, summary, edit });
@@ -795,7 +1085,11 @@ export function refresh(dir, { stack, apply = false, accept = [] } = {}, plugin 
   }
 
   // The lists the stack suggests rows for: a missing one is added; one it would not suggest is offered for removal.
+  // A project's row counts as the suggested row whose role it holds (`roleMatcher`, `match`), so a row
+  // whose command gained a flag is neither added back plain nor offered for removal.
   const same = (row) => row;
+  const roles = roleMatchers(det, current);
+  const { stopRole, gateRole } = roles;
   const lists = [
     { section: "guard.wrappers", get: (c) => c.guard?.wrappers ?? [], put: (c, v) => (c.guard = { ...(c.guard ?? {}), wrappers: v }), key: same, show: same },
     {
@@ -803,6 +1097,7 @@ export function refresh(dir, { stack, apply = false, accept = [] } = {}, plugin 
       get: (c) => c.stopGate?.checks ?? [],
       put: (c, v) => (c.stopGate = { ...(c.stopGate ?? {}), checks: v }),
       key: (r) => r.run,
+      match: (r) => stopRole(r)?.run ?? r.run,
       show: (r) => `${r.label}: ${r.run}`,
     },
     {
@@ -810,6 +1105,7 @@ export function refresh(dir, { stack, apply = false, accept = [] } = {}, plugin 
       get: (c) => c.phaseRun?.gates ?? [],
       put: (c, v) => (c.phaseRun = { ...(c.phaseRun ?? {}), gates: v }),
       key: (r) => r.run ?? r.builtin,
+      match: (r) => gateRole(r)?.run ?? r.run ?? r.builtin,
       show: (r) => `${r.label}: ${r.run}`,
     },
     {
@@ -823,12 +1119,13 @@ export function refresh(dir, { stack, apply = false, accept = [] } = {}, plugin 
   for (const list of lists) {
     const have = list.get(current);
     const want = list.get(proposed);
-    const haveKeys = new Set(have.map(list.key));
+    const match = list.match ?? list.key;
+    const haveKeys = new Set(have.map(match));
     const wantKeys = new Set(want.map(list.key));
     for (const row of want.filter((r) => !haveKeys.has(list.key(r)))) {
       item(`${list.section}+${list.key(row)}`, "add", `${list.section}: add ${list.show(row)}`, (config) => list.put(config, [...list.get(config), row]));
     }
-    for (const row of have.filter((r) => !r.builtin && !wantKeys.has(list.key(r)))) {
+    for (const row of have.filter((r) => !r.builtin && !wantKeys.has(match(r)))) {
       item(`${list.section}-${list.key(row)}`, "remove", `${list.section}: ${list.show(row)} is not one the stack suggests (kept unless accepted)`, (config) =>
         list.put(config, list.get(config).filter((r) => list.key(r) !== list.key(row))),
       );
@@ -837,23 +1134,24 @@ export function refresh(dir, { stack, apply = false, accept = [] } = {}, plugin 
 
   // Inside the tests row (0.4.1): the rows above match by command only, so a row the project has is never
   // offered whole again; its missing receipt, then its missing unread list, are each an add. The project's
-  // own list is never changed, and the one offered matches it, as every receipt row shares one list.
+  // own list is never changed, and the one offered matches the nameless rows', which share one receipt.
   const haveChecks = current.stopGate?.checks ?? [];
   const wantTests = (proposed.stopGate?.checks ?? []).find((c) => c.receipt);
   // The row, unless an accepted removal took it first: then there is nothing to add to.
   const rowIn = (config, run) => config.stopGate?.checks?.find((c) => c.run === run) ?? {};
-  const testsRow = wantTests && !haveChecks.some((c) => c.receipt) ? haveChecks.find((c) => c.run === wantTests.run) : null;
+  const testsRow = wantTests && !haveChecks.some((c) => c.receipt) ? haveChecks.find((c) => (stopRole(c)?.run ?? c.run) === wantTests.run) : null;
   if (testsRow) {
     item(`stopGate.checks.receipt+${testsRow.run}`, "add", `stopGate.checks: ${testsRow.label} gets "receipt": true, so the stop check skips tests already passed`, (config) => {
       rowIn(config, testsRow.run).receipt = true;
     });
   }
   for (const row of haveChecks.filter((c) => (c.receipt || c === testsRow) && c.unread === undefined)) {
-    const unread = [...(projectUnread ?? UNREAD)];
+    const unread = [...((!row.name && projectUnread) || UNREAD)];
     item(`stopGate.checks.unread+${row.run}`, "add", `stopGate.checks: ${row.label} gets "unread": ${JSON.stringify(unread)}, so a docs-only edit keeps its receipt`, (config) => {
       rowIn(config, row.run).unread = unread;
     });
   }
+  rowOffers(current, roles, item, rowIn);
 
   // The design rung, once the project has screens: its prompt file and the prototype folder.
   if (det.frontend.length && !current.phaseRun?.prompt) {
@@ -881,8 +1179,9 @@ export function refresh(dir, { stack, apply = false, accept = [] } = {}, plugin 
     );
   }
 
-  // What the selected items make, then checks.yml from the checks as they will be.
-  const selected = (it) => it.op === "set" || it.op === "add" || accept.includes(it.id);
+  // What the selected items make, then checks.yml from the checks as they will be. `onlyAccepted`
+  // writes the accepted ids and nothing else: /update-workflow's yeses never carry refresh's adds along.
+  const selected = (it) => (!onlyAccepted && (it.op === "set" || it.op === "add")) || accept.includes(it.id);
   const build = () => {
     const config = structuredClone(current);
     const files = new Map();
@@ -896,7 +1195,10 @@ export function refresh(dir, { stack, apply = false, accept = [] } = {}, plugin 
     item(ciPath, ciNow === null ? "add" : "change", `${ciPath}: ${ciNow === null ? "written" : "rewritten"} from the checks`, (config, files) => files.set(ciPath, ci));
   }
 
-  const report = { stack: chosen, items: items.map(({ id, op, summary }) => ({ id, op, summary })), applied: [], written: [] };
+  // The unread list's honesty (D19), on the project's config as it is: warnings only, never an item.
+  // The root's compose files (D20), for the skill's testDatabase step on a project that gained one:
+  // the preflight row and the database's address are the skill's to propose, never an item here.
+  const report = { stack: chosen, items: items.map(({ id, op, summary }) => ({ id, op, summary })), warnings: unreadWarnings(dir, current, det), compose: det.compose, applied: [], written: [] };
   if (!apply) return report;
   const { config, files } = build();
   if (JSON.stringify(config) !== JSON.stringify(current)) files.set(".claude/workflow.json", `${JSON.stringify(config, null, 2)}\n`);
@@ -939,7 +1241,8 @@ export function changesSince(from, to, plugin = PLUGIN) {
  * Config and scaffold files are never touched, except by a version's migration and the one setting
  * below. A scaffold file the plugin changed since the stamp is listed for review (op "review"), and
  * only listed. Auto-update for Brigade's catalog, when off, is listed (op "setting") and turned on
- * only with `autoUpdate`.
+ * only with `autoUpdate`. The report's `offers` are refresh's offer items for the config, which
+ * `refresh --apply --only-accepted --accept <ids>` writes on the owner's yes.
  */
 export function update(dir, { apply: doApply = false, remove = false, autoUpdate = false, plugin = PLUGIN, migrations = MIGRATIONS, date } = {}) {
   const stampPath = join(dir, STAMP);
@@ -989,8 +1292,18 @@ export function update(dir, { apply: doApply = false, remove = false, autoUpdate
     changelog: changesSince(stamp.version, to, plugin),
     changes: changes.filter((c) => c.op !== "same").map(({ text, ...rest }) => rest),
     migrations: pending.map((m) => `${m.version}: ${m.describe}`),
+    offers: [],
     notes,
   };
+  // What refresh would now give the config's rows, each a yes of its own: update itself never writes the
+  // config (D11). A config refresh can't read never stops the template copy; it is only said.
+  if (existsSync(join(dir, ".claude", "workflow.json"))) {
+    try {
+      report.offers = refresh(dir, {}, plugin).items.filter((it) => it.op === "offer").map(({ id, summary }) => ({ id, summary }));
+    } catch (error) {
+      notes.push(`Refresh's offers could not be read (${error.message}); fix .claude/workflow.json and run update again to see them.`);
+    }
+  }
   if (!doApply) return report;
 
   const touched = [];
@@ -1089,6 +1402,15 @@ export async function verify(dir) {
   const { loadRunConfig } = await import(pathToFileURL(join(dir, "tools", "phase-run", "config.mjs")).href);
   const runner = loadRunConfig(dir);
   results.push({ label: "the phase runner's config", ok: !runner.error, output: runner.error ?? "" });
+  // The unread list's honesty (D19): a warning, never a failure.
+  let config = null;
+  try {
+    config = JSON.parse(readText(join(dir, ".claude", "workflow.json")));
+  } catch {
+    // The loaders above already failed on a config that isn't JSON: the scan has nothing to add.
+  }
+  const warnings = config ? unreadWarnings(dir, config) : [];
+  results.push({ label: "the tests' unread list", ok: true, warn: warnings.length > 0, output: warnings.join("\n") });
   return results;
 }
 
@@ -1102,7 +1424,7 @@ async function main() {
     else if (command === "propose") print(proposeWorkflow(detect(target)));
     else if (command === "verify") {
       const results = await verify(target);
-      for (const r of results) console.log(`${r.ok ? "ok  " : "FAIL"}  ${r.label}${r.output ? `\n${r.output}` : ""}`);
+      for (const r of results) console.log(`${r.ok ? (r.warn ? "warn" : "ok  ") : "FAIL"}  ${r.label}${r.output ? `\n${r.output}` : ""}`);
       if (results.some((r) => !r.ok)) process.exitCode = 1;
     } else if (command === "plan") {
       const p = plan(target, JSON.parse(readText(value("--answers"))));
@@ -1134,7 +1456,7 @@ async function main() {
     else if (command === "refresh") {
       const stack = value("--stack") ? JSON.parse(readText(value("--stack"))) : undefined;
       const accept = value("--accept") ? value("--accept").split(",").map((id) => id.trim()) : [];
-      print(refresh(target, { stack, apply: rest.includes("--apply"), accept }));
+      print(refresh(target, { stack, apply: rest.includes("--apply"), accept, onlyAccepted: rest.includes("--only-accepted") }));
     } else if (command === "docker") print(dockerStatus());
     else throw new Error("Usage: setup.mjs detect|propose|plan|apply|verify|update|refresh|docker|automode|labels (see the top of this file).");
   } catch (error) {

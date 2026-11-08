@@ -60,6 +60,30 @@ test("versions compare as numbers: a 0.10.0 stamp is newer than a 0.x plugin", {
   assert.match(JSON.parse(launch(project("0.10.0")).stdout).systemMessage, /^This project is on Brigade 0\.10\.0, but this machine has /);
 });
 
+test("a workflow.json the plugin's hooks refuse is named at startup, beside the version line (#24)", () => {
+  const ahead = project("99.0.0");
+  write(ahead, { ".claude/workflow.json": JSON.stringify({ version: 1, someFutureKey: {} }) });
+  const out = JSON.parse(launch(ahead).stdout);
+  assert.match(out.systemMessage, /^This project is on Brigade 99\.0\.0/);
+  assert.match(out.systemMessage, /\.claude\/workflow\.json: the file has unknown key\(s\) someFutureKey[\s\S]*Shell commands still run/);
+  assert.match(out.hookSpecificOutput.additionalContext, /someFutureKey/);
+
+  const level = project(VERSION);
+  write(level, { ".claude/workflow.json": JSON.stringify({ version: 1, ledger: { weekStarts: "Monday" } }) });
+  assert.match(JSON.parse(launch(level).stdout).systemMessage, /^Brigade's hooks can't read \.claude\/workflow\.json: ledger\.weekStarts/);
+
+  // A fault the guard itself can't get past says the opposite: the shell is stopped.
+  const blocked = project(VERSION);
+  write(blocked, { ".claude/workflow.json": JSON.stringify({ version: 1, guard: { block: [{ when: "sometimes", command: "^x", message: "m" }] } }) });
+  const said = JSON.parse(launch(blocked).stdout).systemMessage;
+  assert.match(said, /guard\.block\[0\]\.when[\s\S]*no shell command runs until it is fixed/);
+  assert.doesNotMatch(said, /Shell commands still run/);
+
+  const fine = project(VERSION);
+  write(fine, { ".claude/workflow.json": JSON.stringify({ version: 1 }) });
+  assert.equal(launch(fine).stdout, "", "a config the hooks read says nothing");
+});
+
 test("a stamp it cannot read says nothing and never fails the session start", () => {
   for (const text of ["{ not json", `${JSON.stringify({ plugin: "brigade" })}\n`, `${JSON.stringify({ version: "next" })}\n`]) {
     const { dir } = repo();

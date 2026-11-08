@@ -36,23 +36,223 @@ test("both loaders read the tests row's unread paths", () => {
   assert.deepEqual(parseRunConfig(data).stopChecks.map((c) => c.unread), [[], ["docs/**", "*.md"]]);
 });
 
-test("both loaders refuse a misplaced, malformed or catch-all unread list, naming the row", () => {
+// 0.6.0 (#17, ADR 0004): each receipt row keeps its own receipt, so each keeps its own list and may
+// carry a name, which names its receipt file.
+test("both loaders read each receipt row's own name and unread list", () => {
+  const data = checks(
+    { name: "typecheck", label: "Typecheck", run: "npm run typecheck", receipt: true, unread: ["**/*.md"] },
+    { label: "Format", run: "npm run fmt" },
+    tests({ name: "tests", unread: ["docs/**", "*.md", "!docs/fixtures/**"] }),
+  );
+  for (const rows of [parseWorkflowConfig(data).checks, parseRunConfig(data).stopChecks]) {
+    assert.deepEqual(
+      rows.map((c) => [c.name, c.receipt, c.unread]),
+      [["typecheck", true, ["**/*.md"]], [null, false, []], ["tests", true, ["docs/**", "*.md", "!docs/fixtures/**"]]],
+    );
+  }
+});
+
+test("both loaders refuse a bad or repeated name, and nameless receipt rows that would share a file with differing lists", () => {
   const cases = [
-    [checks({ label: "Lint", run: "x", unread: ["docs/**"] }), /checks\[0\]\.unread belongs on the tests' row/],
-    [checks(tests({ unread: "docs/**" })), /checks\[0\]\.unread must be a list/],
-    [checks(tests({ unread: ["docs/**", 3] })), /checks\[0\]\.unread\[1\] must be a git glob/],
-    [checks(tests({ unread: [" "] })), /checks\[0\]\.unread\[0\] must be a git glob/],
-    // A glob that names no folder or file could leave out every file, and the receipt would never go stale.
-    ...["**", "**/*", "*/**", ".", "**/**", "**/*.*", "*"].map((glob) => [checks(tests({ unread: ["docs/**", glob] })), /checks\[0\]\.unread\[1\] .* every file/]),
-    // Git refuses a path outside the repo, and `./` or `..` can climb back to its root.
-    ...["/docs/**", "./**", "src/..", "../shared/**"].map((glob) => [checks(tests({ unread: [glob] })), /checks\[0\]\.unread\[0\] .* inside the repo/]),
-    [checks(tests({ unread: [" docs/**"] })), /checks\[0\]\.unread\[0\] .* spaces around it/],
-    [checks(tests({ unread: ["docs/**"] }), tests({ run: "npm run e2e" })), /checks\[1\]\.unread differs from stopGate\.checks\[0\]\.unread/],
+    [checks(tests({ name: 3 })), /checks\[0\]\.name must be/],
+    [checks(tests({ name: "" })), /checks\[0\]\.name must be/],
+    // It names a file: .phase-run/<name>-receipt-<ticket>.json.
+    ...["Tests", "my tests", "../x", "-x", "a/b"].map((name) => [checks(tests({ name })), /checks\[0\]\.name .* lowercase/]),
+    [checks(tests({ name: "test" })), /checks\[0\]\.name "test" is the one rows without a name share/],
+    [checks(tests({ name: "unit" }), tests({ name: "unit", run: "npm run e2e" })), /checks\[1\]\.name "unit" is also stopGate\.checks\[0\]'s/],
+    [checks({ name: "lint", label: "Lint", run: "x" }, tests({ name: "lint" })), /checks\[1\]\.name "lint" is also stopGate\.checks\[0\]'s/],
+    [checks(tests({ unread: ["docs/**"] }), tests({ run: "npm run e2e" })), /checks\[1\]\.unread differs from stopGate\.checks\[0\]\.unread: receipt rows without a "name" share/],
   ];
   for (const [data, error] of cases) {
     assert.throws(() => parseWorkflowConfig(data), error, `hooks: ${JSON.stringify(data.stopGate)}`);
     assert.throws(() => parseRunConfig(data), error, `runner: ${JSON.stringify(data.stopGate)}`);
   }
+  // Named rows, or a named row beside a nameless one, may differ.
+  for (const data of [
+    checks(tests({ name: "unit", unread: ["docs/**"] }), tests({ name: "e2e", run: "npm run e2e" })),
+    checks(tests({ unread: ["docs/**"] }), tests({ name: "e2e", run: "npm run e2e", unread: ["**/*.md"] })),
+    checks(tests({ unread: ["docs/**"] }), tests({ run: "npm run e2e", unread: ["docs/**"] })),
+  ]) {
+    assert.doesNotThrow(() => parseWorkflowConfig(data));
+    assert.doesNotThrow(() => parseRunConfig(data));
+  }
+});
+
+test("both loaders refuse a misplaced, malformed or catch-all unread list, naming the row", () => {
+  const cases = [
+    [checks({ label: "Lint", run: "x", unread: ["docs/**"] }), /checks\[0\]\.unread belongs on a row with "receipt": true/],
+    [checks(tests({ unread: "docs/**" })), /checks\[0\]\.unread must be a list/],
+    [checks(tests({ unread: ["docs/**", 3] })), /checks\[0\]\.unread\[1\] must be a glob/],
+    [checks(tests({ unread: [" "] })), /checks\[0\]\.unread\[0\] must be a glob/],
+    // A glob that names no folder or file could leave out every file, and the receipt would never go stale.
+    ...["**", "**/*", "*/**", ".", "**/**", "**/*.*", "*"].map((glob) => [checks(tests({ unread: ["docs/**", glob] })), /checks\[0\]\.unread\[1\] .* every file/]),
+    // Git refuses a path outside the repo, and `./` or `..` can climb back to its root.
+    ...["/docs/**", "./**", "src/..", "../shared/**"].map((glob) => [checks(tests({ unread: [glob] })), /checks\[0\]\.unread\[0\] .* inside the repo/]),
+    [checks(tests({ unread: [" docs/**"] })), /checks\[0\]\.unread\[0\] .* spaces around it/],
+    // A leading `!` puts paths back; what follows it is held to the same rules.
+    ...["!", "!**", "!*.*"].map((glob) => [checks(tests({ unread: ["docs/**", glob] })), /checks\[0\]\.unread\[1\] .* every file/]),
+    ...["!/docs/**", "!../x/**"].map((glob) => [checks(tests({ unread: ["docs/**", glob] })), /checks\[0\]\.unread\[1\] .* inside the repo/]),
+  ];
+  for (const [data, error] of cases) {
+    assert.throws(() => parseWorkflowConfig(data), error, `hooks: ${JSON.stringify(data.stopGate)}`);
+    assert.throws(() => parseRunConfig(data), error, `runner: ${JSON.stringify(data.stopGate)}`);
+  }
+});
+
+// 0.6.0 (#19, D12, D13): a gate's `after` names another gate's label, and its `unreadOf` a stop
+// check's `name`. The hooks skip `phaseRun`, except to refuse these two names alike: a name that
+// names nothing must fail loudly wherever the file is read, never be quietly ignored.
+const withGates = (gates, ...rows) => ({ version: 1, stopGate: { checks: rows }, phaseRun: { gates } });
+const named = tests({ name: "tests", unread: ["docs/**"] });
+
+test("both loaders refuse an after or unreadOf that names nothing, with the same words", () => {
+  const cases = [
+    [withGates([{ label: "build", run: "b" }, { label: "typecheck", run: "t", after: "biuld" }]), /phaseRun\.gates\[1\]\.after "biuld" names no gate: it must be another gate's label \(build, typecheck\)\./],
+    [withGates([{ label: "suite", run: "s", unreadOf: "tset" }], named), /phaseRun\.gates\[0\]\.unreadOf "tset" names no stop check: it must be a stopGate\.checks row's "name" \(tests\)\./],
+    // A row without a name has no list a gate can point at.
+    [withGates([{ label: "suite", run: "s", unreadOf: "tests" }], tests({ unread: ["docs/**"] })), /phaseRun\.gates\[0\]\.unreadOf "tests" names no stop check: .*\(no row has one\)\./],
+  ];
+  for (const [data, error] of cases) {
+    const messages = [() => parseWorkflowConfig(data), () => parseRunConfig(data)].map((load) => {
+      try {
+        load();
+      } catch (thrown) {
+        return thrown.message;
+      }
+      return "(loaded)";
+    });
+    assert.match(messages[0], error, "hooks");
+    assert.equal(messages[1], messages[0], "the runner's words are the hooks'");
+  }
+  const good = withGates([{ label: "build", run: "b" }, { label: "typecheck", run: "t", after: "build" }, { label: "suite", run: "s", unreadOf: "tests", alone: true }], named);
+  assert.doesNotThrow(() => parseWorkflowConfig(good));
+  assert.deepEqual(parseRunConfig(good).gates.map((g) => [g.label, g.after, g.unreadOf]), [["build", null, null], ["typecheck", "build", null], ["suite", null, "tests"]]);
+  // Any other shape in phaseRun stays the runner's to refuse: the hooks never break a shell over it.
+  for (const gates of ["lint", [null, 3, { label: 4, after: 5 }], [{ label: "a", run: "a", after: ["b"] }]]) {
+    assert.doesNotThrow(() => parseWorkflowConfig(withGates(gates)), JSON.stringify(gates));
+    assert.throws(() => parseRunConfig(withGates(gates)), undefined, JSON.stringify(gates));
+  }
+});
+
+// The ledger section is read by both loaders: the hooks' (the attended hook's switch) and the
+// runner's (the weekly view's first day).
+const withLedger = (ledger) => ({ version: 1, ledger });
+
+test("both loaders read the ledger section, defaulting to the attended hook on and weeks from Monday", () => {
+  const cases = [
+    [{ version: 1 }, { attended: true, weekStarts: "monday" }],
+    [withLedger({}), { attended: true, weekStarts: "monday" }],
+    [withLedger({ attended: false }), { attended: false, weekStarts: "monday" }],
+    [withLedger({ weekStarts: "sunday", note: "the owner's weeks" }), { attended: true, weekStarts: "sunday" }],
+  ];
+  for (const [data, ledger] of cases) {
+    assert.deepEqual(parseWorkflowConfig(data).ledger, ledger, `hooks: ${JSON.stringify(data)}`);
+    assert.deepEqual(parseRunConfig(data).ledger, ledger, `runner: ${JSON.stringify(data)}`);
+  }
+});
+
+test("both loaders refuse a malformed ledger section alike", () => {
+  const cases = [
+    [withLedger([]), /ledger must be an object/],
+    [withLedger("on"), /ledger must be an object/],
+    [withLedger({ weekStart: "monday" }), /: ledger has unknown key\(s\) weekStart; allowed: attended, weekStarts, note\.$/],
+    [withLedger({ attended: "yes" }), /ledger\.attended must be true or false/],
+    [withLedger({ weekStarts: "Monday" }), /ledger\.weekStarts must be a day in lowercase/],
+    [withLedger({ weekStarts: "mon" }), /ledger\.weekStarts must be a day in lowercase/],
+    [withLedger({ weekStarts: 1 }), /ledger\.weekStarts must be a day in lowercase/],
+  ];
+  for (const [data, error] of cases) {
+    assert.throws(() => parseWorkflowConfig(data), error, `hooks: ${JSON.stringify(data.ledger)}`);
+    assert.throws(() => parseRunConfig(data), error, `runner: ${JSON.stringify(data.ledger)}`);
+  }
+});
+
+// 0.6.0 (#21, D16): `phaseRun.keep` names the user plugins and skills a project's nights keep from
+// the machine's trim list. The hooks pass over it (it judges nothing); the runner checks its shape.
+test("both loaders accept phaseRun.keep; the runner refuses a malformed one", () => {
+  const keep = { plugins: ["notion@official"], skills: ["dataviz"], note: "our docs need these" };
+  assert.doesNotThrow(() => parseWorkflowConfig({ version: 1, phaseRun: { keep } }));
+  assert.deepEqual(parseRunConfig({ version: 1, phaseRun: { keep } }).keep, { plugins: ["notion@official"], skills: ["dataviz"] });
+  assert.deepEqual(parseRunConfig({ version: 1 }).keep, { plugins: [], skills: [] });
+  for (const [bad, error] of [
+    [{ flags: ["--no-chrome"] }, /phaseRun\.keep has unknown key\(s\) flags/],
+    [{ skills: "dataviz" }, /phaseRun\.keep\.skills must be a list/],
+    [{ plugins: [""] }, /phaseRun\.keep\.plugins\[0\] is missing/],
+    [{ plugins: ["figma"] }, /phaseRun\.keep\.plugins: "figma" is not a plugin id/],
+  ]) {
+    assert.throws(() => parseRunConfig({ version: 1, phaseRun: { keep: bad } }), error, JSON.stringify(bad));
+  }
+  for (const bad of [null, []]) {
+    assert.throws(() => parseRunConfig({ version: 1, phaseRun: { keep: bad } }), /phaseRun\.keep must be an object/, JSON.stringify(bad));
+  }
+});
+
+// 0.6.0 (#20, D15): `phaseRun.tampering` is checked in full by both loaders, with the same words: a
+// broken rule must stop the night wherever the file is read, never be quietly skipped. This is the
+// one part of phaseRun the hooks refuse on any shape.
+const withTampering = (tampering) => ({ version: 1, phaseRun: { tampering } });
+const TAMPERING = {
+  testFiles: ["**/*.test.mjs"],
+  markers: [{ name: "skip", pattern: "\\.skip\\(" }, { name: "only", pattern: "\\.only\\(", note: "node:test's focus" }],
+  assertions: { pattern: "\\bassert\\.", maxNetRemoved: 0 },
+  guarded: [".claude/workflow.json", "package.json"],
+  guardedScripts: [{ file: "package.json", script: "test" }],
+  override: { heading: "Tests removed or weakened" },
+};
+
+test("both loaders accept the tampering section; no section means no tampering gate", () => {
+  assert.doesNotThrow(() => parseWorkflowConfig(withTampering(TAMPERING)));
+  const rules = parseRunConfig(withTampering(TAMPERING)).tampering;
+  assert.deepEqual(rules.markers.map((m) => [m.name, m.pattern.source]), [["skip", "\\.skip\\("], ["only", "\\.only\\("]]);
+  assert.deepEqual([rules.assertions.maxNetRemoved, rules.guarded, rules.guardedScripts, rules.override], [0, TAMPERING.guarded, TAMPERING.guardedScripts, TAMPERING.override]);
+  assert.equal(parseRunConfig({ version: 1 }).tampering, null);
+  assert.equal(parseRunConfig({ version: 1, phaseRun: {} }).tampering, null);
+  // Only guarded files: no test files needed.
+  assert.deepEqual(parseRunConfig(withTampering({ guarded: ["vitest.config.ts"] })).tampering.testFiles, []);
+});
+
+test("both loaders refuse a bad tampering section, a bad regex among it, with the same words", () => {
+  const cases = [
+    [{ ...TAMPERING, markers: [{ name: "skip", pattern: "(" }] }, /^phaseRun\.tampering\.markers\[0\]\.pattern is not a valid pattern: /],
+    [{ ...TAMPERING, assertions: { pattern: "[", maxNetRemoved: 0 } }, /^phaseRun\.tampering\.assertions\.pattern is not a valid pattern: /],
+    [{ ...TAMPERING, assertions: { pattern: "assert", maxNetRemoved: -1 } }, /assertions\.maxNetRemoved must be a whole number, 0 or more \(it is -1\)\./],
+    [{ ...TAMPERING, assertions: { pattern: "assert" } }, /assertions\.maxNetRemoved must be a whole number/],
+    [{ ...TAMPERING, markers: [{ pattern: "x" }] }, /^phaseRun\.tampering\.markers\[0\]\.name is missing\.$/],
+    [{ ...TAMPERING, markers: [{ name: "skip", regex: "x" }] }, /markers\[0\] has unknown key\(s\) regex; allowed: name, pattern\./],
+    [{ ...TAMPERING, guardedScript: [] }, /^phaseRun\.tampering has unknown key\(s\) guardedScript; allowed: testFiles, markers, assertions, guarded, guardedScripts, override\.$/],
+    [{ ...TAMPERING, guardedScripts: [{ file: "package.json" }] }, /guardedScripts\[0\]\.script is missing\./],
+    [{ ...TAMPERING, guarded: "package.json" }, /^phaseRun\.tampering\.guarded must be a list\.$/],
+    [{ ...TAMPERING, testFiles: [" **/*.test.mjs"] }, /testFiles\[0\] must be a path from the repo's root, such as "\*\*\/\*\.test\.mjs"\./],
+    // As git prints a path, from the root: these would match nothing, a rule quietly off.
+    [{ ...TAMPERING, guarded: ["./vitest.config.ts"] }, /guarded\[0\] must be a path from the repo's root/],
+    [{ ...TAMPERING, guarded: ["../shared/vitest.config.ts"] }, /guarded\[0\] must be a path from the repo's root/],
+    [{ ...TAMPERING, guardedScripts: [{ file: "./package.json", script: "test" }] }, /guardedScripts\[0\]\.file must be a path from the repo's root, such as "package\.json"\./],
+    [{ ...TAMPERING, testFiles: [] }, /testFiles is empty, so its markers and assertions would match no file/],
+    [{ ...TAMPERING, override: { heading: " " } }, /override\.heading is missing\./],
+    [[], /^phaseRun\.tampering must be an object\.$/],
+  ];
+  for (const [tampering, error] of cases) {
+    const messages = [() => parseWorkflowConfig(withTampering(tampering)), () => parseRunConfig(withTampering(tampering))].map((load) => {
+      try {
+        load();
+      } catch (thrown) {
+        return thrown.message;
+      }
+      return "(loaded)";
+    });
+    assert.match(messages[0], error, `hooks: ${JSON.stringify(tampering)}`);
+    assert.equal(messages[1], messages[0], "the runner's words are the hooks'");
+  }
+});
+
+test("the two loaders' tamperingRules are one text, word for word", () => {
+  const body = (file) => {
+    const text = readFileSync(join(PLUGIN, file), "utf8").replace(/\r\n/g, "\n");
+    const start = text.indexOf("function tamperingRules(");
+    assert.notEqual(start, -1, file);
+    return text.slice(start, text.indexOf("\n}\n", start));
+  };
+  assert.equal(body("template/tools/phase-run/config.mjs"), body("hooks/workflow-config.mjs"));
 });
 
 test("Steak To Juan's example holds exactly what run.mjs hardcoded", () => {

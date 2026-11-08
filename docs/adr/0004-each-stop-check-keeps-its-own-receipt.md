@@ -37,3 +37,15 @@ existing lists keep their meaning.
 - A list must name file shapes, not whole folders a check might read from (`docs/**/*.json`, not
   `docs/**`, when a test reads a doc). Setup and refresh warn about test files that read a listed
   path.
+
+## Addendum 2026-11-08: built (#17)
+
+- The matcher is `tools/phase-run/unread.mjs`, apart from `receipt.mjs`, so the runner can use it
+  without reaching the receipt reader. It also matches git's `[...]` classes (`[[:upper:]]` too)
+  and a plain folder name, so an old list keeps its meaning. A test compares its keys with git's on
+  ten lists.
+- Rows without a `name` share 0.5.x's `test-receipt-<ticket>.json`, so they must still share one
+  list. A name is a lowercase word, and never `test`.
+- The keys are one `git add -A` into a copy of the index. Each list then removes its paths from a
+  copy of that, through `git update-index --force-remove --stdin`.
+- The Stop hook falls back to 0.5.2's reading beside a `receipt.mjs` without `treeKeys`.

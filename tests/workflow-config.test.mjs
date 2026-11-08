@@ -25,7 +25,7 @@ const RUN = { PHASE_RUN: "1" };
 // ------------------------------------------------------------------- the loader
 
 test("both shipped configs load: the blank template and Steak To Juan's example", () => {
-  assert.deepEqual(parseWorkflowConfig(JSON.parse(BLANK)), { rules: [], checks: [], wrappers: ["pnpm exec", "pnpm dlx", "pnpm", "npx"] });
+  assert.deepEqual(parseWorkflowConfig(JSON.parse(BLANK)), { rules: [], checks: [], wrappers: ["pnpm exec", "pnpm dlx", "pnpm", "npx"], ledger: { attended: true, weekStarts: "monday" } });
   const stj = parseWorkflowConfig(JSON.parse(STJ));
   assert.equal(stj.rules.length, 4);
   assert.deepEqual(stj.checks.map((c) => c.label), ["Typecheck", "Lint", "The tests your changes touch"]);
@@ -48,7 +48,7 @@ test("a config with a mistake names it: version, a typo'd key, a bad when, a bad
     [{ version: 1, guard: { wrappers: ["bunx", ""] } }, /guard\.wrappers must be a list of command prefixes/],
     [{ version: 1, roadmap: { url: "x" } }, /roadmap has unknown key\(s\) url/],
     [check({ receipt: "yes" }), /checks\[0\]\.receipt must be true or false/],
-    [check({ quiet: { totals: "x", failures: "y" } }), /quiet belongs on the tests' row/],
+    [check({ quiet: { totals: "x", failures: "y" } }), /quiet belongs on a row with "receipt": true/],
     [check({ receipt: true, quiet: { totals: "(", failures: "y" } }), /quiet\.totals is not a valid pattern/],
     [check({ receipt: true, quiet: { totals: "x" } }), /quiet\.failures is missing/],
   ];
@@ -117,6 +117,36 @@ test("a broken config refuses every shell command and says why", () => {
   const result = guard(dir, "ls");
   assert.equal(result.status, 2);
   assert.match(result.stderr, /\.claude\/workflow\.json: .*JSON[\s\S]*until then no shell command runs/);
+});
+
+// The reverse out-of-step (#24): a config a release ahead of the plugin, or wrong outside `guard`, must
+// not stop every shell command. The guard refuses only a fault in what it reads itself.
+const AHEAD = (extra) => JSON.stringify({ version: 1, guard: { block: [{ when: "always", command: "^forbidden\\b", message: "no forbidden here" }] }, ...extra });
+
+test("a fault outside the guard's own part lets shell commands run, and the guard's rules still hold", () => {
+  const faults = {
+    "an unknown top-level key": { someFutureKey: {} },
+    "an unknown key on a stop check": { stopGate: { checks: [{ label: "Tests", run: "node --test", someFutureKey: true }] } },
+    "a broken tampering section": { phaseRun: { tampering: { testFiles: [] } } },
+    "a gate naming no stop check": { phaseRun: { gates: [{ label: "suite", run: "x", unreadOf: "nothing" }] } },
+    "a bad ledger value": { ledger: { weekStarts: "Monday" } },
+  };
+  for (const [what, extra] of Object.entries(faults)) {
+    const { dir } = project(AHEAD(extra));
+    assert.equal(guard(dir, "ls").status, 0, `${what}: ls runs`);
+    assert.match(guard(dir, "forbidden x").stderr, /no forbidden here/, `${what}: the guard's own rule holds`);
+  }
+});
+
+test("a fault in the guard's own part still refuses every shell command", () => {
+  for (const guardPart of [{ block: [{ when: "sometimes", command: "^x", message: "m" }] }, { block: [], someFutureKey: 1 }, { wrappers: [""] }]) {
+    const { dir } = project(JSON.stringify({ version: 1, guard: guardPart }));
+    const result = guard(dir, "ls");
+    assert.equal(result.status, 2);
+    assert.match(result.stderr, /\.claude\/workflow\.json: guard[\s\S]*until then no shell command runs/);
+  }
+  const { dir } = project(JSON.stringify({ version: 2 }));
+  assert.equal(guard(dir, "ls").status, 2, "a version it can't read is a fault in every part");
 });
 
 // --------------------------------------------------------------- the stop gate

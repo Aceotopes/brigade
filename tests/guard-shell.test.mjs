@@ -11,6 +11,27 @@ function guard(project, command, { cwd = project, env = {} } = {}) {
   return runHook("guard-shell.mjs", { tool_input: { command }, cwd }, { CLAUDE_PROJECT_DIR: project, ...env });
 }
 
+// The frozen runner copy (#16): inside a run the rules are the copy's workflow.json.
+const COPY = ".phase-run/phase-x/runner";
+const rule = (word) => JSON.stringify({ version: 1, guard: { block: [{ when: "always", command: `^${word}\\b`, message: `no ${word} here` }] } });
+
+test("with PHASE_RUN_RUNNER set the guard applies the copy's rules; without it, the live tree's", () => {
+  const { dir } = repo("brigade-project-", { ".claude/workflow.json": rule("live-tool"), [`${COPY}/.claude/workflow.json`]: rule("frozen-tool") });
+  const env = { PHASE_RUN: "1", PHASE_RUN_RUNNER: join(dir, COPY) };
+  assert.equal(guard(dir, "frozen-tool x", { env }).status, 2);
+  assert.match(guard(dir, "frozen-tool x", { env }).stderr, /no frozen-tool here/);
+  assert.equal(guard(dir, "live-tool x", { env }).status, 0, "the live rule, written mid-run, does not judge the run");
+  assert.equal(guard(dir, "live-tool x").status, 2, "attended: the live tree's rule");
+  assert.equal(guard(dir, "frozen-tool x").status, 0);
+});
+
+test("a PHASE_RUN_RUNNER that names no folder blocks, rather than guarding with no rules", () => {
+  const { dir } = repo("brigade-project-", { ".claude/workflow.json": rule("live-tool") });
+  const result = guard(dir, "git status", { env: { PHASE_RUN: "1", PHASE_RUN_RUNNER: join(dir, COPY) } });
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /runner copy[\s\S]*is missing/);
+});
+
 test("the project is CLAUDE_PROJECT_DIR: its own doc-check runs before a commit there", () => {
   const { dir } = repo("brigade-project-", FAILING_DOC_CHECK);
   const result = guard(dir, 'git commit -m "feat: x"');

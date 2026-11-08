@@ -35,6 +35,15 @@
             "statusMessage": "Phase run: the project's stop checks"
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/ledger.mjs\"",
+            "timeout": 15
+          }
+        ]
       }
     ]
   }

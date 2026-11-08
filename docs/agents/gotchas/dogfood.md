@@ -1,7 +1,8 @@
 ---
 job: Phase dogfood (Brigade on itself): the traps a session must know before touching its files.
 kind: living
-max-lines: 800
+max-lines: 27
+growth: closed
 ---
 # Gotchas — Phase dogfood: Brigade on itself
 

@@ -1,14 +1,20 @@
 // Tests for the phase runner's own logic (#194). Plain node:test: no database, no
 // GitHub, no Claude session. Run: pnpm test:runner (node --test tools/phase-run/).
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { BROWSER_CHECK, fill, loadRunConfig, parseRunConfig, qaUrl, sessionEnv, targetFingerprint, targetUrl } from "./config.mjs";
-import { QUIET_MS, SETTLE_MS, applyMigrations, folderTrusted, gotchasFile, holdReason, loadResults, outsideAreas, projectGates, promptValues, pullRequestBody, recordResult, render, report, runSession, screenshotsSince, sessionSettings, turnOver } from "./run.mjs";
+import { brigadeCatalog, installedBrigade, parsePluginList, readInstalledBrigade, versionStop } from "./brigade.mjs";
+import { readLedger } from "./ledger.mjs";
+import { QUIET_MS, SETTLE_MS, applyMigrations, backgroundArgs, folderTrusted, gatePlan, gotchasFile, holdReason, loadResults, outsideAreas, printArgs, projectGates, promptValues, pullRequestBody, recordResult, render, report, runSession, runVariables, runnerFile, screenshotsSince, sessionSettings, trimmedSettings, turnOver } from "./run.mjs";
+import { finishSnapshot, readManifest, runnerChanges, takeSnapshot } from "./snapshot.mjs";
+import { PATCH_ARGS } from "./tampering.mjs";
+import { TRIM_FLAGS, readTrim, trimPath } from "./trim.mjs";
 
 const options = { minutes: 120, waitHours: 6, print: true, spec: 179 };
 const call = (claude, extra = {}) => ({ options, prompt: "Build it.", sessionId: "s-1", resume: false, claude, online: async () => true, sleep: async () => {}, ...extra });
@@ -84,6 +90,67 @@ test("each result is written to results.json as it is recorded", () => {
   assert.equal(saved[0].number, 180);
   assert.equal(saved[0].runId, run.runId);
   assert.equal(saved[0].reported, false);
+});
+
+/** A run that keeps a ledger, with ticket 14's session live and its transcript written. */
+function ledgerRun({ brigade = "0.6.0", ledgerFile } = {}) {
+  const run = tempRun();
+  run.ledgerFile = ledgerFile ?? join(run.dir, "ledger.jsonl");
+  run.brigade = brigade;
+  run.prices = { checkedOn: "2026-11-07", fallback: "m", perMillion: { m: { input: 5, cacheWrite5m: 6, cacheWrite1h: 10, cacheRead: 0.5, output: 25 } } };
+  const transcript = join(run.dir, "s14.jsonl");
+  writeFileSync(transcript, `${JSON.stringify({ type: "assistant", message: { id: "r1", model: "claude-opus-5-5", usage: { input_tokens: 1_000_000 } } })}\n`);
+  run.ticketSession = { number: 14, sessionId: "s14", transcript };
+  return run;
+}
+
+const AT = Date.UTC(2026, 10, 8, 2, 30);
+const builtResult = { number: 14, title: "The ledger", status: "built", hash: "abc1234", assumptions: [], runByHand: [], foundElsewhere: [], handedForward: [], notes: [], outside: [], migrations: [], destructive: [], session: { denials: [], minutes: 9, turns: 3, calls: 1, metrics: { costUsd: 5, peakContext: 1_000_000 } } };
+const crashResult = { number: 14, title: "The ledger", status: "failed", detail: "The runner stopped on an error of its own", keptOn: null, session: null };
+
+test("a measured result and a crash each leave one priced night row in the ledger", () => {
+  for (const result of [builtResult, crashResult]) {
+    const run = ledgerRun();
+    const stamped = recordResult(run, result, AT);
+    assert.equal(stamped.ledger, undefined);
+    const rows = readLedger(run.ledgerFile);
+    assert.equal(rows.length, 1, result.status);
+    assert.deepEqual(
+      { ...rows[0], tokens: undefined, byModel: undefined },
+      { at: "2026-11-08T02:30:00.000Z", sessionId: "s14", transcript: run.ticketSession.transcript, kind: "night", ticket: 14, branch: "phase-test", brigade: "0.6.0", costUsd: 5, tokens: undefined, peakContext: 1_000_000, byModel: undefined },
+    );
+    assert.deepEqual(rows[0].byModel, { "claude-opus-5-5": { requests: 1, nanoUsd: 5e9, costUsd: 5 } }); // 1M in × $5: an unlisted model at the fallback
+  }
+});
+
+test("a night row records a null version when the installed Brigade could not be read", () => {
+  const run = ledgerRun({ brigade: null });
+  recordResult(run, crashResult, AT);
+  assert.equal(readLedger(run.ledgerFile)[0].brigade, null);
+});
+
+test("a failed append marks the result 'ledger: not written', and the result is still saved and reported", () => {
+  const run = ledgerRun();
+  run.ledgerFile = run.dir; // a folder: appending to it fails
+  const built = recordResult(run, builtResult, AT);
+  assert.equal(built.ledger, "not written");
+  assert.equal(loadResults(join(run.dir, "results.json"))[0].ledger, "not written");
+  assert.match(report(run, options, []), /ledger: not written/);
+
+  const unstarted = ledgerRun();
+  unstarted.ticketSession = null; // the runner failed before the ticket's session started
+  const failed = recordResult(unstarted, { ...crashResult, number: 15 }, AT);
+  assert.equal(failed.ledger, "not written");
+  assert.match(failed.ledgerError, /no session/);
+  assert.match(report(unstarted, options, []), /ledger: not written/);
+
+  // A session that never wrote a transcript: no $0 row counting a session that never ran.
+  const silent = ledgerRun();
+  silent.ticketSession.transcript = join(silent.dir, "never-written.jsonl");
+  const crashed = recordResult(silent, crashResult, AT);
+  assert.equal(crashed.ledger, "not written");
+  assert.match(crashed.ledgerError, /no transcript was found for session s14/);
+  assert.deepEqual(readLedger(silent.ledgerFile), []);
 });
 
 test("the pull request lists every ticket built on the branch, across nights", () => {
@@ -279,8 +346,28 @@ test("a mistake in the run config is named: a typo'd key, a bad pattern, a port,
   assert.match(loadRunConfig(broken).error, /^\.claude\/workflow\.json: .*JSON/);
 });
 
+// D12 (#19): `after` orders two gates of the parallel group. The hooks refuse only a name that names
+// nothing (tests/phase-run-config.test.mjs); the rest is the runner's, which would wait forever.
+test("an after links two gates of the parallel group, by a label only one gate has, and never in a circle", () => {
+  const row = (label, over = {}) => ({ label, run: label, ...over });
+  const cases = [
+    [[row("a", { after: 3 })], /gates\[0\]\.after is missing/],
+    [[row("a", { unreadOf: "" })], /gates\[0\]\.unreadOf is missing/],
+    [[row("a", { after: "a" })], /gates\[0\]\.after "a" waits on itself: a → a\./],
+    [[row("a", { after: "c" }), row("b", { after: "a" }), row("c", { after: "b" })], /gates\[0\]\.after "c" waits on itself: a → c → b → a\./],
+    [[row("a"), row("suite", { alone: true, after: "a" })], /gates\[1\]\.after belongs on a gate of the parallel group: an "alone" gate already runs after all of it\./],
+    [[row("suite", { alone: true }), row("b", { after: "suite" })], /gates\[1\]\.after "suite" names an "alone" gate, which runs after the whole parallel group: this gate would never start\./],
+    [[row("a"), { label: "a", run: "a2" }, row("b", { after: "a" })], /gates\[2\]\.after "a" names a label two gates share: give each its own label\./],
+  ];
+  for (const [gates, error] of cases) assert.throws(() => runConfig({ gates }), error, JSON.stringify(gates));
+  // Two gates may share a label nobody waits on, as before.
+  assert.doesNotThrow(() => runConfig({ gates: [row("a"), { label: "a", run: "a2" }] }));
+});
+
 test("a placeholder is allowed only where it makes sense: a gate cannot reach the migration target", () => {
-  assert.throws(() => runConfig({ gates: [{ label: "x", run: "deploy {targetUrl}" }] }), /gates\[0\]\.run uses \{targetUrl\}; allowed here: \{base\}, \{N\}, \{qaUrl\}/);
+  assert.throws(() => runConfig({ gates: [{ label: "x", run: "deploy {targetUrl}" }] }), /gates\[0\]\.run uses \{targetUrl\}; allowed here: \{base\}, \{N\}, \{qaUrl\}, \{cache\}/);
+  assert.doesNotThrow(() => runConfig({ gates: [{ label: "lint", run: "eslint --cache-location {cache}/eslintcache", env: { CACHE: "{cache}" } }] }));
+  assert.throws(() => runConfig({ preflight: [{ label: "x", run: "x {cache}" }] }), /preflight\[0\]\.run uses \{cache\}/);
   assert.throws(() => runConfig({ gates: [{ label: "x", run: "x", env: { DB: "{targetUrl}" } }] }), /gates\[0\]\.env\.DB uses \{targetUrl\}/);
   assert.throws(() => runConfig({ sessionEnv: { DB: "{base}" } }), /sessionEnv\.DB uses \{base\}; allowed here: \{qaUrl\}/);
   assert.throws(() => runConfig({ qa: { name: "q", url: "postgres://{qaUrl}" } }), /only placeholder allowed here is \{loopbackNotUsedBy:VAR\}/);
@@ -319,7 +406,450 @@ test("a field that uses {qaUrl} with no qa section is refused", () => {
   assert.doesNotThrow(() => runConfig({ gates: [{ note: "points at {qaUrl} once qa is set", label: "build", run: "build" }] }));
 });
 
-// The project's gates, with a fake shell standing in: what ran, in what order, with what.
+// The project's gates. A name-status diff as `git diff --name-status -M -z` prints it: each row's
+// fields, each ended by a NUL.
+const nameStatus = (...rows) => rows.map((row) => `${row.join("\0")}\0`).join("");
+const modified = (...paths) => nameStatus(...paths.map((path) => ["M", path]));
+
+// A fake job starter: what started, with what, and each job over at once.
+function fakeStart(failing = []) {
+  const ran = [];
+  const start = (line, env) => {
+    ran.push({ line, env });
+    const ok = !failing.some((word) => line.includes(word));
+    return { done: Promise.resolve({ ok, output: ok ? "" : `${line} broke` }), stop: async () => {} };
+  };
+  return { ran, start };
+}
+
+const GATE_CONFIG = runConfig({
+  qa: { name: "cast", url: "postgresql://pg@localhost/cast" },
+  gates: [
+    { label: "lint", run: "npm run lint" },
+    { label: "build", run: "npm run build", when: "^src/", env: { DATABASE_URL: "{qaUrl}" }, freePorts: true },
+    { label: "tests", run: "npm test -- --changed {base}", alone: true },
+  ],
+});
+const planFor = (diff, config = GATE_CONFIG) => gatePlan({ base: "abc123", diff, config });
+
+test("the project's gates start with their env and {base} filled in, the alone gate last, after its strays", async () => {
+  const fake = fakeStart();
+  const jobs = [];
+  const failed = await projectGates(planFor(modified("src/a.ts")), {
+    values: { base: "abc123", N: 7, qaUrl: "postgresql://pg@localhost/cast" },
+    browserCheck: () => null,
+    start: fake.start,
+    tickMs: 5,
+    freePorts: async () => jobs.push("freed ports"),
+    stopStray: (when) => jobs.push(`stray ${when}`),
+  });
+  assert.equal(failed, null);
+  assert.deepEqual(fake.ran.map((r) => r.line), ["npm run lint", "npm run build", "npm test -- --changed abc123"]);
+  assert.deepEqual(fake.ran[1].env, { DATABASE_URL: "postgresql://pg@localhost/cast" });
+  assert.deepEqual(jobs, ["freed ports", "stray before the tests gate"], "the group's ports are freed once, before it starts");
+});
+
+test("a gate whose when matches no changed file is skipped, and a failure in the group keeps the alone gates from starting", async () => {
+  const docsOnly = fakeStart();
+  await projectGates(planFor(modified("docs/x.md")), { values: { base: "b" }, browserCheck: () => null, start: docsOnly.start, tickMs: 5 });
+  assert.deepEqual(docsOnly.ran.map((r) => r.line), ["npm run lint", "npm test -- --changed b"], "no src/ change: no build");
+  const broken = fakeStart(["lint"]);
+  const failed = await projectGates(planFor(modified("docs/x.md")), { values: { base: "b" }, browserCheck: () => null, start: broken.start, tickMs: 5 });
+  assert.deepEqual(failed, { gate: "lint", output: "npm run lint broke" });
+  assert.deepEqual(broken.ran.map((r) => r.line), ["npm run lint"], "nothing after the first failure starts");
+});
+
+// D12 changed this: the browser check used to run where the config placed it. It stays after
+// everything now, whatever its place in the list, so a project gate's failure is reported first.
+test("the browser-check gate runs after every project gate, wherever the config places it, and its problem is the failure", async () => {
+  const config = runConfig({
+    gates: [{ label: "lint", run: "lint" }, { builtin: "browser-check" }, { label: "tests", run: "tests", alone: true }],
+    browserCheck: { screenFiles: "^src/", sourceFiles: "^src/", screenshots: "shots/{N}", minimum: 2, redo: "walk it" },
+  });
+  const fake = fakeStart();
+  const failed = await projectGates(planFor(modified("src/a.ts"), config), { values: {}, browserCheck: () => "shots/7/ holds 0 screenshot(s)", start: fake.start, tickMs: 5 });
+  assert.deepEqual(failed, { gate: "browser check", output: "shots/7/ holds 0 screenshot(s)" });
+  assert.deepEqual(fake.ran.map((r) => r.line), ["lint", "tests"]);
+  let asked = false;
+  const lint = fakeStart(["lint"]);
+  await projectGates(planFor(modified("src/a.ts"), config), { values: {}, browserCheck: () => (asked = true) && null, start: lint.start, tickMs: 5 });
+  assert.equal(asked, false, "a failed gate ends the run before the browser check");
+});
+
+// D13 (#19): the suite skip. One stop check's unread list, through the one matcher (unread.mjs).
+const SKIP_CONFIG = runConfig(
+  { gates: [{ label: "typecheck", run: "tsc" }, { label: "suite", run: "npm test", unreadOf: "tests", alone: true }, { label: "build", run: "next build", when: "^src/" }] },
+  { stopGate: { checks: [{ name: "tests", label: "Tests", run: "npm test", receipt: true, unread: ["docs/**", "**/*.md"] }] } },
+);
+const skipped = (diff) => planFor(diff, SKIP_CONFIG).gates.map(({ gate, skip }) => `${gate.label}${skip ? ` (${skip})` : ""}`);
+
+test("the decision function skips a gate on a non-empty diff wholly on its check's unread list, and on no matching when", () => {
+  assert.deepEqual(skipped(modified("docs/guide.md", "README.md")), ["typecheck", "suite (unreadOf)", "build (when)"], "docs only");
+  assert.deepEqual(skipped(modified("docs/guide.md", "src/a.ts")), ["typecheck", "suite", "build"], "mixed");
+  assert.deepEqual(skipped(""), ["typecheck", "suite", "build (when)"], "an empty diff never takes the suite skip");
+  // Both sides of a rename count: a doc moved into src/ is a change the suite reads.
+  const renamed = planFor(nameStatus(["R087", "docs/old.md", "src/new.ts"]), SKIP_CONFIG);
+  assert.deepEqual(renamed.paths, ["docs/old.md", "src/new.ts"]);
+  assert.deepEqual(renamed.gates.map((g) => g.skip), [null, null, null]);
+  assert.deepEqual(skipped(nameStatus(["R100", "docs/a.md", "docs/b.md"], ["D", "notes.md"])), ["typecheck", "suite (unreadOf)", "build (when)"]);
+  // A copy names two paths too, and a path with a tab or a space is read whole.
+  assert.deepEqual(planFor(nameStatus(["C075", "src/a.ts", "docs/a b.md"], ["A", "src/x\ty.ts"])).paths, ["src/a.ts", "docs/a b.md", "src/x\ty.ts"]);
+  assert.equal(planFor("").base, "abc123");
+});
+
+// D15 (#20): the tampering gate. Fixture diffs as `git diff -U0` prints them (tampering.mjs's
+// PATCH_ARGS), the rules read through a stand-in for `git show <rev>:<path>`.
+const TAMPER = {
+  testFiles: ["**/*.test.mjs"],
+  markers: [
+    { name: "skip", pattern: "\\.skip\\(|\\{ skip: true" },
+    { name: "only", pattern: "\\.only\\(|\\{ only: true" },
+    { name: "todo", pattern: "\\.todo\\(" },
+  ],
+  assertions: { pattern: "\\bassert\\.", maxNetRemoved: 0 },
+  guarded: [".claude/workflow.json", "vitest.config.ts"],
+  guardedScripts: [{ file: "package.json", script: "test" }],
+  override: { heading: "Tests removed or weakened" },
+};
+const TAMPER_CONFIG = runConfig({ gates: [{ label: "lint", run: "lint" }], tampering: TAMPER });
+const workflowWith = (tampering) => JSON.stringify({ version: 1, phaseRun: { tampering } });
+const patchOf = (...files) =>
+  files
+    .map(({ from, to = from, added = [], removed = [] }) =>
+      [`diff --git a/${from ?? to} b/${to ?? from}`, `--- ${from ? `a/${from}` : "/dev/null"}`, `+++ ${to ? `b/${to}` : "/dev/null"}`, "@@ -1 +1 @@", ...removed.map((line) => `-${line}`), ...added.map((line) => `+${line}`)].join("\n"),
+    )
+    .join("\n");
+function tamperPlan({ diff, patch = "", body = "", message = "", files = {}, base = workflowWith(TAMPER), config = TAMPER_CONFIG } = {}) {
+  const at = { "abc123:.claude/workflow.json": base, ...files };
+  const readAt = (rev, path) => at[`${rev}:${path}`] ?? null;
+  return gatePlan({ base: "abc123", diff, config, patch, readAt, body, message }).tampering;
+}
+const OVERRIDE = "## Tests removed or weakened\n\n- `tests/a.test.mjs`: its flaky case goes; #31 rewrites it.\n";
+
+test("no tampering section means no tampering gate, and the reader is never asked", () => {
+  assert.equal(planFor(modified("tests/a.test.mjs")).tampering, null);
+  assert.equal(gatePlan({ base: "abc123", diff: modified("a"), config: GATE_CONFIG, readAt: () => assert.fail("read") }).tampering, null);
+});
+
+test("a marker on an added line of a test file fails, naming the marker and the file; one removed, or outside the tests, passes", () => {
+  for (const [marker, line] of [["skip", '  test.skip("adds", () => {});'], ["only", 'test("adds", { only: true }, () => {});'], ["todo", 'test.todo("adds");']]) {
+    const verdict = tamperPlan({ diff: modified("tests/a.test.mjs"), patch: patchOf({ from: "tests/a.test.mjs", added: [line] }) });
+    assert.equal(verdict.ok, false, marker);
+    assert.deepEqual(verdict.findings.map((f) => [f.kind, f.path, f.marker]), [["marker", "tests/a.test.mjs", marker]]);
+    assert.match(verdict.output, new RegExp(`tests/a\\.test\\.mjs adds the "${marker}" marker`));
+  }
+  assert.equal(tamperPlan({ diff: modified("tests/a.test.mjs"), patch: patchOf({ from: "tests/a.test.mjs", removed: ['test.skip("x", () => {});'] }) }).ok, true, "removing a skip");
+  assert.equal(tamperPlan({ diff: modified("src/a.mjs"), patch: patchOf({ from: "src/a.mjs", added: ["list.skip(2);"] }) }).ok, true, "not a test file");
+});
+
+test("assertions are counted over every test file together: a net removal past the limit fails, a moved test passes", () => {
+  const two = ["assert.equal(a, 1);", "assert.ok(b); assert.ok(c);"];
+  const removed = tamperPlan({ diff: modified("tests/a.test.mjs"), patch: patchOf({ from: "tests/a.test.mjs", removed: two }) });
+  assert.equal(removed.ok, false);
+  assert.deepEqual(removed.findings.map((f) => [f.kind, f.removed, f.added, f.paths]), [["assertions", 3, 0, ["tests/a.test.mjs"]]]);
+  assert.match(removed.output, /3 assertion match\(es\) removed and 0 added across the test files, 3 net; at most 0 may be/);
+  // Moved: out of one file, into another.
+  const moved = tamperPlan({ diff: modified("tests/a.test.mjs", "tests/b.test.mjs"), patch: patchOf({ from: "tests/a.test.mjs", removed: two }, { from: "tests/b.test.mjs", added: two }) });
+  assert.equal(moved.ok, true);
+  // A deleted test file's assertions count as removed; a source file's never count.
+  assert.equal(tamperPlan({ diff: nameStatus(["D", "tests/a.test.mjs"]), patch: patchOf({ from: "tests/a.test.mjs", to: null, removed: two }) }).ok, false);
+  assert.equal(tamperPlan({ diff: modified("src/a.mjs"), patch: patchOf({ from: "src/a.mjs", removed: two }) }).ok, true);
+  // A test file renamed out of the test globs takes every assertion with it, edited lines or not.
+  const atBase = { "abc123:tests/a.test.mjs": two.join("\n") };
+  const pureRename = "diff --git a/tests/a.test.mjs b/tests/a.mjs\nsimilarity index 100%\nrename from tests/a.test.mjs\nrename to tests/a.mjs";
+  const out = tamperPlan({ diff: nameStatus(["R100", "tests/a.test.mjs", "tests/a.mjs"]), patch: pureRename, files: atBase });
+  assert.deepEqual(out.findings.map((f) => [f.kind, f.removed, f.paths]), [["assertions", 3, ["tests/a.test.mjs"]]]);
+  const unread = tamperPlan({ diff: nameStatus(["R100", "tests/a.test.mjs", "tests/a.mjs"]), patch: pureRename, files: {} });
+  assert.deepEqual(unread.findings.map((f) => [f.kind, f.path]), [["unreadable", "tests/a.test.mjs"]], "its base text unreadable: never passes uncounted");
+  const renamedWithin = "diff --git a/tests/a.test.mjs b/tests/b.test.mjs\nsimilarity index 100%\nrename from tests/a.test.mjs\nrename to tests/b.test.mjs";
+  assert.equal(tamperPlan({ diff: nameStatus(["R100", "tests/a.test.mjs", "tests/b.test.mjs"]), patch: renamedWithin, files: atBase }).ok, true, "renamed among the tests");
+  // Moved into a file the override names: its gains still count, so the move balances.
+  const intoOverridden = tamperPlan({ diff: modified("tests/a.test.mjs", "tests/b.test.mjs"), patch: patchOf({ from: "tests/b.test.mjs", removed: two }, { from: "tests/a.test.mjs", added: two }), body: OVERRIDE });
+  assert.equal(intoOverridden.ok, true);
+  // Within the limit.
+  const loose = workflowWith({ ...TAMPER, assertions: { pattern: "\\bassert\\.", maxNetRemoved: 3 } });
+  assert.equal(tamperPlan({ base: loose, diff: modified("tests/a.test.mjs"), patch: patchOf({ from: "tests/a.test.mjs", removed: two }) }).ok, true);
+});
+
+test("any change to a guarded file fails, both sides of a rename counted", () => {
+  for (const diff of [modified(".claude/workflow.json"), nameStatus(["R100", "vitest.config.ts", "old/vitest.config.ts"]), nameStatus(["D", "vitest.config.ts"])]) {
+    const verdict = tamperPlan({ diff });
+    assert.equal(verdict.ok, false, JSON.stringify(diff));
+    assert.equal(verdict.findings[0].kind, "guarded");
+    assert.match(verdict.output, /is guarded, and this ticket changes it/);
+  }
+  assert.equal(tamperPlan({ diff: modified("src/vitest.config.ts.md") }).ok, true);
+});
+
+test("a change to a guarded script's text fails; the rest of its file is free, and a missing script is a change", () => {
+  const pkg = (scripts, extra = {}) => JSON.stringify({ name: "p", scripts, ...extra });
+  const base = pkg({ test: "node --test", lint: "eslint ." });
+  const at = (head) => ({ "abc123:package.json": base, ...(head === null ? {} : { "HEAD:package.json": head }) });
+  const verdict = tamperPlan({ diff: modified("package.json"), files: at(pkg({ test: "node --test || true", lint: "eslint ." })) });
+  assert.equal(verdict.ok, false);
+  assert.deepEqual(verdict.findings.map((f) => [f.kind, f.path, f.script]), [["script", "package.json", "test"]]);
+  assert.match(verdict.output, /package\.json's "test" script changed/);
+  assert.equal(tamperPlan({ diff: modified("package.json"), files: at(pkg({ test: "node --test", lint: "eslint --fix ." }, { version: "2.0.0" })) }).ok, true);
+  assert.equal(tamperPlan({ diff: modified("package.json"), files: at(pkg({ lint: "eslint ." })) }).ok, false, "the script removed");
+  assert.equal(tamperPlan({ diff: nameStatus(["D", "package.json"]), files: at(null) }).ok, false, "the file deleted");
+  assert.equal(tamperPlan({ diff: modified("package.json"), files: at("{ not json") }).ok, false, "unreadable: never fails open");
+  assert.equal(tamperPlan({ diff: modified("src/a.mjs"), files: {} }).ok, true, "package.json untouched: nothing read");
+});
+
+test("a test override in the ticket body, naming the path as a whole word, lets that path through", () => {
+  const marker = { diff: modified("tests/a.test.mjs"), patch: patchOf({ from: "tests/a.test.mjs", added: ['test.skip("x", () => {});'], removed: ["assert.ok(x);"] }) };
+  const passed = tamperPlan({ ...marker, body: `## What to build\n\nIt.\n\n${OVERRIDE}\n## Areas\n\n- tests/\n` });
+  assert.equal(passed.ok, true, "the marker and the file's assertions both let through");
+  assert.deepEqual(passed.overridden, ["tests/a.test.mjs"]);
+  assert.equal(tamperPlan({ ...marker, body: OVERRIDE.replace(/\n/g, "\r\n") }).ok, true, "a body with CRLF");
+  assert.equal(tamperPlan({ diff: modified("vitest.config.ts"), body: "### Tests removed or weakened:\n- vitest.config.ts, the slow pool goes.\n" }).ok, true, "a guarded file");
+  // Never a near miss: a longer path, a line under another heading, a bare file name.
+  const fenced = "## Notes\n\n```sh\n# Tests removed or weakened\nrm tests/a.test.mjs\n```\n";
+  for (const body of [OVERRIDE.replace("a.test.mjs", "a.test.mjs.bak"), "## Notes\n\n- `tests/a.test.mjs`: flaky.\n", "## Tests removed or weakened\n\n- a.test.mjs: flaky.\n", `${OVERRIDE.split("\n")[0]}\n\n## Areas\n- tests/a.test.mjs\n`, fenced]) {
+    assert.equal(tamperPlan({ ...marker, body }).ok, false, body);
+  }
+  // Only the overridden file leaves the assertion count.
+  const both = tamperPlan({ diff: modified("tests/a.test.mjs", "tests/b.test.mjs"), patch: patchOf({ from: "tests/a.test.mjs", removed: ["assert.ok(1);"] }, { from: "tests/b.test.mjs", removed: ["assert.ok(2);"] }), body: OVERRIDE });
+  assert.deepEqual(both.findings.map((f) => [f.kind, f.removed, f.paths]), [["assertions", 1, ["tests/b.test.mjs"]]]);
+});
+
+test("a test override says why: a line naming only the path lets nothing through, and the output says so (#24)", () => {
+  const marker = { diff: modified("tests/a.test.mjs"), patch: patchOf({ from: "tests/a.test.mjs", added: ['test.skip("x", () => {});'] }) };
+  for (const line of ["- tests/a.test.mjs", "- `tests/a.test.mjs`", "* tests/a.test.mjs:", "1. **tests/a.test.mjs** —", "tests/a.test.mjs.", "- tests/a.test.mjs, tests/b.test.mjs"]) {
+    const verdict = tamperPlan({ ...marker, body: `## Tests removed or weakened\n\n${line}\n` });
+    assert.equal(verdict.ok, false, line);
+    assert.match(verdict.output, /"Tests removed or weakened" names tests\/a\.test\.mjs with no reason/, line);
+  }
+  assert.equal(tamperPlan({ ...marker, body: "## Tests removed or weakened\n\n- tests/a.test.mjs (#31 rewrites it)\n" }).ok, true, "any words beside the path are a reason");
+  assert.equal(tamperPlan({ ...marker, body: "## Tests removed or weakened\n\n- tests/a.test.mjs: e.g.\n" }).ok, true, "an abbreviation is a word, not a path");
+});
+
+test("a reason only in the commit message is refused, and said so for the morning report", () => {
+  const message = "test: drop the flaky case — devlog #9, Closes #7\n\nTests removed or weakened: tests/a.test.mjs, the case was flaky.\n";
+  const verdict = tamperPlan({ diff: modified("tests/a.test.mjs"), patch: patchOf({ from: "tests/a.test.mjs", added: ['test.skip("x", () => {});'] }), message });
+  assert.equal(verdict.ok, false);
+  assert.deepEqual(verdict.refused, ["tests/a.test.mjs"]);
+  assert.match(verdict.output, /A reason in the commit message does not count \(found for tests\/a\.test\.mjs\)/);
+  assert.match(verdict.refusedNote, /The commit message gave a reason for weakening `tests\/a\.test\.mjs`; it was refused/);
+  // Naming the file in a commit message is no reason by itself.
+  assert.deepEqual(tamperPlan({ diff: modified("tests/a.test.mjs"), patch: patchOf({ from: "tests/a.test.mjs", added: ['test.skip("x", () => {});'] }), message: "test: tests/a.test.mjs\n" }).refused, []);
+  // The refusal reaches the morning report whichever way the ticket ends: a built ticket's notes, a
+  // parked or failed one's detail (a runner error's too), through the one place results are recorded.
+  const run = tempRun();
+  run.tamperingNotes = new Map([[14, verdict.refusedNote], [15, verdict.refusedNote]]);
+  recordResult(run, builtResult);
+  recordResult(run, { ...crashResult, number: 15 });
+  recordResult(run, { ...builtResult, number: 16 });
+  assert.deepEqual(run.results.map((r) => [r.notes?.includes(verdict.refusedNote) ?? null, r.detail?.endsWith(verdict.refusedNote) ?? null]), [[true, null], [null, true], [false, null]]);
+  const text = report(run, options, []);
+  assert.equal(text.split(verdict.refusedNote).length - 1, 2, "once under the built ticket, once under the failed one");
+  rmSync(run.dir, { recursive: true, force: true });
+});
+
+test("the rules are the base commit's: a section the ticket loosens is ignored, and a missing or broken one at the base fails", () => {
+  // The ticket rewrote its own rules: the run's copy says anything goes; the base still judges.
+  const loosened = runConfig({ gates: [], tampering: { testFiles: ["nothing/**"] } });
+  const marker = { diff: modified("tests/a.test.mjs", ".claude/workflow.json"), patch: patchOf({ from: "tests/a.test.mjs", added: ['test.only("x", () => {});'] }) };
+  const verdict = tamperPlan({ ...marker, config: loosened });
+  assert.deepEqual(verdict.findings.map((f) => f.kind).sort(), ["guarded", "marker"]);
+  assert.match(verdict.output, /read from the base commit abc123/);
+  for (const [base, why] of [
+    [null, /has no \.claude\/workflow\.json/],
+    ["{ broken", /could not be read as JSON/],
+    [JSON.stringify({ version: 1, phaseRun: {} }), /has no phaseRun\.tampering section, while this run has one/],
+    [workflowWith({ ...TAMPER, markers: [{ name: "skip", pattern: "(" }] }), /phaseRun\.tampering\.markers\[0\]\.pattern is not a valid pattern/],
+  ]) {
+    const broken = tamperPlan({ diff: modified("src/a.mjs"), base });
+    assert.equal(broken.ok, false, String(base));
+    assert.match(broken.problem, why);
+    assert.match(broken.output, /never passes a ticket it cannot judge/);
+  }
+  const noReader = gatePlan({ base: "abc123", diff: modified("src/a.mjs"), config: TAMPER_CONFIG }).tampering;
+  assert.equal(noReader.ok, false, "no reader: never fails open");
+});
+
+test("the tampering verdict is the first gate: nothing else starts, and the browser check is never asked", async () => {
+  const config = runConfig({
+    gates: [{ label: "lint", run: "lint" }, { label: "tests", run: "tests", alone: true }],
+    browserCheck: { screenFiles: "^src/", sourceFiles: "^src/", screenshots: "shots/{N}", minimum: 1, redo: "walk it" },
+    tampering: TAMPER,
+  });
+  const at = { "abc123:.claude/workflow.json": workflowWith(TAMPER) };
+  const plan = gatePlan({ base: "abc123", diff: modified("vitest.config.ts"), config, readAt: (rev, path) => at[`${rev}:${path}`] ?? null });
+  const fake = fakeStart();
+  let asked = false;
+  const cache = mkdtempSync(join(tmpdir(), "tamper-cache-"));
+  try {
+    writeFileSync(join(cache, "kept"), "");
+    const failed = await projectGates(plan, { values: { cache }, browserCheck: () => (asked = true) && null, start: fake.start, tickMs: 5 });
+    assert.equal(failed.gate, "tampering");
+    assert.match(failed.output, /vitest\.config\.ts is guarded/);
+    assert.deepEqual(fake.ran, []);
+    assert.equal(asked, false);
+    assert.equal(existsSync(join(cache, "kept")), true, "it runs before {cache} is even emptied");
+  } finally {
+    rmSync(cache, { recursive: true, force: true });
+  }
+  const clean = gatePlan({ base: "abc123", diff: modified("src/a.ts"), config, readAt: (rev, path) => at[`${rev}:${path}`] ?? null });
+  assert.equal(await projectGates(clean, { values: {}, browserCheck: () => null, start: fake.start, tickMs: 5 }), null);
+  assert.deepEqual(fake.ran.map((r) => r.line), ["lint", "tests"]);
+});
+
+test("the verdict reads real git output: a quoted path, a path with a space, a pure rename", () => {
+  const dir = mkdtempSync(join(tmpdir(), "tamper-git-"));
+  const git = (...args) => {
+    const result = spawnSync("git", args, { cwd: dir, encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout;
+  };
+  git("init", "-q", "-b", "main");
+  git("config", "user.email", "t@example.com");
+  git("config", "user.name", "T");
+  mkdirSync(join(dir, "tests"));
+  mkdirSync(join(dir, ".claude"));
+  writeFileSync(join(dir, ".claude", "workflow.json"), workflowWith(TAMPER));
+  const body = 'test("a", () => {\n  assert.ok(1);\n});\n';
+  for (const name of ["a b.test.mjs", "ü.test.mjs", "moved.test.mjs"]) writeFileSync(join(dir, "tests", name), body);
+  git("add", "-A");
+  git("commit", "-q", "-m", "base");
+  const base = git("rev-parse", "HEAD").trim();
+  writeFileSync(join(dir, "tests", "a b.test.mjs"), body.replace('test("a"', 'test.skip("a"'));
+  writeFileSync(join(dir, "tests", "ü.test.mjs"), body.replace("  assert.ok(1);\n", ""));
+  git("mv", "tests/moved.test.mjs", "tests/renamed.test.mjs");
+  git("commit", "-q", "-am", "work");
+  const readAt = (rev, path) => {
+    const result = spawnSync("git", ["show", `${rev}:${path}`], { cwd: dir, encoding: "utf8" });
+    return result.status === 0 ? result.stdout : null;
+  };
+  const plan = gatePlan({ base, diff: git("diff", "--name-status", "-M", "-z", `${base}..HEAD`), patch: git(...PATCH_ARGS, `${base}..HEAD`), config: TAMPER_CONFIG, readAt });
+  rmSync(dir, { recursive: true, force: true });
+  assert.deepEqual(plan.tampering.findings.map((f) => [f.kind, f.path ?? f.paths.join(",")]), [["marker", "tests/a b.test.mjs"], ["assertions", "tests/ü.test.mjs"]]);
+});
+
+// Runner-seam tests with tiny real jobs: each gate is a `node -e` line, so the parallel group, the
+// waits and the kills are the real ones. Each job reads its folder from DIR, and leaves flags there.
+const node = (code) => `node -e "const fs=require('fs'),d=process.env.DIR;${code}"`;
+/** Waits (up to 15 s) for `flag` in DIR, then runs `then`; exits 9 if it never comes. */
+const waitFor = (flag, then) => `const t=Date.now();const i=setInterval(()=>{if(fs.existsSync(d+'/${flag}')){clearInterval(i);${then}}else if(Date.now()-t>15000)process.exit(9)},20);`;
+const flag = (name) => `fs.writeFileSync(d+'/${name}','');`;
+function jobRun(gates, { diff = modified("src/a.ts"), stopGate } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), "gates-"));
+  const config = runConfig({ gates: gates.map((gate) => ({ ...gate, env: { DIR: dir } })) }, stopGate ? { stopGate } : {});
+  return { dir, has: (name) => existsSync(join(dir, name)), plan: planFor(diff, config) };
+}
+const realGates = (plan, over = {}) => projectGates(plan, { values: {}, browserCheck: () => null, tickMs: 20, ...over });
+async function gone(pid) {
+  for (let i = 0; i < 200; i++) {
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      if (error.code === "ESRCH") return true;
+    }
+    await new Promise((done) => setTimeout(done, 50));
+  }
+  return false;
+}
+
+test("gates run side by side: two jobs that each wait for the other's flag both pass", { timeout: 60_000 }, async () => {
+  const run = jobRun([
+    { label: "a", run: node(flag("a") + waitFor("b", "process.exit(0)")) },
+    { label: "b", run: node(flag("b") + waitFor("a", "process.exit(0)")) },
+  ]);
+  assert.equal(await realGates(run.plan), null, "one after the other, the first would never see the second's flag");
+});
+
+test("an after gate starts once its gate passed, and never when it failed", { timeout: 60_000 }, async () => {
+  const passing = jobRun([
+    { label: "typecheck", run: node(`process.exit(fs.existsSync(d+'/built')?0:3)`), after: "build" },
+    { label: "build", run: node(`setTimeout(()=>{${flag("built")}},300)`) },
+  ]);
+  assert.equal(await realGates(passing.plan), null);
+  const failing = jobRun([
+    { label: "build", run: node(`setTimeout(()=>process.exit(1),200)`) },
+    { label: "typecheck", run: node(flag("ran")), after: "build" },
+  ]);
+  assert.equal((await realGates(failing.plan)).gate, "build");
+  assert.equal(failing.has("ran"), false);
+  // A skipped gate holds nobody up.
+  const skippedBuild = jobRun([
+    { label: "build", run: node("process.exit(1)"), when: "^nothing/" },
+    { label: "typecheck", run: node(flag("ran")), after: "build" },
+  ]);
+  assert.equal(await realGates(skippedBuild.plan), null);
+  assert.equal(skippedBuild.has("ran"), true);
+});
+
+test("alone gates run one at a time after the whole group, each after its strays are stopped", { timeout: 60_000 }, async () => {
+  const run = jobRun([
+    { label: "suite", run: node(`if(!fs.existsSync(d+'/lint'))process.exit(4);setTimeout(()=>{${flag("suite")}},300)`), alone: true },
+    { label: "lint", run: node(`setTimeout(()=>{${flag("lint")}},300)`) },
+    { label: "e2e", run: node(`process.exit(fs.existsSync(d+'/suite')?0:5)`), alone: true },
+  ]);
+  const strays = [];
+  assert.equal(await realGates(run.plan, { stopStray: (when) => strays.push(when) }), null);
+  assert.deepEqual(strays, ["before the suite gate", "before the e2e gate"]);
+});
+
+test("the first failure stops the rest: each job's process tree is killed and waited for, and a waiting job never starts", { timeout: 60_000 }, async () => {
+  const run = jobRun([
+    { label: "suite", run: node(`fs.writeFileSync(d+'/pid',String(process.pid));setInterval(()=>{},1000)`) },
+    { label: "lint", run: node(waitFor("pid", "process.exit(1)")) },
+    { label: "e2e", run: node(flag("ran")), after: "suite" },
+  ]);
+  const failed = await realGates(run.plan);
+  assert.equal(failed.gate, "lint");
+  assert.equal(await gone(Number(readFileSync(join(run.dir, "pid"), "utf8"))), true, "the long job's node process is gone");
+  assert.equal(run.has("ran"), false);
+});
+
+// Off Windows a job leads its own process group, so the terminal's Ctrl-C no longer reaches it: the
+// runner's exit must kill every job still open, or a suite outlives the night holding its ports.
+test("a gate job still open when the runner exits is killed with it", { timeout: 60_000 }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), "gates-"));
+  const job = node(`fs.writeFileSync(d+'/pid',String(process.pid));setInterval(()=>{},1000)`);
+  const runner = [
+    `const { startJob } = await import(${JSON.stringify(pathToFileURL(join(HERE, "run.mjs")).href)});`,
+    `startJob(${JSON.stringify(job)}, { DIR: ${JSON.stringify(dir)} });`,
+    `const fs = await import("node:fs");`,
+    `const i = setInterval(() => { if (fs.existsSync(${JSON.stringify(join(dir, "pid"))})) { clearInterval(i); process.exit(0); } }, 20);`,
+  ].join("\n");
+  const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith("PHASE_RUN")));
+  const exited = spawnSync(process.execPath, ["--input-type=module", "-e", runner], { env, encoding: "utf8", timeout: 30_000 });
+  assert.equal(exited.status, 0, exited.stderr);
+  assert.equal(await gone(Number(readFileSync(join(dir, "pid"), "utf8"))), true, "the job's node process died with the runner");
+});
+
+test("two jobs failing in the same tick are both reported, each output under its gate", { timeout: 60_000 }, async () => {
+  const run = jobRun([
+    { label: "lint", run: node(flag("l") + waitFor("t", "console.log('lint said no');process.exit(1)")) },
+    { label: "typecheck", run: node(flag("t") + waitFor("l", "console.log('tsc said no');process.exit(2)")) },
+  ]);
+  const failed = await realGates(run.plan, { tickMs: 3000 });
+  assert.equal(failed.gate, "lint, typecheck");
+  assert.match(failed.output, /── lint ──\nlint said no[\s\S]*── typecheck ──\ntsc said no/);
+});
+
+test("the suite skip end to end: a docs-only diff never starts the gate, a mixed or empty one does", { timeout: 60_000 }, async () => {
+  const stopGate = { checks: [{ name: "tests", label: "Tests", run: "npm test", receipt: true, unread: ["docs/**"] }] };
+  const suite = [{ label: "suite", run: node(flag("ran")), unreadOf: "tests" }];
+  for (const [diff, ran] of [[modified("docs/a.md"), false], [modified("docs/a.md", "src/a.ts"), true], ["", true]]) {
+    const run = jobRun(suite, { diff, stopGate });
+    assert.equal(await realGates(run.plan), null);
+    assert.equal(run.has("ran"), ran, JSON.stringify(diff));
+  }
+});
+
+test("the {cache} folder is emptied before the gates run, and the gates are given its path", { timeout: 60_000 }, async () => {
+  const cache = join(mkdtempSync(join(tmpdir(), "gate-cache-")), "cache");
+  mkdirSync(join(cache, "old"), { recursive: true });
+  writeFileSync(join(cache, "old", "eslintcache"), "stale");
+  const dir = mkdtempSync(join(tmpdir(), "gates-"));
+  const config = runConfig({ gates: [{ label: "lint", run: node(`process.exit(fs.readdirSync(process.env.CACHE).length)`), env: { DIR: dir, CACHE: "{cache}" } }] });
+  assert.equal(await realGates(planFor(modified("src/a.ts"), config), { values: { cache } }), null);
+  assert.equal(existsSync(join(cache, "old")), false);
+});
+
+// The migrations' apply, with a fake shell standing in: what ran, in what order, with what.
 function fakeShell(failing = []) {
   const ran = [];
   const run = (line, env) => {
@@ -328,53 +858,6 @@ function fakeShell(failing = []) {
   };
   return { ran, run };
 }
-
-const GATES = runConfig({
-  qa: { name: "cast", url: "postgresql://pg@localhost/cast" },
-  gates: [
-    { label: "lint", run: "npm run lint" },
-    { label: "build", run: "npm run build", when: "^src/", env: { DATABASE_URL: "{qaUrl}" }, freePorts: true },
-    { label: "tests", run: "npm test -- --changed {base}", alone: true },
-  ],
-}).gates;
-
-test("the project's gates run in order, each with its env and {base} filled in", async () => {
-  const shell = fakeShell();
-  const jobs = [];
-  const failed = await projectGates(GATES, {
-    changed: ["src/a.ts"],
-    values: { base: "abc123", N: 7, qaUrl: "postgresql://pg@localhost/cast" },
-    browserCheck: () => null,
-    run: shell.run,
-    freePorts: async () => jobs.push("freed ports"),
-    stopStray: (when) => jobs.push(`stray ${when}`),
-  });
-  assert.equal(failed, null);
-  assert.deepEqual(shell.ran.map((r) => r.line), ["npm run lint", "npm run build", "npm test -- --changed abc123"]);
-  assert.deepEqual(shell.ran[1].env, { DATABASE_URL: "postgresql://pg@localhost/cast" });
-  assert.deepEqual(jobs, ["freed ports", "stray before the tests gate"]);
-});
-
-test("a gate whose files the ticket did not touch is skipped, and the first failure is returned", async () => {
-  const shell = fakeShell(["lint"]);
-  const failed = await projectGates(GATES, { changed: ["docs/x.md"], values: { base: "b" }, browserCheck: () => null, run: shell.run });
-  assert.deepEqual(failed, { gate: "lint", output: "npm run lint broke" });
-  assert.deepEqual(shell.ran.map((r) => r.line), ["npm run lint"], "nothing after the first failure runs");
-  const docsOnly = fakeShell();
-  await projectGates(GATES, { changed: ["docs/x.md"], values: { base: "b" }, browserCheck: () => null, run: docsOnly.run });
-  assert.deepEqual(docsOnly.ran.map((r) => r.line), ["npm run lint", "npm test -- --changed b"], "no src/ change: no build");
-});
-
-test("the browser-check gate runs where the config places it, and its problem is the failure", async () => {
-  const gates = runConfig({
-    gates: [{ label: "lint", run: "lint" }, { builtin: "browser-check" }, { label: "tests", run: "tests" }],
-    browserCheck: { screenFiles: "^src/", sourceFiles: "^src/", screenshots: "shots/{N}", minimum: 2, redo: "walk it" },
-  }).gates;
-  const shell = fakeShell();
-  const failed = await projectGates(gates, { changed: [], values: {}, browserCheck: () => "shots/7/ holds 0 screenshot(s)", run: shell.run });
-  assert.deepEqual(failed, { gate: "browser check", output: "shots/7/ holds 0 screenshot(s)" });
-  assert.deepEqual(shell.ran.map((r) => r.line), ["lint"]);
-});
 
 const MIGRATIONS = runConfig({
   migrations: {
@@ -475,10 +958,365 @@ test("the project's prose is spliced in by section, its header dropped, and an u
   assert.throws(() => promptValues(project, "## Biuld\n- x\n", ticketValues), /"## Biuld" section has no place in the prompt/);
 });
 
+// ------------------------------------------------------ the frozen runner copy (#16)
+
+/** A repo stand-in with a runner folder and a config, and a run folder beside it. */
+function snapshotProject() {
+  const root = mkdtempSync(join(tmpdir(), "phase-run-snapshot-"));
+  const put = (rel, text) => {
+    mkdirSync(dirname(join(root, rel)), { recursive: true });
+    writeFileSync(join(root, rel), text);
+  };
+  put("tools/phase-run/run.mjs", "// the runner\n");
+  put("tools/phase-run/receipt.mjs", "// the receipt\n");
+  put("tools/phase-run/run.test.mjs", "// its tests\n");
+  put("tools/phase-run/ticket-prompt.md", "the prompt\n");
+  put(".claude/workflow.json", '{ "version": 1 }\n');
+  const runDir = join(root, ".phase-run", "phase-x");
+  const take = (runId, at = AT, brigade = "0.6.0") => takeSnapshot({ root, runDir, runId, commit: "abc123", at, brigade });
+  return { root, runDir, put, take };
+}
+
+test("at run start the copy is taken: the runner folder and the config, with its manifest", () => {
+  const { runDir, take } = snapshotProject();
+  const copy = take("run-1");
+  assert.equal(copy.dir, join(runDir, "runner"));
+  assert.equal(copy.reused, false);
+  assert.deepEqual(copy.manifest, { takenAt: new Date(AT).toISOString(), commit: "abc123", runId: "run-1", brigade: "0.6.0", finished: false });
+  assert.deepEqual(readManifest(copy.dir), copy.manifest);
+  assert.equal(readFileSync(join(copy.dir, "tools/phase-run/run.mjs"), "utf8"), "// the runner\n");
+  assert.equal(readFileSync(join(copy.dir, "tools/phase-run/ticket-prompt.md"), "utf8"), "the prompt\n");
+  assert.equal(readFileSync(join(copy.dir, ".claude/workflow.json"), "utf8"), '{ "version": 1 }\n');
+});
+
+test("a run that died restarts on the same copy, though its tests or its config changed since", () => {
+  const { put, take } = snapshotProject();
+  const first = take("run-1");
+  put("tools/phase-run/run.test.mjs", "// a test written mid-night\n");
+  put(".claude/workflow.json", '{ "version": 1, "note": "edited mid-night" }\n');
+  const again = take("run-2", AT + 3_600_000);
+  assert.equal(again.reused, true);
+  assert.deepEqual(again.manifest, first.manifest, "the first run's manifest stands");
+  assert.equal(readFileSync(join(again.dir, ".claude/workflow.json"), "utf8"), '{ "version": 1 }\n', "the copy keeps the config it was taken with");
+});
+
+test("the restart is refused, naming the files, when the live runner's code differs from the copy's", () => {
+  const { root, put, take } = snapshotProject();
+  take("run-1");
+  put("tools/phase-run/run.mjs", "// changed\n");
+  put("tools/phase-run/new.mjs", "// added\n");
+  rmSync(join(root, "tools/phase-run/receipt.mjs"));
+  put("tools/phase-run/run.test.mjs", "// a test change is not runner code\n");
+  assert.deepEqual(runnerChanges(root, join(root, ".phase-run", "phase-x", "runner")), ["tools/phase-run/new.mjs", "tools/phase-run/receipt.mjs", "tools/phase-run/run.mjs"]);
+  assert.throws(() => take("run-2"), (error) => {
+    assert.match(error.message, /tools\/phase-run\/new\.mjs, tools\/phase-run\/receipt\.mjs, tools\/phase-run\/run\.mjs/);
+    assert.doesNotMatch(error.message, /run\.test\.mjs/);
+    assert.match(error.message, /\.phase-run[\\/]phase-x[\\/]runner/, "it says which copy to delete for a fresh start");
+    return true;
+  });
+});
+
+test("a finished run marks its copy finished, and the next run takes a fresh one", () => {
+  const { put, take } = snapshotProject();
+  const first = take("run-1");
+  finishSnapshot(first.dir);
+  assert.equal(readManifest(first.dir).finished, true);
+  put("tools/phase-run/run.mjs", "// the next release\n");
+  writeFileSync(join(first.dir, "tools/phase-run/left-over.mjs"), "// only in the old copy\n");
+  const next = take("run-2", AT + 86_400_000);
+  assert.equal(next.reused, false);
+  assert.deepEqual(next.manifest, { takenAt: new Date(AT + 86_400_000).toISOString(), commit: "abc123", runId: "run-2", brigade: "0.6.0", finished: false });
+  assert.equal(readFileSync(join(next.dir, "tools/phase-run/run.mjs"), "utf8"), "// the next release\n");
+  assert.equal(existsSync(join(next.dir, "tools/phase-run/left-over.mjs")), false, "nothing of the old copy is left");
+});
+
+test("a project with no workflow.json gets a copy whose config has no rules, so the hooks can refuse a copy with none", () => {
+  const { root, take } = snapshotProject();
+  rmSync(join(root, ".claude/workflow.json"));
+  const copy = take("run-1");
+  assert.equal(existsSync(join(copy.dir, ".claude/workflow.json")), true);
+  const { config, error } = loadRunConfig(copy.dir);
+  assert.equal(error, null);
+  assert.deepEqual([config.gates, config.stopChecks], [[], []]);
+  assert.equal(existsSync(join(copy.dir, "tools/phase-run/run.mjs")), true);
+});
+
+test("each ticket's env points the hooks at the copy and the copy at the repo", () => {
+  const env = runVariables({ ticket: 7, base: "abc", spec: 5, runner: "/repo/.phase-run/phase-2/runner", root: "/repo" });
+  assert.deepEqual(env, { PHASE_RUN: "1", PHASE_RUN_TICKET: "7", PHASE_RUN_BASE: "abc", PHASE_RUN_SPEC: "5", PHASE_RUN_RUNNER: "/repo/.phase-run/phase-2/runner", PHASE_RUN_ROOT: "/repo" });
+  assert.equal("PHASE_RUN_SPEC" in runVariables({ ticket: 7, base: "abc", spec: null, runner: "r", root: "/repo" }), false);
+  // The night's Edit deny on the runner and its config stays, with the copy itself under the run folder's.
+  const settings = sessionSettings({}, { allow: [], deny: [] }, { branch: "phase-2", env, background: true, prompt: null });
+  assert.equal(settings.env.PHASE_RUN_RUNNER, "/repo/.phase-run/phase-2/runner");
+  for (const rule of ["Edit(./tools/phase-run/**)", "Edit(./.claude/workflow.json)", "Edit(./.phase-run/phase-2/**)"]) assert.ok(settings.permissions.deny.includes(rule), rule);
+});
+
+// D16 (#21): trim. A per-machine list switches off what the owner's nights don't need, and a
+// project never loses what it enables itself or keeps.
+function trimHome(trim) {
+  const home = mkdtempSync(join(tmpdir(), "phase-trim-"));
+  if (trim !== undefined) {
+    mkdirSync(join(home, ".claude", "brigade"), { recursive: true });
+    writeFileSync(join(home, ".claude", "brigade", "trim.json"), typeof trim === "string" ? trim : JSON.stringify(trim));
+  }
+  return home;
+}
+
+test("trim.json lives under ~/.claude, or under CLAUDE_CONFIG_DIR when that is set; a missing file means no trim", () => {
+  assert.equal(trimPath({}, "/home/me"), join("/home/me", ".claude", "brigade", "trim.json"));
+  assert.equal(trimPath({ CLAUDE_CONFIG_DIR: "/cfg" }, "/home/me"), join("/cfg", "brigade", "trim.json"));
+  const home = trimHome();
+  assert.equal(readTrim(trimPath({}, home)), null);
+  // No file, no entries: the settings come back as they went in.
+  const settings = { permissions: { allow: ["Bash(git *)"], deny: [] } };
+  assert.deepEqual(trimmedSettings(settings, null, home, { plugins: [], skills: [] }), settings);
+  rmSync(home, { recursive: true, force: true });
+});
+
+test("trim.json refuses a flag off the runner's list, a brigade@* plugin and a malformed file, naming what it refuses", () => {
+  assert.deepEqual(TRIM_FLAGS, ["--strict-mcp-config", "--no-chrome"]);
+  for (const [trim, error] of [
+    [{ flags: ["--no-chrome", "--dangerously-skip-permissions"] }, /"--dangerously-skip-permissions" is not a flag trim may add; allowed: --strict-mcp-config, --no-chrome/],
+    [{ plugins: ["brigade@market"] }, /"brigade@market" is Brigade itself/],
+    [{ plugins: ["Brigade@other"] }, /"Brigade@other" is Brigade itself/],
+    [{ skills: ["brigade:doc-sync"] }, /"brigade:doc-sync" is one of Brigade's own/],
+    [{ plugins: ["figma"] }, /"figma" is not a plugin id/],
+    [{ plugin: [] }, /unknown key\(s\) plugin; allowed: plugins, skills, flags/],
+    [{ skills: "frontend-design" }, /skills must be a list of names/],
+    ["{ not json", /is not JSON/],
+  ]) {
+    const home = trimHome(trim);
+    assert.throws(() => readTrim(trimPath({}, home)), error, JSON.stringify(trim));
+    rmSync(home, { recursive: true, force: true });
+  }
+  const home = trimHome({ plugins: ["figma@official"], skills: ["frontend-design"], flags: ["--strict-mcp-config", "--no-chrome"], note: "mine" });
+  assert.deepEqual(readTrim(trimPath({}, home)), { plugins: ["figma@official"], skills: ["frontend-design"], flags: ["--strict-mcp-config", "--no-chrome"] });
+  rmSync(home, { recursive: true, force: true });
+});
+
+test("trim writes no entry for a plugin the project enables, its own skills, or what phaseRun.keep names", () => {
+  const root = mkdtempSync(join(tmpdir(), "phase-trim-root-"));
+  mkdirSync(join(root, ".claude", "skills", "release-notes"), { recursive: true });
+  writeFileSync(join(root, ".claude", "settings.json"), JSON.stringify({ enabledPlugins: { "vercel@official": true, "figma@official": false } }));
+  const trim = {
+    plugins: ["vercel@official", "figma@official", "slack@official", "notion@official"],
+    skills: ["release-notes", "frontend-design", "vercel:nextjs", "slack:post", "dataviz", "pdf"],
+    flags: ["--strict-mcp-config"],
+  };
+  const keep = runConfig({ keep: { plugins: ["notion@official"], skills: ["dataviz"] } }).keep;
+  const settings = trimmedSettings({ enabledPlugins: { "mine@local": true } }, trim, root, keep);
+  // vercel is the project's own (and so are its skills); figma is set false there, not enabled, so trim may still write it.
+  assert.deepEqual(settings.enabledPlugins, { "mine@local": true, "figma@official": false, "slack@official": false });
+  assert.deepEqual(settings.skillOverrides, { "frontend-design": "off", "slack:post": "off", pdf: "off" });
+  // A kept plugin skill keeps its plugin: a skill whose plugin is off is gone too.
+  const withSkill = trimmedSettings({}, { plugins: ["figma@official"], skills: [], flags: [] }, root, { plugins: [], skills: ["figma:figma-use"] });
+  assert.equal(withSkill.enabledPlugins, undefined);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("the project's settings are read through a BOM; one that isn't JSON trims nothing rather than everything", () => {
+  const root = mkdtempSync(join(tmpdir(), "phase-trim-root-"));
+  mkdirSync(join(root, ".claude"), { recursive: true });
+  const trim = { plugins: ["vercel@official", "figma@official"], skills: [], flags: [] };
+  writeFileSync(join(root, ".claude", "settings.json"), `\uFEFF${JSON.stringify({ enabledPlugins: { "vercel@official": true } })}`);
+  assert.deepEqual(trimmedSettings({}, trim, root, { plugins: [], skills: [] }).enabledPlugins, { "figma@official": false });
+  writeFileSync(join(root, ".claude", "settings.json"), "{ broken");
+  assert.deepEqual(trimmedSettings({ env: {} }, trim, root, { plugins: [], skills: [] }), { env: {} });
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("a night ticket's merged settings keep the run's rules, variables and Edit denials beside trim's entries", () => {
+  const root = mkdtempSync(join(tmpdir(), "phase-trim-root-"));
+  const env = runVariables({ ticket: 7, base: "abc", spec: 5, runner: "/repo/.phase-run/phase-2/runner", root: "/repo" });
+  const base = { permissions: { allow: ["Bash(git *)"], deny: ["Read(./.env)"] } };
+  const plain = sessionSettings(base, { allow: [], deny: [] }, { branch: "phase-2", env, background: true, prompt: null });
+  const merged = trimmedSettings(plain, { plugins: ["figma@official"], skills: ["pdf"], flags: [] }, root, { plugins: [], skills: [] });
+  assert.deepEqual(merged, { ...plain, enabledPlugins: { "figma@official": false }, skillOverrides: { pdf: "off" } });
+  assert.equal(merged.env.PHASE_RUN_RUNNER, "/repo/.phase-run/phase-2/runner");
+  assert.equal(merged.env.PHASE_RUN_ROOT, "/repo");
+  for (const rule of ["Edit(./tools/phase-run/**)", "Edit(./.claude/workflow.json)", "Read(./.env)"]) assert.ok(merged.permissions.deny.includes(rule), rule);
+  rmSync(root, { recursive: true, force: true });
+});
+
+// D8, D14 (#25): one run, one Brigade version. Night settings defer Brigade's auto-update, and a
+// version change between tickets stops the run.
+function settingsRoot(settings) {
+  const root = mkdtempSync(join(tmpdir(), "phase-brigade-root-"));
+  if (settings !== undefined) {
+    mkdirSync(join(root, ".claude"), { recursive: true });
+    writeFileSync(join(root, ".claude", "settings.json"), typeof settings === "string" ? settings : JSON.stringify(settings));
+  }
+  return root;
+}
+
+const CATALOG_SOURCE = { source: "github", repo: "owner/brigade" };
+
+test("a night ticket's settings switch Brigade's auto-update off, keeping the catalog's source, for the catalog the project enables", () => {
+  const root = settingsRoot({
+    enabledPlugins: { "brigade@fork-market": true, "vercel@official": true },
+    extraKnownMarketplaces: { "fork-market": { source: CATALOG_SOURCE, autoUpdate: true }, official: { source: { source: "github", repo: "o/o" } } },
+  });
+  const brigade = brigadeCatalog(root);
+  assert.deepEqual(brigade, { catalog: "fork-market", entry: { source: CATALOG_SOURCE, autoUpdate: true } }, "the catalog is the project's own, never a literal");
+  const env = runVariables({ ticket: 7, base: "abc", spec: 5, runner: "/repo/.phase-run/phase-2/runner", root: "/repo" });
+  const base = { permissions: { allow: ["Bash(git *)"], deny: [] } };
+  const plain = sessionSettings(base, { allow: [], deny: [] }, { branch: "phase-2", env, background: true, prompt: null });
+  const night = sessionSettings(base, { allow: [], deny: [] }, { branch: "phase-2", env, background: true, prompt: null, catalog: brigade });
+  assert.deepEqual(night, { ...plain, extraKnownMarketplaces: { "fork-market": { source: CATALOG_SOURCE, autoUpdate: false } } });
+  // Trim's entries sit beside the override.
+  const trimmed = trimmedSettings(night, { plugins: ["figma@official"], skills: [], flags: [] }, root, { plugins: [], skills: [] });
+  assert.deepEqual(trimmed.extraKnownMarketplaces, night.extraKnownMarketplaces);
+  assert.deepEqual(trimmed.enabledPlugins, { "figma@official": false });
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("with no brigade@… entry, no catalog entry or no readable settings, nothing is written and the report says why", () => {
+  for (const [settings, why] of [
+    [undefined, /has no \.claude\/settings\.json/],
+    [{ enabledPlugins: { "vercel@official": true } }, /no brigade@… entry in enabledPlugins/],
+    [{ enabledPlugins: { "brigade@market": true } }, /no extraKnownMarketplaces entry for "market"/],
+    ["{ broken", /is not JSON/],
+  ]) {
+    const root = settingsRoot(settings);
+    const brigade = brigadeCatalog(root);
+    assert.equal(brigade.catalog, null, JSON.stringify(settings));
+    assert.match(brigade.why, why);
+    const night = sessionSettings({}, { allow: [], deny: [] }, { branch: "phase-2", env: {}, background: true, prompt: null, catalog: brigade });
+    assert.equal("extraKnownMarketplaces" in night, false);
+    const run = { ...tempRun(), brigade: "0.6.0", catalog: brigade };
+    assert.match(report(run, options, []), /Brigade's auto-update was not switched off for this run: /);
+    rmSync(root, { recursive: true, force: true });
+  }
+  // Read through a BOM, as trim's reader is; an entry that is on wins over one that is off.
+  const root = settingsRoot(`\uFEFF${JSON.stringify({ enabledPlugins: { "brigade@old": false, "brigade@market": true }, extraKnownMarketplaces: { market: { source: CATALOG_SOURCE } } })}`);
+  assert.equal(brigadeCatalog(root).catalog, "market");
+  rmSync(root, { recursive: true, force: true });
+});
+
+const pluginRows = [
+  { id: "brigade@market", version: "0.5.2", scope: "project", projectPath: "D:\\HGP\\other", projectEnabled: true },
+  { id: "brigade@market", version: "0.6.0", scope: "project", projectPath: "D:\\HGP\\Brigade", projectEnabled: true },
+  { id: "brigade@market", version: "0.4.0", scope: "user" },
+  { id: "vercel@official", version: "9.9.9", scope: "project", projectPath: "D:\\HGP\\Brigade" },
+];
+
+test("the installed version is the brigade@… row for this repo, compared case-blind on Windows, else the user-scope row", () => {
+  assert.equal(installedBrigade(pluginRows, "d:/hgp/brigade/", { platform: "win32" }), "0.6.0");
+  assert.equal(installedBrigade(pluginRows, "D:\\HGP\\brigade", { platform: "linux" }), "0.4.0", "off Windows a path's case counts: no project row, so the user row");
+  assert.equal(installedBrigade(pluginRows, "D:\\HGP\\Brigade", { platform: "linux" }), "0.6.0");
+  assert.equal(installedBrigade(pluginRows, "D:/HGP/elsewhere", { platform: "win32" }), "0.4.0");
+  assert.equal(installedBrigade(pluginRows.filter((row) => row.scope !== "user"), "D:/HGP/elsewhere", { platform: "win32" }), null, "no matching row: not installed for this repo");
+  assert.deepEqual(parsePluginList(JSON.stringify(pluginRows)), pluginRows);
+  assert.deepEqual(parsePluginList(JSON.stringify({ plugins: pluginRows })), pluginRows);
+  assert.throws(() => parsePluginList("Plugins:\n  brigade 0.6.0"), /isn't JSON: "Plugins:/);
+  assert.throws(() => parsePluginList('{"installed": {}}'), /a shape the runner can't read/);
+  // Through the runner's exec: a failing command throws, naming its output.
+  const exec = (stdout, ok = true) => (command, args) => (assert.deepEqual([command, ...args], ["claude", "plugin", "list", "--json"]), { ok, stdout, stderr: ok ? "" : "unknown command" });
+  assert.equal(readInstalledBrigade("/nowhere", exec(JSON.stringify(pluginRows))), "0.4.0");
+  assert.throws(() => readInstalledBrigade("/nowhere", exec("", false)), /failed: "unknown command"/);
+});
+
+test("a version change before a ticket stops the run, and so does a version that can't be read", () => {
+  assert.equal(versionStop("0.6.0", () => "0.6.0"), null);
+  assert.equal(versionStop("0.6.0", () => "0.6.1"), "Brigade updated mid-run (0.6.0 → 0.6.1), rerun.");
+  assert.equal(versionStop("0.6.0", () => null), "Brigade updated mid-run (0.6.0 → not installed), rerun.");
+  assert.match(versionStop("0.6.0", () => { throw new Error("spawn claude ENOENT"); }), /could not be read \(spawn claude ENOENT\)/);
+  const run = { ...tempRun(), brigade: "0.6.0", stopped: versionStop("0.6.0", () => "0.6.1") };
+  assert.match(report(run, options, []), /The run stopped early\.\*\* Brigade updated mid-run \(0\.6\.0 → 0\.6\.1\), rerun\./);
+});
+
+test("the morning report's header names the Brigade version that judged the run, and the stamp when it differs", () => {
+  const header = (run) => report({ ...tempRun(), ...run }, options, []).split("\n").slice(0, 3).join("\n");
+  assert.match(header({ brigade: "0.6.0", stamp: "0.6.0" }), /UTC · Brigade 0\.6\.0 · built 0/);
+  const text = report({ ...tempRun(), brigade: "0.6.0", stamp: "0.5.2", catalog: { catalog: "market", entry: {} } }, options, []);
+  assert.match(text, /This project's runner is stamped 0\.5\.2; Brigade 0\.6\.0 judged the run/);
+  assert.doesNotMatch(text, /auto-update was not switched off/);
+});
+
+test("a restart is refused when another Brigade version is installed than the copy was taken under", () => {
+  const { take, runDir } = snapshotProject();
+  take("run-1");
+  assert.equal(take("run-2", AT, "0.6.0").reused, true);
+  assert.throws(() => take("run-3", AT, "0.6.1"), (error) => {
+    assert.match(error.message, /taken under Brigade 0\.6\.0, and 0\.6\.1 is installed now/);
+    assert.ok(error.message.includes(join(runDir, "runner")), "it says which copy to delete for a fresh start");
+    return true;
+  });
+  // A copy whose manifest has no version (taken before #25) has nothing to compare: it is reused.
+  const manifest = readManifest(join(runDir, "runner"));
+  delete manifest.brigade;
+  writeFileSync(join(runDir, "runner", "manifest.json"), JSON.stringify(manifest));
+  assert.equal(take("run-4", AT, "0.6.1").reused, true);
+});
+
+test("trim's flags go on a session's first launch; a -p resume passes them again, a background resume passes no flag", () => {
+  const flags = ["--strict-mcp-config", "--no-chrome"];
+  const options = { permissionMode: "dontAsk", model: "opus" };
+  const first = printArgs({ sessionId: "s-1", resume: false, options, settings: "settings-7.json", flags });
+  const again = printArgs({ sessionId: "s-1", resume: true, options, settings: "settings-7.json", flags });
+  for (const args of [first, again]) assert.deepEqual(args.slice(-2), flags);
+  assert.ok(again.includes("--resume"));
+  assert.deepEqual(printArgs({ sessionId: "s-1", resume: false, options, settings: "s.json" }).slice(-2), ["--model", "opus"]);
+  const launch = backgroundArgs({ name: "ticket-7", options, settings: "settings-7.json", ask: "Read the file", flags });
+  assert.deepEqual(launch, ["--bg", "--name", "ticket-7", "--permission-mode", "dontAsk", "--settings", "settings-7.json", "--model", "opus", ...flags, "Read the file"]);
+  // Point 5: a resume with any flag quietly starts a copy, so it carries the id and the ask only.
+  assert.deepEqual(backgroundArgs({ sessionId: "abcd1234-full", resume: true, name: "ticket-7", options, settings: "s.json", ask: "Read the file", flags }), ["--bg", "--resume", "abcd1234-full", "Read the file"]);
+});
+
+test("only the runner reads trim: no hook or setup script imports trim.mjs, so attended sessions get no trim", () => {
+  const plugin = join(HERE, "..", "..", "..");
+  if (!existsSync(join(plugin, "hooks", "hooks.json"))) return; // a project's copy of the runner, with no plugin around it
+  const readers = ["hooks", "scripts"].flatMap((folder) =>
+    readdirSync(join(plugin, folder), { recursive: true })
+      .filter((name) => String(name).endsWith(".mjs") && !String(name).includes("fixtures"))
+      .map((name) => join(plugin, folder, String(name))),
+  );
+  assert.ok(readers.length > 0);
+  for (const file of readers) assert.doesNotMatch(readFileSync(file, "utf8"), /trim\.mjs/, file);
+});
+
+test("the session is told to run its check command from the copy", () => {
+  const project = runConfig({}, { stopGate: { checks: [{ label: "Tests", run: "npm test", receipt: true }] } });
+  const values = promptValues(project, "", { ...ticketValues, RUNNER: ".phase-run/phase-2/runner" });
+  const command = "`node .phase-run/phase-2/runner/tools/phase-run/stop-tests.mjs`";
+  assert.equal(values.STOP_CHECKS, `${command} (the tests)`);
+  assert.ok(values.RECEIPT.includes(`Run the tests through ${command}`), values.RECEIPT);
+});
+
 test("a browserCheck with no place in the gates runs after the project's gates", () => {
   const check = { screenFiles: "^src/", sourceFiles: "^src/", screenshots: "shots/{N}", minimum: 2, redo: "walk it" };
   const config = runConfig({ gates: [{ label: "lint", run: "lint" }], browserCheck: check });
   assert.deepEqual(config.gates.map((g) => g.label ?? g.builtin), ["lint", BROWSER_CHECK]);
   const placed = runConfig({ gates: [{ builtin: "browser-check" }, { label: "lint", run: "lint" }], browserCheck: check });
   assert.deepEqual(placed.gates.map((g) => g.label ?? g.builtin), [BROWSER_CHECK, "lint"]);
+});
+
+// ADR 0003, ADR 0004: a session can forge a receipt, so no gate may read one. The runner is what runs
+// the gates; if anything it imports, however deep, reaches receipt.mjs, a gate could start trusting one.
+test("no gate reads a receipt: the runner's imports never reach the receipt reader", () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const reached = new Set();
+  const visit = (file) => {
+    if (reached.has(file)) return;
+    reached.add(file);
+    const source = readFileSync(file, "utf8");
+    for (const [, a, b] of source.matchAll(/\bfrom\s*["'](\.{1,2}\/[^"']+)["']|\bimport\s*\(\s*["'](\.{1,2}\/[^"']+)["']\s*\)/g)) visit(join(dirname(file), a ?? b));
+  };
+  visit(join(here, "run.mjs"));
+  assert.ok(reached.has(join(here, "config.mjs")) && reached.has(join(here, "snapshot.mjs")), "the walk follows the runner's imports");
+  assert.equal(reached.has(join(here, "receipt.mjs")), false, [...reached].join("\n"));
+  for (const file of reached) assert.doesNotMatch(readFileSync(file, "utf8"), /\breadReceipt\b|receipt\.mjs["']/, file);
+});
+
+// ADR 0005, found in #24's review: a night's settings and prompts are rules too. Read live, a shell
+// write to tools/phase-run/ mid-night would change what later tickets may do and are told.
+test("a night reads its base settings and its prompts from the run's copy, never the live runner", () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const copy = join(mkdtempSync(join(tmpdir(), "brigade-copy-")), "runner");
+  for (const name of ["settings.json", "ticket-prompt.md", "fix-prompt.md"]) {
+    assert.equal(runnerFile(copy, name), join(copy, "tools", "phase-run", name));
+    assert.equal(runnerFile(null, name), join(here, name), "no run copy (a dry run): the runner's own folder");
+  }
+  const source = readFileSync(join(here, "run.mjs"), "utf8");
+  assert.doesNotMatch(source, /join\(HERE, "(settings\.json|ticket-prompt\.md|fix-prompt\.md)"\)/, "every read goes through runnerFile");
 });

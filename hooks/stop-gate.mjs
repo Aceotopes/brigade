@@ -4,8 +4,8 @@
 // Inside a phase run it is the check a person would have made before letting
 // the session say "done": the project's stop checks, in order (stopGate.checks
 // in .claude/workflow.json; typically typecheck, lint, and the tests the
-// ticket's changes touch). The tests are skipped when the session's
-// stop-tests.mjs passed on exactly this code (its receipt). A failure exits 2,
+// ticket's changes touch). A receipt check is skipped when the session's
+// stop-tests.mjs passed it on exactly this code (its receipt). A failure exits 2,
 // which sends the session back to fix it while it still holds the ticket in
 // mind. No checks, no gate.
 //
@@ -25,7 +25,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileS
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { loadWorkflowConfig } from "./workflow-config.mjs";
+import { judgeRoot, loadJudgeConfig } from "./workflow-config.mjs";
 
 const TAIL = 5000;
 
@@ -60,7 +60,11 @@ function run(label, command) {
   return `${label} failed (\`${command}\`). The end of its output:\n\n${output.slice(-TAIL)}`;
 }
 
-const config = loadWorkflowConfig(ROOT);
+// The checks and the receipt code are the run's frozen copy's when PHASE_RUN_RUNNER names one (ADR
+// 0005), so nothing written mid-night changes how later tickets are judged. The work they judge
+// (git, the verdict, the receipt file, each check's cwd) stays the project's.
+const JUDGE = judgeRoot(ROOT);
+const config = loadJudgeConfig(ROOT);
 if (!config.error && config.checks.length === 0) process.exit(0);
 
 const base = process.env.PHASE_RUN_BASE || "main";
@@ -73,46 +77,73 @@ if (changed === "" && ahead === "0") process.exit(0); // nothing was written
 // report counts them as the ticket's "hook" minutes (hookTime in metrics.mjs).
 const startedAt = Date.now();
 let testsSkipped = false; // set below; declared first so the exit handler can always read it
-let receiptState = "none"; // "held" | "stale" | "none": why the tests ran or didn't
+const skipped = []; // the checks a receipt covered, by name (else label)
+let receiptState = "none"; // "held" | "stale" | "none": why the receipt checks ran or didn't
 if (ticket) {
   const marker = join(ROOT, ".phase-run", `stop-check-${ticket}.json`);
   mkdirSync(dirname(marker), { recursive: true });
   writeFileSync(marker, `${JSON.stringify({ pid: process.pid, startedAt })}\n`);
   process.on("exit", (code) => {
     rmSync(marker, { force: true });
-    const entry = { ticket: Number(ticket), startedAt, endedAt: Date.now(), passed: code === 0, testsSkipped, receipt: receiptState };
+    const entry = { ticket: Number(ticket), startedAt, endedAt: Date.now(), passed: code === 0, testsSkipped, skipped, receipt: receiptState };
     appendFileSync(join(ROOT, ".phase-run", "stop-check-log.jsonl"), `${JSON.stringify(entry)}\n`);
   });
 }
 
-// The session's own tools/phase-run/stop-tests.mjs leaves a receipt when the
-// tests pass. A `receipt` check whose receipt still holds (this exact code,
-// this base, this command) is not run again; every other check is. The receipt
-// code is the project's, imported from it: a project without it, or one this
-// cannot load, has every check run, as before receipts existed. The tests row's
-// `unread` paths (the loader makes every receipt row share one list) are left
-// out of the key, so a docs-only edit after the pass keeps the receipt.
+// The session's own tools/phase-run/stop-tests.mjs leaves a receipt for each
+// receipt check that passes. A `receipt` check whose receipt still holds (this
+// exact code minus its own `unread` paths, this base, this command) is not run
+// again; every other check is, in order, to the first failure. The hook writes
+// no receipt. The receipt code is the project's (the run's copy of it),
+// imported from it: a project without it, or one this cannot load, has every
+// check run, as before receipts existed. A 0.5.x receipt.mjs (no `treeKeys`)
+// knows one receipt with one shared list, and is used exactly as 0.5.2 used it.
 const receiptChecks = config.checks.filter((check) => check.receipt);
 const receipts = receiptChecks.length ? await loadReceipts() : null;
-const unread = receipts?.receiptUnread?.(config.checks) ?? []; // a 0.4.0 receipt.mjs has no list to apply
-const tree = receipts ? receipts.treeKey(ROOT, unread) : null;
-const receipt = receipts ? receipts.readReceipt(receipts.receiptPath(ROOT, ticket)) : null;
-const holds = (check) => Boolean(receipts && check.receipt && receipts.receiptHolds(receipt, { tree, base, command: check.run, unread }));
-if (receipt) receiptState = receiptChecks.every(holds) ? "held" : "stale";
+const { holds, read } = !receipts ? { holds: () => false, read: false } : typeof receipts.treeKeys === "function" ? perCheckReceipts(receipts) : sharedReceipt(receipts);
+if (read) receiptState = receiptChecks.every(holds) ? "held" : "stale";
 
 let failure = config.error ? `The project's stop checks could not be read: ${config.error}` : null;
 for (const check of config.checks) {
   if (failure) break;
   if (holds(check)) {
     testsSkipped = true;
+    skipped.push(check.name ?? check.label);
     continue;
   }
   failure = run(check.label, check.run.replaceAll("{base}", base));
 }
 
+/**
+ * 0.6.0: each receipt check's own receipt, keyed on the tree minus its own list (ADR 0004). Which
+ * checks one holds for, and whether any receipt was there to read.
+ */
+function perCheckReceipts(receipts) {
+  const groups = receipts.receiptGroups(config.checks);
+  const keys = receipts.treeKeys(ROOT, groups.map((group) => group.unread));
+  const held = new Set();
+  let read = false;
+  groups.forEach((group, i) => {
+    const receipt = receipts.readReceipt(receipts.receiptPath(ROOT, ticket, group.name));
+    read ||= Boolean(receipt);
+    for (const check of group.checks) {
+      if (receipts.receiptHolds(receipt, { tree: keys[i], base, command: check.run, unread: group.unread })) held.add(check);
+    }
+  });
+  return { holds: (check) => held.has(check), read };
+}
+
+/** 0.5.2's reading, unchanged: one receipt, keyed on the tree minus the receipt rows' one list. */
+function sharedReceipt(receipts) {
+  const unread = receipts.receiptUnread?.(config.checks) ?? []; // a 0.4.0 receipt.mjs has no list to apply
+  const tree = receipts.treeKey(ROOT, unread);
+  const receipt = receipts.readReceipt(receipts.receiptPath(ROOT, ticket));
+  return { holds: (check) => Boolean(check.receipt && receipts.receiptHolds(receipt, { tree, base, command: check.run, unread })), read: Boolean(receipt) };
+}
+
 async function loadReceipts() {
   try {
-    return await import(pathToFileURL(join(ROOT, "tools", "phase-run", "receipt.mjs")).href);
+    return await import(pathToFileURL(join(JUDGE, "tools", "phase-run", "receipt.mjs")).href);
   } catch {
     return null;
   }

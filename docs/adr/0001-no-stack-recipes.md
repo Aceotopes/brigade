@@ -1,7 +1,11 @@
 ---
-status: accepted
+status: amended
 ---
 # No stack recipes: a project declares its stack, and Claude writes its config
+
+> **Amended 2026-11-08 (#23):** "test database → preflight and ports" means the database's address
+> for sessions (`phaseRun.qa`), never `phaseRun.ports`: that list must be free before a run, and a
+> preflight row starts the database on its port.
 
 Brigade ships no per-tool recipes (no rows for one package manager, database host or migration
 tool). Projects differ too much to cover, and a wrong recipe looks authoritative, which is worse

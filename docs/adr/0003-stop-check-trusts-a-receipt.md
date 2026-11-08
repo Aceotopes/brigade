@@ -66,3 +66,9 @@ gives no key, so no receipt is written.
 
 Each stop check may now keep its own receipt and its own unread list, so the rule that receipt
 rows share one list goes. See ADR 0004. The trust is unchanged: no gate reads a receipt.
+
+## Addendum 2026-11-08: a receipt per check built (0.6.0, #17)
+
+Built as decided. Rows without a `name` still share `test-receipt-<ticket>.json`, so they alone
+keep one shared list. A test now walks the runner's imports and fails if they reach `receipt.mjs`,
+so "no gate reads the receipt" is checked, not just stated.

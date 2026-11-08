@@ -4,6 +4,93 @@ What changed in each version, for `/update-workflow` to show a project before it
 template. Newest first. A version that changes a config file's format says so, and ships its
 migration in `scripts/migrations.mjs`.
 
+## 0.6.0 — 2026-11-08
+Measure and trim. **No config format change, and no migration:** a 0.5.x `workflow.json` loads
+unchanged, and `/update-workflow` ends by offering 0.6.0's new rows, one yes each. Update the plugin
+*before* adding a 0.6.0 key: a 0.5.x plugin's hooks refuse the keys they don't know, and its shell
+guard then refuses every command.
+- **Each request priced the way Claude bills it.** `tools/phase-run/prices.json` has five rates
+  per model (`input`, `cacheWrite5m`, `cacheWrite1h`, `cacheRead`, `output`), a `checkedOn` date,
+  an optional `above` tier, and only Opus 5.5, Sonnet 5.5 and Fable 5.1 (the Haiku row is gone).
+  A row missing a rate, or a `fallback` with no row, now stops it loading. A ticket's cost now
+  includes its advisor passes, at the advisor's model.
+- **A ledger that outlives every run.** Each ticket, however it ends, appends one priced row to
+  `.phase-run/ledger.jsonl` (gitignored): its session, kind `night`, the installed Brigade version
+  the run started on, and its cost by model. `node tools/phase-run/status.mjs --ledger` prints it by week, and
+  `--csv [file]` writes it as CSV. `.claude/workflow.json` accepts a new top-level `ledger`
+  section, `{ "attended"?, "weekStarts"? }` (a lowercase day, `monday` by default). A 0.5.x
+  plugin's hooks refuse that key, so update the plugin before adding it.
+- **Attended sessions are priced too.** A new Stop hook (`hooks/ledger.mjs`) adds an `attended`
+  row to the same ledger at the end of every reply in a set-up project: the session's running
+  total, priced with the plugin's own runner code and price list (so it works while a project is
+  out of step), at the plugin's version. It reads only what the transcript gained since its last
+  run, keeping its place in `.phase-run/ledger-state/`. It never prints or blocks, does nothing
+  in a phase run, and `"ledger": { "attended": false }` turns it off.
+- **Each stop check keeps its own receipt** (ADR 0004). Any `stopGate.checks` row may carry
+  `"receipt": true`, its own `"unread"` globs and a `"name"`; its receipt is
+  `.phase-run/<name>-receipt-<ticket>.json` (a nameless row keeps `test-receipt-<ticket>.json`), so
+  a docs-only edit after the tests skips typecheck and lint too. One matcher reads every list (`*`
+  within a folder, `**/` across, a leading `!` puts a path back), and today's lists keep their
+  meaning. `stop-tests.mjs` runs every receipt row; the stop gate runs only the ones whose receipt
+  no longer holds and logs `skipped`. Beside a 0.5.x `receipt.mjs` the hook behaves as 0.5.2.
+- **Gates run side by side.** `phaseRun.gates` start together; `after: "<label>"` waits for that gate
+  to pass, `alone: true` runs one by itself after the rest, and the first failure stops the others
+  and kills their process trees. `unreadOf: "<check name>"` skips a gate when every changed file is
+  on that check's `unread` list (an empty diff never skips), and `{cache}` is a folder emptied before
+  each gate run. The gates still trust no receipt.
+- **The tampering gate.** A `phaseRun.tampering` section (`testFiles`, `markers`, `assertions`,
+  `guarded`, `guardedScripts`, `override.heading`) makes the first gate fail a ticket that adds a
+  skip or focus marker, removes assertions past its limit, or changes a guarded file or script. Its
+  rules are read from the ticket's base commit and never fail open. A **test override**, a line
+  under the heading in the ticket body that names the path and says why, lets that path through; a
+  reason only in the commit message is refused and reported. No section, no gate.
+- **Trim.** `~/.claude/brigade/trim.json` (`{plugins, skills, flags}`, under `CLAUDE_CONFIG_DIR` when
+  set) names what night sessions start without; only `--strict-mcp-config` and `--no-chrome` are
+  accepted as flags, and a `brigade@…` row is refused. A project keeps what its own settings enable,
+  its `.claude/skills`, and the new `phaseRun.keep` (`{plugins, skills}`). Night sessions only; a
+  missing file means no trim. On one machine a night session's first prompt fell from 37K-46K
+  tokens to 31K.
+- **One frozen runner judges a whole run** (ADR 0005). At run start the runner copies
+  `tools/phase-run/` and `.claude/workflow.json` to `.phase-run/<branch>/runner/`, with a
+  `manifest.json` (`takenAt`, `commit`, `runId`, `brigade`, `finished`). Each ticket's settings carry
+  `PHASE_RUN_RUNNER` (the copy) and `PHASE_RUN_ROOT` (the repo); the stop gate and the shell guard
+  then read the copy's config and import its receipt code, and the session runs the copy's
+  `stop-tests.mjs`. A crashed run restarts on its copy, and refuses to when the runner's `.mjs`
+  files changed since, naming them; a run that reaches its report marks the copy finished. A
+  0.5.x plugin's hooks ignore the variable, so update the plugin with the template.
+- **One run, one Brigade version** (ADR 0005). At run start the runner reads the installed version
+  from `claude plugin list --json` (the `brigade@…` install for the repo, else the user-scope one)
+  and records it in the manifest, the report's header and every night row. With none installed
+  the run doesn't start. Each ticket's settings switch auto-update off for the catalog the
+  project's `enabledPlugins` names, keeping its `source`. A version change between tickets stops
+  the run ("Brigade updated mid-run (a → b), rerun"), and a crashed run won't restart on another.
+- **Setup asks for the tool rows.** The stack walk asks for the test runner's changed-only command,
+  its skip markers and assertion call, the build's input paths, whether typecheck reads build output,
+  each tool's fresh-cache flag, each check's `unread` list, and lint and typecheck hygiene in the
+  project's own configs; Claude writes the rows (ADR 0001, no recipes), and the phase-run guide shows
+  one project's rows as worked examples. `verify` and `refresh` warn when a test file names a path on
+  the tests row's `unread` list.
+- **Update offers the new keys, row by row.** `/update-workflow` ends by listing what refresh
+  would add to the config's rows (`offers`): a `name`, `receipt: true` and `unread: ["**/*.md"]`
+  on the typecheck and lint stop checks the stack suggests, a `name` on the tests row, and
+  `unreadOf` on the suite gate. Each is a yes of its own, written by `setup.mjs refresh --apply
+  --only-accepted --accept <ids>`; a hand-written row gets none. No migration runs: a 0.5.x
+  `workflow.json` loads unchanged.
+- **Setup reuses an existing compose file.** `detect` lists the repo root's compose files
+  (`compose.yaml`, `compose.yml`, `docker-compose.yml`, `docker-compose.yaml`) with each service's
+  name, image and published ports (`db: postgres:16, 5432`), or "could not read" with the line. No
+  YAML dependency: it reads only `services:` and lists what it skipped. Setup, and refresh for a
+  project that gained one, propose the preflight row `docker compose up -d --wait` and put the
+  database's port in its address for sessions (`phaseRun.qa`), never in `phaseRun.ports`, and never
+  write a second compose file.
+- **The shell guard reads only its own part.** A fault outside `guard` in `workflow.json` (a key
+  from a newer Brigade, say) no longer stops every shell command: the guard still applies its rules,
+  and the session-start notice names the fault. The stop gate and the runner stay strict, so such a
+  file still stops a run. A fault in `guard` itself, a wrong `version`, a file that isn't JSON, or
+  (in a run) a missing runner copy still blocks.
+- A night's base settings and prompts are read from the run's frozen copy, like its hooks and checks.
+- A ledger row appended after a torn last line (a writer killed mid-append) starts a line of its own.
+
 ## 0.5.2 — 2026-11-04
 No config format change. The first version built by a phase run on Brigade itself.
 - **Setup proposes Node tests for a repo without `package.json`.** `detect` lists the test files

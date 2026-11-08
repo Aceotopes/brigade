@@ -237,11 +237,16 @@ tries to stop. In `run`, `{base}` is the run's base commit, for example
 runs it through `tools/phase-run/stop-tests.mjs`, and the stop check skips it on code that already
 passed. An optional `"quiet": { "totals", "failures" }` pair of patterns there trims what the
 session reads of the output; the phase-run guide has a vitest example. An `"unread"` list on the
-same row names, in git globs, what the tests never read: setup writes `["docs/**", "*.md"]`
-(`*.md` is the root's Markdown only), so a docs-only edit after the pass keeps the receipt. With no
-list, every file counts. The config refuses a glob that names no folder or file (`**`, `*.*`, `.`)
-or one outside the repo, and every row with `"receipt": true` shares one list. Each stop check
-logs `"receipt": "held"`, `"stale"` or `"none"` in `.phase-run/stop-check-log.jsonl`.
+same row names, in globs, what the tests never read: setup writes `["docs/**", "*.md"]` (`*.md` is
+the root's Markdown only, `**/*.md` every folder's; a leading `!` puts a path back, and the last
+glob that matches wins), so a docs-only edit after the pass keeps the receipt. With no list, every
+file counts. Since 0.6.0 any row may carry `"receipt": true`, its own `"unread"` list and a
+`"name"`: each keeps its own receipt, `.phase-run/<name>-receipt-<ticket>.json`, so a docs edit
+after typecheck and lint passed skips them too. Rows without a name share 0.5.x's
+`test-receipt-<ticket>.json`, and so must share one list. The config refuses a glob that names no
+folder or file (`**`, `*.*`, `.`) or one outside the repo. Each stop check logs
+`"receipt": "held"`, `"stale"` or `"none"`, and `"skipped"`, the checks a receipt covered, in
+`.phase-run/stop-check-log.jsonl`.
 
 **`stack`**: what the project is built with, from your discovery doc at setup: `language`,
 `framework`, `packageManager`, `database`, `migrations`, `testDatabase`, `storage`, and `other` (a
@@ -265,7 +270,9 @@ every key; in short:
   size budget `/ticket-check` warns on.
 
 A `note` key is allowed anywhere, since JSON has no comments. Any other unknown key is an error, so
-a typo stops the run at preflight instead of quietly turning a rule off.
+a typo stops the run at preflight instead of quietly turning a rule off. The shell guard is the one
+exception: it refuses only a fault in its own `guard` section, so a key from a newer Brigade (or a
+typo elsewhere) leaves your shell working, and the session-start notice names it.
 
 ### The other config files
 
@@ -319,6 +326,7 @@ until you say yes:
 | `review` | A scaffold file whose plugin copy changed. You own your copy, so it is only shown |
 | `notes`, `migrations` | Anything else worth knowing, and the config format changes it makes |
 | `setting` | Auto-update for Brigade's catalog is off in `.claude/settings.json`. A separate yes turns it on; when a rewrite would reformat the file, you are shown the line to add by hand instead |
+| `offers` | Keys a newer release gives your config's rows, such as a typecheck's own receipt or the suite gate's `unreadOf`. Asked after the template copy, one yes per row; a row you wrote by hand never gets one |
 
 Then it runs the checks, drafts the devlog entry and commit message, and stops for your commit.
 

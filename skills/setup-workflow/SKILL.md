@@ -81,9 +81,25 @@ plugin): you write the config each part needs, from the owner's answers and
 - **packageManager**: the `guard.wrappers` and allow rules `propose` gave (check them against it).
 - **database**: a QA database for sessions (`phaseRun.qa`, never the real one) and, only if the owner
   names a shared development database, `phaseRun.migrations` with its target.
-- **testDatabase**: if it runs in Docker, `docker-compose.yml` for it (the image, a port, a volume)
-  and a `phaseRun.preflight` row, `docker compose up -d --wait`, with the hint "Is Docker running?";
-  its port in `phaseRun.ports`. Then §6's Docker check.
+- **testDatabase**: detect's `compose` lists the root's compose files (`compose.yaml`,
+  `compose.yml`, `docker-compose.yml`, `docker-compose.yaml`, the first being the one
+  `docker compose` runs), each service as a line (`db: postgres:16, 5432`), or `error` ("could not
+  read: …", with the line: Brigade's small reader's limit, not Docker's).
+  - **A compose file found**, read or not: show its lines and its `skipped` (or its error), and ask
+    which service is the test database (a file it could not read: ask for the service and its port
+    by hand). An override file beside it (`compose.override.yaml`) is merged by `docker compose` but
+    not read here: if there is one, ask whether it changes the database's port. None of
+    them is: the owner adds one to their own file. Reuse the file: **never write a second one**, and
+    never edit it. Propose a `phaseRun.preflight` row,
+    `docker compose up -d --wait`, with the hint "Is Docker running? Or another project's container
+    holds the port: stop it, or give this one another port in its compose file." The service's
+    port goes in the address sessions use (`phaseRun.qa`'s `url`, or the `sessionEnv` variable
+    that holds it), **never in `phaseRun.ports`**: that list must be free before a run, and the
+    runner checks it right after preflight starts the database, so it would refuse every run.
+  - **None**: ask where the test database runs, as before. If in Docker, write
+    `docker-compose.yml` for it (the image, a port, a volume) and the same preflight row and
+    address.
+  Either way, then §6's Docker check.
 - **storage**: keep sessions off the real bucket: `phaseRun.sessionEnv` pins its variables to a test
   bucket or a dummy value.
 - **framework**: the prototype folder (above), and whether the build is a gate.
@@ -91,6 +107,30 @@ plugin): you write the config each part needs, from the owner's answers and
 - **the test script**: it names the project's own tests (`node --test test/*.test.js`, `vitest run
   src`), never a bare `node --test`, which also finds Brigade's `tools/*.test.mjs` and runs them in
   every gate.
+
+**Then the project's own tools** (D17, D18). `propose` writes no tool-specific keys, so ask about
+each, and write what the owner's tools really support: the guide's "What your config sets" has one
+project's rows as worked examples, never defaults. Check a flag in the tool's own docs or `--help`
+before writing it.
+- **names**: a stop check that gets its own receipt also gets a `name` (`typecheck`, `lint`,
+  `tests`). A name is lowercase (`^[a-z0-9][a-z0-9_-]*$`), unique, and never `test`. Rows without a
+  name share one receipt file, so one `unread` list. A flag goes after the suggested command
+  (`pnpm lint --cache`, not a rewritten one), so refresh still knows the named row.
+- **the test runner's changed-only command**, with `{base}` (Vitest's `--changed {base}`, say), on
+  the tests stop check; the suite gate keeps the whole suite unless the owner says otherwise. A
+  runner without one runs the suite. A check with `{base}` is left out of `checks.yml` (CI has no
+  base commit), so CI then needs its own suite step.
+- **tampering** (`phaseRun.tampering`): the test files' globs (`testFiles`), the runner's skip and
+  focus markers as patterns (`markers`), its assertion call (`assertions`, with `maxNetRemoved`),
+  `guarded` (the test config, `.claude/workflow.json`), and an `override.heading`. No section, no gate.
+- **the build**: which paths feed it (the build gate's `when`), and whether typecheck reads its
+  output (the typecheck gate's `after: "build"`). A gate given `after` also gets the waited-on
+  gate's `when` and `unreadOf`, so the two skip together.
+- **fresh caches and unread lists**: each tool's fresh-cache flag pointing into `{cache}` (gates
+  only), and each stop check's `unread` list (typecheck and lint rarely read `**/*.md`).
+- **lint and typecheck hygiene**, in the project's own configs, each a yes: the linter ignores what
+  git ignores; typecheck leaves out scratch folders like `.phase-run`; an empty catch needs a
+  reason; tool scripts are checked for undefined names; the lint cache is gitignored.
 
 Write the answers to `.git/brigade/answers.json`:
 `{ "mode", "name", "summary", "workflow", "frontend"?, "prototypeDir"?, "pathRoots"?, "liveDocs"? }`.
@@ -166,7 +206,9 @@ Ask before each; the owner may skip any.
 
 1. `node "${CLAUDE_PLUGIN_ROOT}/scripts/setup.mjs" verify <dir>`: doc-check, the template's two test
    suites, and the config through both loaders. A failure: fix it (in the config, or a doc's line),
-   never by loosening a check.
+   never by loosening a check. A `warn` line is the unread list's honesty scan (D19): each path a
+   test file (`phaseRun.tampering.testFiles`) names that the tests row's `unread` list leaves out.
+   Say each one; if the tests do read that path, narrow the list on the owner's yes. It never fails.
 2. Show `git status --short` and the drafted commit message:
    `chore: adopt the workflow (<mode> mode) — devlog #1`. Overwrite mode is on `adopt-workflow`: the
    owner merges it as any branch.
@@ -189,10 +231,24 @@ On a project already set up (§1.3), when the owner picks the refresh:
    - `change`, `remove`: a row the stack would not suggest, a changed file (`checks.yml`), an older
      `CLAUDE.md`'s missing Stack section. **Never written unless the owner says yes**, item by item
      (AskUserQuestion, up to 4 per call). A hand-written row is kept by default.
+   - `offer`: keys a newer release gives a row the stack suggests (a check's `name`, its own
+     `receipt` and `unread` list, a gate's `unreadOf`), one item per row. Asked and written the same
+     way as `change`.
+   - A row is matched by its exact `run`, or, when it has a name (a stop check's `name`, a gate's
+     `label`), by the suggested command with flags added after it: a named row that gained a cache
+     flag is still its row, never added back plain or offered for removal. A nameless stop check is
+     matched by its `run` alone, and a command the stack no longer suggests (another package
+     manager) is a stranger whatever its name.
+   - `warnings`: the unread list's honesty scan, as in §7. Say each; none is an item.
 3. Run it again with `--apply` and `--accept <the ids the owner said yes to>`. It writes, regenerates
    the indexes (the Stack block in `CLAUDE.md` follows), and stages.
 4. Walk §3's checklist for the parts that changed (a new database: its QA database; a new test
-   database in Docker: compose and the Docker check), then `verify`.
+   database in Docker: compose and the Docker check). The report's `compose` is detect's: a project
+   that gained a compose file, with no `docker compose up` row in `phaseRun.preflight` yet, gets
+   §3's testDatabase step for it (the file reused, never a second; the port in `phaseRun.qa`, never
+   `phaseRun.ports`). Then its project's-own-tools items for any key
+   the config still lacks (a name, `{base}`, tampering, `when` and `after`, `{cache}`, an `unread`
+   list, each hygiene piece): one yes each, a hand-written row kept as it is. Then `verify`.
 5. Remind the owner to record why in a dated addendum at the top of the discovery doc it came from
    ("> **Addendum YYYY-MM-DD:** storage is Cloudflare R2. **Changes:** Requirements and stack."),
    and draft `chore: refresh the config from the stack — devlog #N`. **Stop** before the commit.

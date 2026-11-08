@@ -30,7 +30,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
-import { loadWorkflowConfig } from "./workflow-config.mjs";
+import { loadJudgeGuard } from "./workflow-config.mjs";
 
 const IN_RUN = process.env.PHASE_RUN === "1";
 /** One shell word: double-quoted, single-quoted, or bare. */
@@ -161,10 +161,14 @@ function main() {
 
   const cwd = typeof input.cwd === "string" && input.cwd ? input.cwd : process.cwd();
   const root = resolve(process.env.CLAUDE_PROJECT_DIR || cwd);
-  // A broken config is refused outright: a rule that silently stopped applying is worse.
-  const config = loadWorkflowConfig(root);
+  // A broken guard section is refused outright: a rule that silently stopped applying is worse. A
+  // fault elsewhere in the file (a key from a newer Brigade) is not the guard's to judge, so the
+  // shell keeps working and the session-start notice names it. Inside a run the rules are its frozen
+  // copy's (PHASE_RUN_RUNNER, ADR 0005): a rule written mid-night judges the next run, not this one.
+  const config = loadJudgeGuard(root);
   if (config.error) {
-    block(`${config.error}\nFix the file (the Edit tool still works); until then no shell command runs.`);
+    const fix = process.env.PHASE_RUN_RUNNER ? "Write the verdict file and stop" : "Fix the file (the Edit tool still works)";
+    block(`${config.error}\n${fix}; until then no shell command runs.`);
   }
   const all = simpleCommands(command, cwd, config.wrappers);
   // The project's rules hold for the commands aimed at it; inside a phase run, for every command.

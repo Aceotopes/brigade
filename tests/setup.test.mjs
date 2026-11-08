@@ -4,14 +4,15 @@
 // Run: node --test tests/*.test.mjs
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 
 import { parseWorkflowConfig } from "../hooks/workflow-config.mjs";
-import { ARCHIVE, apply, autoModeLines, buildPlan, detect, dockerStatus, parseStackTable, plan, proposeWorkflow, refresh, stackDisagreements, suggestPrototypeDir, update } from "../scripts/setup.mjs";
+import { ARCHIVE, apply, autoModeLines, buildPlan, composeLines, detect, dockerStatus, parseCompose, parseStackTable, plan, proposeWorkflow, refresh, stackDisagreements, suggestPrototypeDir, update } from "../scripts/setup.mjs";
+import { MIGRATIONS } from "../scripts/migrations.mjs";
 import { STAMP, compareVersions } from "../scripts/versions.mjs";
 import { PLUGIN, repo, write } from "./helpers.mjs";
 
@@ -138,6 +139,101 @@ test("detect lists the Node test files in a top-level test/ or tests/ folder, on
   const plain = mkdtempSync(join(tmpdir(), "brigade-nodetests-plain-"));
   write(plain, { "test/a.test.cjs": "", "test/notes.md": "" });
   assert.deepEqual(detect(plain).nodeTests, ["test/*.test.cjs"]);
+});
+
+/** A compose file with a database service, and the keys the scan skips. */
+const COMPOSE_DB = [
+  "# The test database.",
+  "services:",
+  "  db:",
+  "    image: postgres:16 # the version the app runs",
+  "    ports:",
+  '      - "5432:5432"',
+  "    environment:",
+  "      POSTGRES_PASSWORD: postgres",
+  "volumes:",
+  "  pgdata:",
+  "",
+].join("\n");
+
+test("detect lists the root's compose files, each with its services' names, images and published ports (D20)", () => {
+  assert.deepEqual(detect(repo("brigade-compose-none-").dir).compose, [], "no compose file: an empty list");
+
+  const one = repo("brigade-compose-one-", { "docker-compose.yml": COMPOSE_DB, "docker/compose.yml": COMPOSE_DB }).dir;
+  assert.deepEqual(detect(one).compose, [
+    { file: "docker-compose.yml", services: [{ name: "db", image: "postgres:16", ports: [5432] }], lines: ["db: postgres:16, 5432"], skipped: ["db.environment", "volumes"] },
+  ], "one file with a database service; a compose file below the root is not read");
+
+  // Two files: each is listed, in the order `docker compose` picks one (the first is the one it runs).
+  const two = repo("brigade-compose-two-", {
+    "docker-compose.yml": COMPOSE_DB.replace(/\n/g, "\r\n"),
+    "compose.yaml": "services:\n  cache:\n    image: redis:7\n",
+  }).dir;
+  assert.deepEqual(detect(two).compose.map((c) => [c.file, c.lines]), [
+    ["compose.yaml", ["cache: redis:7"]],
+    ["docker-compose.yml", ["db: postgres:16, 5432"]],
+  ]);
+
+  // A file it can't read is reported, never thrown.
+  const bad = mkdtempSync(join(tmpdir(), "brigade-compose-bad-"));
+  write(bad, { "compose.yml": "services:\n\tdb:\n\t\timage: postgres:16\n" });
+  const [unread] = detect(bad).compose;
+  assert.equal(unread.file, "compose.yml");
+  assert.match(unread.error, /^could not read: line 2: /);
+  assert.equal(unread.services, undefined);
+  // One that can't even be opened (a folder by that name) is reported the same way.
+  const folder = mkdtempSync(join(tmpdir(), "brigade-compose-folder-"));
+  mkdirSync(join(folder, "compose.yaml"));
+  assert.match(detect(folder).compose[0].error, /^could not read: /);
+});
+
+test("the compose scan reads only the services' names, images and published ports, and says what it skipped", () => {
+  const text = [
+    "version: '3.8'",
+    "x-common: &common",
+    "  restart: always",
+    "services:",
+    "  db:",
+    '    image: "postgres:16-alpine"',
+    "    ports:",
+    "    - 127.0.0.1:5433:5432/tcp",
+    "    - '6543'",
+    "    - ${PG_PORT:-5432}:5432",
+    "  web:",
+    "    build: .",
+    "    command: |",
+    "      node server.js # a block of text: never read",
+    "    ports: ['3000:3000', \"9229:9229\"]",
+    "  proxy:",
+    "    image: nginx",
+    "    ports:",
+    "      - target: 80",
+    '        published: "8080"',
+    "      - target: 443",
+    "",
+  ].join("\n");
+  assert.deepEqual(parseCompose(text), {
+    services: [
+      { name: "db", image: "postgres:16-alpine", ports: [5433] },
+      { name: "web", image: null, ports: [3000, 9229] },
+      { name: "proxy", image: "nginx", ports: [8080] },
+    ],
+    skipped: ["version", "x-common", "db.ports 6543 (no fixed host port)", "db.ports ${PG_PORT:-5432}:5432 (no fixed host port)", "web.build", "web.command", "proxy.ports target: 443 (no fixed host port)"],
+  });
+  assert.deepEqual(composeLines(parseCompose(text)), ["db: postgres:16-alpine, 5433", "web: no image, 3000, 9229", "proxy: nginx, 8080"]);
+
+  // What it can't read is an error with its line, for detect to report.
+  for (const [bad, why] of [
+    ["volumes:\n  data:\n", /no services: block/],
+    ["services: {db: {image: postgres}}\n", /line 1: services: is not a block/],
+    ["services:\n  db:\n    image: 'postgres\n", /line 3: an unclosed quote/],
+    ["services:\n  - db\n", /line 2: db is not a service/],
+    ["  services:\n", /line 1: indented/],
+  ]) {
+    assert.throws(() => parseCompose(bad), why, bad);
+  }
+  assert.deepEqual(parseCompose("services:\n"), { services: [], skipped: [] }, "an empty services: block is no error");
+  assert.deepEqual(parseCompose("---\nservices:\n  db:\n    image: postgres:16\n").services, [{ name: "db", image: "postgres:16", ports: [] }], "a leading document marker is no key");
 });
 
 test("a repo without package.json gets its Node tests proposed as the tests row, never a bare node --test", () => {
@@ -357,7 +453,8 @@ test("where the discovery doc and the files name different parts, detect lists e
 test("a refresh adds what the stack suggests, removes or changes only what the owner accepts, and records a new stack", () => {
   const { dir } = existing();
   apply(dir, runPlan(dir, { mode: "merge" }));
-  assert.deepEqual(refresh(dir).items, [], "right after setup there is nothing to do");
+  // Right after setup there is nothing to do but 0.6.0's offers, which setup's rows don't carry yet (#22 writes them).
+  assert.deepEqual(refresh(dir).items.filter((i) => i.op !== "offer"), [], "right after setup there is nothing to do");
   const path = join(dir, ".claude/workflow.json");
   const config = JSON.parse(read(dir, ".claude/workflow.json"));
   delete config.guard.wrappers;
@@ -377,6 +474,20 @@ test("a refresh adds what the stack suggests, removes or changes only what the o
   assert.deepEqual(result.applied, ["stack"]);
   assert.equal(JSON.parse(read(dir, ".claude/workflow.json")).stack.storage, "Cloudflare R2");
   assert.match(read(dir, "CLAUDE.md"), /- \*\*Storage:\*\* Cloudflare R2/, "the Stack block follows");
+});
+
+test("a refresh reports a compose file the project gained, for the skill's testDatabase step, and writes nothing for it (D20)", () => {
+  const { dir } = existing();
+  apply(dir, runPlan(dir, { mode: "merge" }));
+  assert.deepEqual(refresh(dir).compose, [], "no compose file yet");
+  write(dir, { "compose.yaml": COMPOSE_DB });
+  const before = read(dir, ".claude/workflow.json");
+  const seen = refresh(dir);
+  assert.deepEqual(seen.compose.map((c) => [c.file, c.lines]), [["compose.yaml", ["db: postgres:16, 5432"]]]);
+  assert.ok(!seen.items.some((i) => /compose|preflight|ports/.test(i.id)), "the preflight row and the port are the skill's to propose, never an item");
+  refresh(dir, { apply: true });
+  assert.equal(read(dir, ".claude/workflow.json"), before, "the config is not touched for it");
+  assert.equal(read(dir, "compose.yaml"), COMPOSE_DB, "the compose file is never rewritten");
 });
 
 test("a refresh looks inside the tests row: a missing receipt or unread list is added, a project's own list never touched", () => {
@@ -409,7 +520,8 @@ test("a refresh looks inside the tests row: a missing receipt or unread list is 
 
   // The project's own list is its own: never offered for change or removal.
   edit((row) => (row.unread = ["docs/**", "notes/**"]));
-  assert.deepEqual(refresh(dir).items, []);
+  assert.deepEqual(refresh(dir).items.filter((i) => i.op !== "offer"), []);
+  assert.ok(!refresh(dir).items.some((i) => i.id === "stopGate.checks.offer+pnpm test" && /"unread"/.test(i.summary)), "an offer never touches the tests row's list");
 });
 
 test("a refresh never trips on a tests row the owner also chose to remove", () => {
@@ -426,6 +538,279 @@ test("a refresh never trips on a tests row the owner also chose to remove", () =
   refresh(dir, { apply: true, accept: ["stopGate.checks-pnpm vitest run"] });
   const rows = JSON.parse(read(dir, ".claude/workflow.json")).stopGate.checks.filter((c) => c.receipt);
   assert.deepEqual(rows, [{ label: "Tests", run: "pnpm test", receipt: true, unread: ["docs/**", "*.md"] }]);
+});
+
+/** The rows 0.5.2's setup wrote for `existing()`'s stack, as literals, so a later setup can't change what these tests start from. */
+const ROWS_052 = {
+  checks: [
+    { label: "Typecheck", run: "pnpm exec tsc --noEmit" },
+    { label: "Lint", run: "pnpm lint" },
+    { label: "Tests", run: "pnpm test", receipt: true, unread: ["docs/**", "*.md"] },
+  ],
+  gates: [
+    { label: "typecheck", run: "pnpm exec tsc --noEmit" },
+    { label: "lint", run: "pnpm lint" },
+    { label: "build", run: "pnpm build" },
+    { label: "tests", run: "pnpm test", alone: true },
+  ],
+};
+const OFFERS_052 = ["stopGate.checks.offer+pnpm exec tsc --noEmit", "stopGate.checks.offer+pnpm lint", "stopGate.checks.offer+pnpm test", "phaseRun.gates.offer+pnpm test"];
+
+/** `existing()` set up and committed, its config holding `rows` (0.5.2's by default). */
+function project052(rows = ROWS_052, change = () => {}) {
+  const { dir, git } = existing();
+  apply(dir, runPlan(dir, { mode: "merge" }));
+  const config = JSON.parse(read(dir, ".claude/workflow.json"));
+  config.stopGate.checks = structuredClone(rows.checks);
+  config.phaseRun.gates = structuredClone(rows.gates);
+  change(config);
+  writeFileSync(join(dir, ".claude/workflow.json"), `${JSON.stringify(config, null, 2)}\n`);
+  git("add", "-A");
+  git("commit", "-q", "-m", "chore: adopt the workflow — devlog #1");
+  return { dir, git, config: () => JSON.parse(read(dir, ".claude/workflow.json")) };
+}
+
+/** Both loaders on the project's file: the hooks' and its own runner's. */
+async function bothLoaders(dir) {
+  const { loadRunConfig } = await import(pathToFileURL(join(dir, "tools/phase-run/config.mjs")).href);
+  assert.doesNotThrow(() => parseWorkflowConfig(JSON.parse(read(dir, ".claude/workflow.json"))), "the hooks' loader");
+  const { error } = loadRunConfig(dir);
+  assert.ok(!error, `the runner's loader: ${error}`);
+}
+
+test("update lists refresh's 0.6.0 offers as their own group; one accepted, one declined, and a 0.5.2 file loads unchanged", async () => {
+  const { dir, config } = project052();
+  const before = read(dir, ".claude/workflow.json");
+  assert.deepEqual(MIGRATIONS, [], "0.6.0 runs no migration: a 0.5.x file stays valid");
+  await bothLoaders(dir);
+
+  const report = update(dir);
+  assert.deepEqual(report.offers.map((o) => o.id), OFFERS_052);
+  assert.match(report.offers[1].summary, /Lint gets "name": "lint", "receipt": true, "unread": \["\*\*\/\*\.md"\]/);
+  assert.match(report.offers[3].summary, /tests gets "unreadOf": "tests".*names the Tests check "tests"/);
+  update(dir, { apply: true });
+  assert.equal(read(dir, ".claude/workflow.json"), before, "update never writes the config");
+  refresh(dir, { apply: true });
+  assert.equal(read(dir, ".claude/workflow.json"), before, "nothing is written without a yes");
+
+  // Lint accepted, Typecheck declined.
+  const result = refresh(dir, { apply: true, onlyAccepted: true, accept: ["stopGate.checks.offer+pnpm lint"] });
+  assert.deepEqual(result.applied, ["stopGate.checks.offer+pnpm lint"]);
+  assert.deepEqual(config().stopGate.checks, [
+    ROWS_052.checks[0],
+    { label: "Lint", run: "pnpm lint", name: "lint", receipt: true, unread: ["**/*.md"] },
+    ROWS_052.checks[2],
+  ]);
+  assert.deepEqual(config().phaseRun.gates, ROWS_052.gates);
+  await bothLoaders(dir);
+  assert.deepEqual(update(dir).offers.map((o) => o.id), OFFERS_052.filter((id) => id !== "stopGate.checks.offer+pnpm lint"), "a declined offer is asked again next time");
+
+  // The suite gate accepted without the tests row's own offer: it names the row it points at, and both loaders take it.
+  refresh(dir, { apply: true, onlyAccepted: true, accept: ["phaseRun.gates.offer+pnpm test"] });
+  assert.deepEqual(config().stopGate.checks[2], { ...ROWS_052.checks[2], name: "tests" });
+  assert.deepEqual(config().phaseRun.gates[3], { label: "tests", run: "pnpm test", alone: true, unreadOf: "tests" });
+  await bothLoaders(dir);
+  assert.deepEqual(update(dir).offers.map((o) => o.id), ["stopGate.checks.offer+pnpm exec tsc --noEmit"]);
+});
+
+test("only the accepted offers are written, never refresh's own additions along with them", () => {
+  const { dir, config } = project052(ROWS_052, (c) => delete c.guard.wrappers);
+  assert.ok(refresh(dir).items.some((i) => i.op === "add"), "refresh has additions of its own");
+  refresh(dir, { apply: true, onlyAccepted: true, accept: ["stopGate.checks.offer+pnpm exec tsc --noEmit"] });
+  assert.equal(config().guard.wrappers, undefined);
+  assert.deepEqual(config().stopGate.checks[0], { label: "Typecheck", run: "pnpm exec tsc --noEmit", name: "typecheck", receipt: true, unread: ["**/*.md"] });
+});
+
+test("offers go only to rows the stack suggests, never take a name in use, and leave a whole row alone", async () => {
+  // A hand-written row gets no offer; a name in use is never offered again; the tests row's own name is what the gate points at.
+  const rows = {
+    checks: [
+      { label: "Typecheck", run: "pnpm exec tsc --noEmit", name: "typecheck", receipt: true, unread: ["**/*.md"] },
+      { label: "Styles", run: "pnpm lint:css", name: "lint" },
+      { label: "Lint", run: "pnpm lint" },
+      { label: "Tests", run: "pnpm test", name: "unit", receipt: true, unread: ["docs/**"] },
+      { label: "E2E", run: "pnpm e2e" },
+    ],
+    gates: [...ROWS_052.gates, { label: "e2e", run: "pnpm e2e" }],
+  };
+  const { dir, config } = project052(rows);
+  await bothLoaders(dir);
+  const offers = update(dir).offers;
+  assert.deepEqual(offers.map((o) => o.id), ["phaseRun.gates.offer+pnpm test"]);
+  assert.match(offers[0].summary, /"unreadOf": "unit"/);
+  assert.doesNotMatch(offers[0].summary, /names the/, "the row already has its name");
+  refresh(dir, { apply: true, onlyAccepted: true, accept: offers.map((o) => o.id) });
+  assert.deepEqual(config().stopGate.checks, rows.checks);
+  assert.equal(config().phaseRun.gates[3].unreadOf, "unit");
+  await bothLoaders(dir);
+  assert.deepEqual(update(dir).offers, []);
+});
+
+test("a list is offered only with the receipt it belongs to, never beside 0.4.1's own add, and a broken config never stops update", async () => {
+  // Lint says no receipt; Typecheck has one but no list, which 0.4.1's add already gives it.
+  const { dir, config } = project052(ROWS_052, (c) => {
+    c.stopGate.checks[0] = { ...c.stopGate.checks[0], receipt: true };
+    c.stopGate.checks[1] = { ...c.stopGate.checks[1], receipt: false };
+  });
+  const items = refresh(dir).items;
+  const offer = (run) => items.find((i) => i.id === `stopGate.checks.offer+${run}`);
+  assert.match(offer("pnpm lint").summary, /^stopGate\.checks: Lint gets "name": "lint", so its receipt/);
+  assert.match(offer("pnpm exec tsc --noEmit").summary, /^stopGate\.checks: Typecheck gets "name": "typecheck", so its receipt/);
+  assert.ok(items.some((i) => i.id === "stopGate.checks.unread+pnpm exec tsc --noEmit"), "the list stays 0.4.1's add");
+  refresh(dir, { apply: true, onlyAccepted: true, accept: [offer("pnpm lint").id, offer("pnpm exec tsc --noEmit").id] });
+  assert.deepEqual(config().stopGate.checks[1], { label: "Lint", run: "pnpm lint", receipt: false, name: "lint" });
+  await bothLoaders(dir);
+
+  writeFileSync(join(dir, ".claude/workflow.json"), "{ not json\n");
+  const report = update(dir);
+  assert.deepEqual(report.offers, []);
+  assert.match(report.notes.join("\n"), /offers could not be read/);
+});
+
+test("a tests row added back shares the nameless rows' list, never a named row's", () => {
+  // Typecheck took its offer (a named list of its own); the tests row has lost its list.
+  const { dir, config } = project052(ROWS_052, (c) => {
+    c.stopGate.checks[0] = { ...c.stopGate.checks[0], name: "typecheck", receipt: true, unread: ["**/*.md"] };
+    delete c.stopGate.checks[2].unread;
+  });
+  refresh(dir, { apply: true });
+  assert.deepEqual(config().stopGate.checks[2].unread, ["docs/**", "*.md"]);
+});
+
+test("propose writes no tool-specific rows: its config for a package.json project is pinned", () => {
+  // Names, receipts beyond the tests row, `after`, `when`, `{cache}` and tampering are checklist items (D17, ADR 0001).
+  const config = proposeWorkflow(detect(existing().dir));
+  assert.deepEqual(Object.keys(config), ["version", "note", "guard", "stopGate", "phaseRun", "stack"]);
+  assert.deepEqual(config.guard, { block: [], wrappers: ["pnpm exec", "pnpm dlx", "pnpm", "npx"] });
+  assert.deepEqual(config.stopGate, {
+    checks: [
+      { label: "Typecheck", run: "pnpm exec tsc --noEmit" },
+      { label: "Lint", run: "pnpm lint" },
+      { label: "Tests", run: "pnpm test", receipt: true, unread: ["docs/**", "*.md"] },
+    ],
+  });
+  assert.deepEqual(config.phaseRun, {
+    gates: [
+      { label: "typecheck", run: "pnpm exec tsc --noEmit" },
+      { label: "lint", run: "pnpm lint" },
+      { label: "build", run: "pnpm build" },
+      { label: "tests", run: "pnpm test", alone: true },
+    ],
+    permissions: { allow: ["Bash(pnpm *)", "PowerShell(pnpm *)"] },
+  });
+});
+
+test("a named row whose command gained a flag is still its row: nothing added back, no removal, its offers reach it; a nameless one matches by its run", async () => {
+  const rows = {
+    checks: [
+      { label: "Typecheck", run: "pnpm exec tsc --noEmit --incremental", name: "typecheck" },
+      { label: "Lint", run: "pnpm lint --cache" },
+      { label: "Tests", run: "pnpm test -- --changed {base}", name: "tests", receipt: true, unread: ["docs/**", "*.md"] },
+    ],
+    gates: [
+      { label: "typecheck", run: "pnpm exec tsc --noEmit" },
+      { label: "lint", run: "pnpm lint --cache --cache-location {cache}/eslintcache" },
+      { label: "build", run: "pnpm build" },
+      { label: "tests", run: "pnpm test -- --changed {base}", alone: true },
+    ],
+  };
+  const { dir, config } = project052(rows);
+  await bothLoaders(dir);
+  const items = refresh(dir).items;
+  const ids = (op) => items.filter((i) => i.op === op).map((i) => i.id);
+  // The nameless Lint row is matched by its exact run alone, as in 0.5.x: the plain row is offered back.
+  assert.deepEqual(ids("add"), ["stopGate.checks+pnpm lint"]);
+  assert.deepEqual(ids("remove"), ["stopGate.checks-pnpm lint --cache"]);
+  // A gate is matched by its label, which is the name `after` points at.
+  const offers = ["stopGate.checks.offer+pnpm exec tsc --noEmit --incremental", "phaseRun.gates.offer+pnpm test -- --changed {base}"];
+  assert.deepEqual(ids("offer"), offers);
+  const summary = (id) => items.find((i) => i.id === id).summary;
+  assert.match(summary(offers[0]), /Typecheck gets "receipt": true, "unread": \["\*\*\/\*\.md"\]/);
+  assert.match(summary(offers[1]), /tests gets "unreadOf": "tests"/);
+  assert.doesNotMatch(summary(offers[1]), /names the/, "the tests row already has its name");
+  assert.deepEqual(update(dir).offers.map((o) => o.id), offers, "update offers the same");
+
+  refresh(dir, { apply: true, onlyAccepted: true, accept: offers });
+  assert.deepEqual(config().stopGate.checks[0], { ...rows.checks[0], receipt: true, unread: ["**/*.md"] });
+  assert.deepEqual(config().stopGate.checks.slice(1), rows.checks.slice(1));
+  assert.deepEqual(config().phaseRun.gates[3], { ...rows.gates[3], unreadOf: "tests" });
+  await bothLoaders(dir);
+  assert.deepEqual(update(dir).offers, []);
+});
+
+test("a name never hides a stack change: a row whose command is no longer the suggested one, flags or not, is a stranger", () => {
+  // Named rows from 0.5.2's stack, then the project moves from pnpm to npm: refresh adds npm's and offers pnpm's for removal.
+  const { dir } = project052(ROWS_052, (c) => {
+    c.stopGate.checks[1] = { ...c.stopGate.checks[1], name: "lint" };
+    c.stopGate.checks[2] = { ...c.stopGate.checks[2], name: "unit", run: "pnpm test -- --changed {base}" };
+  });
+  rmSync(join(dir, "pnpm-lock.yaml"));
+  write(dir, { "package-lock.json": "{}\n" });
+  const items = refresh(dir).items;
+  const ids = (op) => items.filter((i) => i.op === op).map((i) => i.id);
+  for (const id of ["stopGate.checks+npm run lint", "stopGate.checks+npm run test", "phaseRun.gates+npm run lint", "phaseRun.gates+npm run test"]) assert.ok(ids("add").includes(id), id);
+  for (const id of ["stopGate.checks-pnpm lint", "stopGate.checks-pnpm test -- --changed {base}", "phaseRun.gates-pnpm lint", "phaseRun.gates-pnpm test"]) assert.ok(ids("remove").includes(id), id);
+});
+
+test("any name will do: a tests row named unit whose command gained {base} is still the tests row, and the one the scan reads", () => {
+  const { dir } = project052(ROWS_052, (c) => {
+    c.stopGate.checks[2] = { ...c.stopGate.checks[2], name: "unit", run: "pnpm test -- --changed {base}" };
+    c.phaseRun.tampering = { testFiles: ["tests/**/*.test.mjs"] };
+  });
+  write(dir, { "tests/b.test.mjs": 'readFileSync("docs/guide.md");\n' });
+  const { items, warnings } = refresh(dir);
+  assert.ok(!items.some((i) => /pnpm test/.test(i.id) && (i.op === "add" || i.op === "remove")), items.map((i) => i.id).join(", "));
+  assert.ok(items.some((i) => i.id === "phaseRun.gates.offer+pnpm test" && /"unreadOf": "unit"/.test(i.summary)), "the suite gate points at it");
+  assert.equal(warnings.length, 1, warnings.join("\n"));
+  assert.match(warnings[0], /^tests\/b\.test\.mjs:1 names "docs\/guide\.md", on the Tests check's/);
+});
+
+/** The one line the scan prints for a project that names no test files. */
+const NO_TEST_FILES = "set phaseRun.tampering.testFiles to check your unread list";
+const TEST_FILES = { testFiles: ["tests/**/*.test.mjs"] };
+
+test("the unread list's honesty: no tampering section, one line and nothing scanned", () => {
+  const { dir } = project052();
+  write(dir, { "tests/b.test.mjs": 'readFileSync("docs/guide.md");\n' });
+  assert.deepEqual(refresh(dir).warnings, [NO_TEST_FILES]);
+  // A section that lists no test files is the same: nothing to scan.
+  const empty = project052(ROWS_052, (c) => (c.phaseRun.tampering = { guarded: [".claude/workflow.json"] }));
+  assert.deepEqual(refresh(empty.dir).warnings, [NO_TEST_FILES]);
+});
+
+test("the unread list's honesty: a clean repo warns of nothing, whatever a non-test file or another check's list says", async () => {
+  const { dir } = project052(ROWS_052, (c) => {
+    c.stopGate.checks[0] = { ...c.stopGate.checks[0], name: "typecheck", receipt: true, unread: ["**/*.md"] };
+    c.phaseRun.tampering = TEST_FILES;
+  });
+  write(dir, {
+    "tests/a.test.mjs": [
+      'import { x } from "../src/x.mjs";',
+      'const page = "src/app/page.tsx";',
+      'const notes = "src/notes.md";', // on the named Typecheck's list, never the tests row's
+      'const lists = ["docs/**", "*.md"];', // globs, not paths
+      'const url = "https://example.com/docs/a.md";',
+      "const made = `${dir}/docs/x.md`;",
+    ].join("\n"),
+    "scripts/c.mjs": 'const doc = "docs/guide.md";\n', // not a test file
+  });
+  await bothLoaders(dir);
+  assert.deepEqual(refresh(dir).warnings, []);
+});
+
+test("the unread list's honesty: each path a test file names on the tests row's list is a warning, and refresh still goes ahead", () => {
+  const { dir, config } = project052(ROWS_052, (c) => {
+    c.phaseRun.tampering = TEST_FILES;
+    delete c.guard.wrappers;
+  });
+  write(dir, { "tests/sub/b.test.mjs": 'const text = readFileSync("docs/guide.md", "utf8");\nconst top = join(here, "../../README.md");\n' });
+  const warnings = refresh(dir).warnings;
+  assert.equal(warnings.length, 2, warnings.join("\n"));
+  assert.match(warnings[0], /^tests\/sub\/b\.test\.mjs:1 names "docs\/guide\.md", on the Tests check's unread list/);
+  assert.match(warnings[1], /^tests\/sub\/b\.test\.mjs:2 names "README\.md"/, "a ./ or ../ path is read from the test's folder");
+  const applied = refresh(dir, { apply: true });
+  assert.deepEqual(applied.warnings, warnings);
+  assert.deepEqual(config().guard.wrappers, ["pnpm exec", "pnpm dlx", "pnpm", "npx"], "a warning never stops the refresh");
 });
 
 test("an older CLAUDE.md without the Stack section is offered it, and gets it only on a yes", () => {
@@ -461,9 +846,15 @@ test("the command line: plan previews the changed files, apply writes, verify pa
   assert.match(planned.stdout, /Changed \(shown as a diff before writing\) \(3\):/);
   assert.match(readFileSync(join(scratch, "preview/CLAUDE.md"), "utf8"), /Never push to main\.\n\n## Commands\n/);
   assert.equal(cli("apply", dir, "--plan", join(scratch, "plan.json")).status, 0);
+  // A test file naming a path on the tests row's unread list: verify warns of it, and still passes.
+  const config = JSON.parse(read(dir, ".claude/workflow.json"));
+  config.phaseRun.tampering = { testFiles: ["tests/**/*.test.mjs"] };
+  writeFileSync(join(dir, ".claude/workflow.json"), `${JSON.stringify(config, null, 2)}\n`);
+  write(dir, { "tests/b.test.mjs": 'readFileSync("docs/guide.md");\n' });
   const verified = cli("verify", dir);
   assert.equal(verified.status, 0, verified.stdout);
   assert.match(verified.stdout, /^ok +the phase runner's config$/m);
+  assert.match(verified.stdout, /^warn +the tests' unread list\ntests\/b\.test\.mjs:1 names "docs\/guide\.md"/m);
 });
 
 test("overwrite works on its own branch and archives the old docs, CLAUDE.md and settings instead of deleting them", () => {

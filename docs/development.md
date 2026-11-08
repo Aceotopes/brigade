@@ -9,7 +9,7 @@ release a change. Using Brigade in a project is the [guide](guide.md).
 |---|---|---|
 | `.claude-plugin/` | `plugin.json` (the plugin) and `marketplace.json` (so `claude plugin marketplace add` can install it from this repo) | — |
 | `skills/` | `doc-sync`, `ticket-check`, `setup-workflow`, `update-workflow`, `roadmap` (with `page.html`, the roadmap page's template) | From the plugin, in every project |
-| `hooks/` | `guard-shell.mjs` (PreToolUse) and `stop-gate.mjs` (Stop), wired by `hooks.json`. Both read the project's `.claude/workflow.json` through `workflow-config.mjs`. `version-check.mjs` (SessionStart, a fresh launch only), the out-of-step notice | From the plugin, in every project |
+| `hooks/` | `guard-shell.mjs` (PreToolUse) and `stop-gate.mjs` (Stop), wired by `hooks.json`. Both, and `ledger.mjs`, read the project's `.claude/workflow.json` through `workflow-config.mjs`; inside a run the first two read the run's frozen copy instead (`PHASE_RUN_RUNNER`, ADR 0005). `version-check.mjs` (SessionStart, a fresh launch only), the out-of-step notice. `ledger.mjs` (Stop, its own group), the attended ledger: prices each reply with the plugin's own `template/tools/phase-run/` code | From the plugin, in every project |
 | `scripts/` | `setup.mjs`, the file work behind the two setup skills (detect, propose, plan, apply, verify, update, refresh, docker, automode, labels); `roadmap.mjs`, the roadmap's GitHub check and its page; `migrations.mjs`, each version's config format changes; `versions.mjs`, the plugin's version, ID and catalog (read from `.claude-plugin/`), the stamp and the comparison, shared with the notice | From the plugin, run by those skills |
 | `template/` | Files a project keeps **in its own repo**, because CI and `node` run them there: the doc tools, the phase runner, `docs/_templates`, the workflow docs, the doc-check CI job, and blank starting copies of the config | Copied in by `/setup-workflow`, re-copied by `/update-workflow` |
 | `scaffold/` | Files setup writes **once**, which the project then owns: the `CLAUDE.md` skeleton, the devlog with entry #1, the roadmap, the handoff, the issue-tracker page, the generated indexes' heads | Rendered by `/setup-workflow` |
@@ -34,8 +34,9 @@ node --test tools/phase-run/run.test.mjs tools/phase-run/measure.test.mjs
 
 | Test file | What it holds in place |
 |---|---|
-| `tests/guard-shell.test.mjs`, `tests/stop-gate.test.mjs` | The hooks' rules, which folder a command is aimed at, the stop check's receipt skip, and its log row as the runner reads it |
+| `tests/guard-shell.test.mjs`, `tests/stop-gate.test.mjs` | The hooks' rules, which folder a command is aimed at, the stop check's receipt skip, its log row as the runner reads it, and the run's frozen copy read in place of the live tree |
 | `tests/version-check.test.mjs` | The out-of-step notice: each line or none, silent in a phase run, never failing a session start, a fresh launch only |
+| `tests/ledger-hook.test.mjs` | The attended ledger hook: a cumulative row per reply from the added bytes only, off outside set-up projects, by `attended: false` and in a phase run, silent on every failure, plugin-local pricing beside a 0.5.x project |
 | `template/tools/phase-run/measure.test.mjs` | The runner's measuring and its night-run table: cost and time split, the receipt, quiet test output, the waits, the size budget, and a prompt that never pauses for a fixed time |
 | `tests/workflow-config.test.mjs` | The `.claude/workflow.json` format: every key checked, a broken file fails closed |
 | `tests/env-contract.test.mjs` | The phase-run environment variables, the same in the hooks, doc-check and the runner |
@@ -114,6 +115,15 @@ these steps:
     version, and the runner refuses a session's edit to `tools/phase-run/`. After each release,
     update the plugin and run `/update-workflow` here too. Ticket #9 (setup proposes Node test
     gates) was built by a real phase run, which also found and fixed the tests' `PHASE_RUN` leak.
+14. **0.6.0, measure and trim** (2026-11-08): a port of one real project's verified runner upgrade.
+    It prices every session, night and attended, into a per-project ledger. One frozen runner copy
+    judges a run (ADR 0005), and each stop check keeps its own receipt (ADR 0004). It also brings
+    gates side by side with the suite skip, the tampering gate, trim, setup's tool rows and the
+    compose scan. An attended probe (#12) came first; then a phase run on Brigade itself built
+    twelve tickets in one evening. The finish ticket (#24) reviewed the phase against its spec,
+    saw each hook change in real sessions with the plugin loaded from its folder, and made the
+    shell guard read only its own part of the config. The decisions are in the
+    [0.6.0 discovery doc](discovery/04-brigade-0.6.0.md).
 
 ## Changing the workflow
 

@@ -1,10 +1,10 @@
 {
-  "_about": "US dollars per million tokens, at API list price. The phase report shows each ticket's cost at these rates. It is a usage gauge: a subscription plan is not billed per token. cacheWrite is the 1-hour cache rate (2x input), the TTL Claude Code uses; at the 5-minute rate (1.25x) a ticket costs a little less. Brigade updates this file when the price list changes; a model not listed is priced as `fallback`. Haiku's row is its rate for prompts up to 100K tokens (above that it costs 5x), so a long Haiku session reads low.",
+  "_about": "US dollars per million tokens, at API list price, checked against Claude's price list on checkedOn. The phase report shows each ticket's cost at these rates. It is a usage gauge: a subscription plan is not billed per token. Each request is priced on its own: a cache write at its lifetime's rate (cacheWrite5m or cacheWrite1h; a write the transcript does not split is priced at the 1-hour rate), and an advisor pass at the advisor's model. A row may carry an `above` tier, {promptTokens and the same five rates}, for a request whose prompt is over promptTokens. A model not listed is priced as `fallback`. Brigade updates this file when the price list changes; a test warns when checkedOn is over 90 days old.",
+  "checkedOn": "2026-11-07",
   "fallback": "claude-opus-5-5",
   "perMillion": {
-    "claude-opus-5-5": { "input": 4, "cacheWrite": 8, "cacheRead": 0.2, "output": 20 },
-    "claude-sonnet-5-5": { "input": 2, "cacheWrite": 4, "cacheRead": 0.2, "output": 10 },
-    "claude-haiku-5-5": { "input": 0.1, "cacheWrite": 0.2, "cacheRead": 0.01, "output": 0.5 },
-    "claude-fable-5-1": { "input": 10, "cacheWrite": 20, "cacheRead": 0.25, "output": 50 }
+    "claude-opus-5-5": { "input": 4, "cacheWrite5m": 5, "cacheWrite1h": 8, "cacheRead": 0.2, "output": 20 },
+    "claude-sonnet-5-5": { "input": 2, "cacheWrite5m": 2.5, "cacheWrite1h": 4, "cacheRead": 0.2, "output": 10 },
+    "claude-fable-5-1": { "input": 10, "cacheWrite5m": 12.5, "cacheWrite1h": 20, "cacheRead": 0.25, "output": 50 }
   }
 }
