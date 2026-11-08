@@ -11,10 +11,12 @@
 //   node scripts/setup.mjs verify <dir>                          doc-check, the template's tests, both config loaders
 //   node scripts/setup.mjs update <dir> [--apply] [--remove] [--auto-update]
 //                                                                re-copy template/ into a set-up project; --auto-update
-//                                                                also turns on auto-update for Brigade's catalog
-//   node scripts/setup.mjs refresh <dir> [--stack <f>] [--apply] [--accept <id,id>]
+//                                                                also turns on auto-update for Brigade's catalog; the
+//                                                                report lists refresh's offers (written by refresh)
+//   node scripts/setup.mjs refresh <dir> [--stack <f>] [--apply] [--accept <id,id>] [--only-accepted]
 //                                                                bring the config in line with the stack (--stack: the new
-//                                                                one); --apply writes the additions and the accepted ids
+//                                                                one); --apply writes the additions and the accepted ids;
+//                                                                --only-accepted, the accepted ids alone
 //   node scripts/setup.mjs docker                                is Docker installed, and running
 //   node scripts/setup.mjs automode --settings <f> --lines <f> [--apply]   the project's autoMode lines
 //   node scripts/setup.mjs labels                                the GitHub labels the workflow reads
@@ -767,22 +769,111 @@ function stackSection(plugin) {
 }
 
 /**
+ * The keys 0.6.0 gives a row the stack suggests, by the row's role (`stackChecks`' key), for a project
+ * whose rows predate them: refresh offers each row's missing keys as one yes (D11). They go together,
+ * because a receipt with its own list needs the name that gives it its own file. A value
+ * `{ nameOf: role }` is the name of the stop check in that role. Setup's own rows stay 0.5.x-shaped
+ * (`proposeWorkflow`); a new project's tools get these keys from setup's checklist (#22).
+ */
+export const ROW_OFFERS = {
+  "stopGate.checks": {
+    typecheck: { name: "typecheck", receipt: true, unread: ["**/*.md"] },
+    lint: { name: "lint", receipt: true, unread: ["**/*.md"] },
+    test: { name: "tests" },
+  },
+  "phaseRun.gates": {
+    test: { unreadOf: { nameOf: "test" } },
+  },
+};
+
+/** Why each key is offered, for the item's summary: the first key an offer holds, in this order, says it. */
+const OFFER_WHY = {
+  unreadOf: "so a diff wholly on that check's unread list skips it",
+  receipt: "so the stop check skips it on code it already passed",
+  name: "so its receipt is its own and a gate can point at it",
+};
+
+/**
+ * Refresh's offers (D11): for each existing row whose command the stack suggests, the ROW_OFFERS keys
+ * it lacks, as one `offer` item. A row with a command of the project's own gets none, a key it already
+ * has is never changed, and a name another row already holds is never offered (nor the row's keys
+ * that need it).
+ */
+function rowOffers(det, current, item, rowIn) {
+  const roleOf = new Map(stackChecks(det).map((check) => [check.run, check.key]));
+  const checks = current.stopGate?.checks ?? [];
+  const taken = new Set(checks.map((c) => c.name).filter(Boolean));
+  // The name a stop check in `role` has, or would get with its offer: null when it has no row or the name is taken.
+  const nameOf = (role) => {
+    const row = checks.find((c) => roleOf.get(c.run) === role);
+    if (!row) return null;
+    if (row.name) return { name: row.name, row, naming: false };
+    const name = ROW_OFFERS["stopGate.checks"][role]?.name;
+    return name && !taken.has(name) ? { name, row, naming: true } : null;
+  };
+  const show = (keys) => Object.entries(keys).map(([key, value]) => `${JSON.stringify(key)}: ${JSON.stringify(value)}`).join(", ");
+  // The first of OFFER_WHY's keys the offer holds says why: its order is the reasons' weight.
+  const why = (keys) => OFFER_WHY[Object.keys(OFFER_WHY).find((key) => key in keys)] ?? "as this release sets it up";
+
+  for (const row of checks) {
+    const offer = ROW_OFFERS["stopGate.checks"][roleOf.get(row.run)];
+    if (!offer || (offer.name && !row.name && taken.has(offer.name))) continue;
+    const keys = Object.fromEntries(Object.entries(offer).filter(([key]) => row[key] === undefined));
+    // A list belongs to the receipt offered with it: beside a row's own receipt (0.4.1's add gives its
+    // list) or its `receipt: false` (the loaders refuse a list there), none is offered.
+    if (!("receipt" in keys)) delete keys.unread;
+    if (!Object.keys(keys).length) continue;
+    item(`stopGate.checks.offer+${row.run}`, "offer", `stopGate.checks: ${row.label} gets ${show(keys)}, ${why(keys)} (only on a yes)`, (config) => {
+      Object.assign(rowIn(config, row.run), keys);
+    });
+  }
+  for (const gate of (current.phaseRun?.gates ?? []).filter((g) => g.run)) {
+    const offer = ROW_OFFERS["phaseRun.gates"][roleOf.get(gate.run)];
+    if (!offer) continue;
+    const keys = {};
+    const naming = [];
+    for (const [key, value] of Object.entries(offer)) {
+      if (gate[key] !== undefined) continue;
+      const ref = value?.nameOf ? nameOf(value.nameOf) : null;
+      if (value?.nameOf && !ref) continue;
+      keys[key] = ref ? ref.name : value;
+      if (ref?.naming) naming.push(ref);
+    }
+    if (!Object.keys(keys).length) continue;
+    // The check a key points at must carry that name, so the gate's yes names it too when it has none.
+    const also = naming.map((ref) => ` (and names the ${ref.row.label} check ${JSON.stringify(ref.name)}, which it points at)`).join("");
+    item(`phaseRun.gates.offer+${gate.run}`, "offer", `phaseRun.gates: ${gate.label} gets ${show(keys)}, ${why(keys)}${also} (only on a yes)`, (config) => {
+      const target = config.phaseRun?.gates?.find((g) => g.run === gate.run);
+      // An accepted removal took the row, or the check it points at: nothing to point at, so nothing written.
+      const named = naming.map((ref) => config.stopGate?.checks?.find((c) => c.run === ref.row.run));
+      if (!target || named.some((check) => !check)) return;
+      Object.assign(target, keys);
+      named.forEach((check, i) => (check.name ??= naming[i].name));
+    });
+  }
+}
+
+/**
  * Brings a set-up project's config in line with its stack: the config's own `stack`, or `stack` given,
  * the owner's answer to "what changed?". Each item is one of:
  *   set     the stack itself, as the owner gave it
  *   add     something the stack suggests that is missing; --apply writes it
  *   change, remove   written only when its id is in `accept`: a hand-written row is never dropped silently
+ *   offer   keys a newer release gives a row the stack suggests (ROW_OFFERS), one item per row; written
+ *           only when its id is in `accept`
  * It covers the stack, the guard's wrappers, the stop gate's checks, the runner's gates and allow
  * rules, the design rung's prompt file, PROTOTYPE_DIR, CLAUDE.md's Stack section and checks.yml.
+ * With `onlyAccepted`, --apply writes the accepted items and nothing else.
  */
-export function refresh(dir, { stack, apply = false, accept = [] } = {}, plugin = PLUGIN) {
+export function refresh(dir, { stack, apply = false, accept = [], onlyAccepted = false } = {}, plugin = PLUGIN) {
   const det = detect(dir);
   if (!det.stamp) throw new Error(`No ${STAMP}: this project was not set up by /setup-workflow. Run that first.`);
   const current = JSON.parse(readText(join(dir, ".claude", "workflow.json")));
   const chosen = orderStack(stack ?? current.stack ?? {});
   const proposed = proposeWorkflow(det, plugin, { stack: chosen });
-  // A tests row added whole shares the project's own unread list, if it has one: the loaders refuse two lists.
-  const projectUnread = (current.stopGate?.checks ?? []).find((c) => c.receipt && Array.isArray(c.unread))?.unread;
+  // A tests row added whole shares the nameless receipt rows' list, if they have one: they share one
+  // receipt file, so the loaders refuse two lists among them. A named row keeps its own (0.6.0).
+  const projectUnread = (current.stopGate?.checks ?? []).find((c) => c.receipt && !c.name && Array.isArray(c.unread))?.unread;
   if (projectUnread) for (const row of proposed.stopGate.checks.filter((c) => c.receipt)) row.unread = [...projectUnread];
   const items = [];
   const item = (id, op, summary, edit) => items.push({ id, op, summary, edit });
@@ -837,7 +928,7 @@ export function refresh(dir, { stack, apply = false, accept = [] } = {}, plugin 
 
   // Inside the tests row (0.4.1): the rows above match by command only, so a row the project has is never
   // offered whole again; its missing receipt, then its missing unread list, are each an add. The project's
-  // own list is never changed, and the one offered matches it, as every receipt row shares one list.
+  // own list is never changed, and the one offered matches the nameless rows', which share one receipt.
   const haveChecks = current.stopGate?.checks ?? [];
   const wantTests = (proposed.stopGate?.checks ?? []).find((c) => c.receipt);
   // The row, unless an accepted removal took it first: then there is nothing to add to.
@@ -849,11 +940,12 @@ export function refresh(dir, { stack, apply = false, accept = [] } = {}, plugin 
     });
   }
   for (const row of haveChecks.filter((c) => (c.receipt || c === testsRow) && c.unread === undefined)) {
-    const unread = [...(projectUnread ?? UNREAD)];
+    const unread = [...((!row.name && projectUnread) || UNREAD)];
     item(`stopGate.checks.unread+${row.run}`, "add", `stopGate.checks: ${row.label} gets "unread": ${JSON.stringify(unread)}, so a docs-only edit keeps its receipt`, (config) => {
       rowIn(config, row.run).unread = unread;
     });
   }
+  rowOffers(det, current, item, rowIn);
 
   // The design rung, once the project has screens: its prompt file and the prototype folder.
   if (det.frontend.length && !current.phaseRun?.prompt) {
@@ -881,8 +973,9 @@ export function refresh(dir, { stack, apply = false, accept = [] } = {}, plugin 
     );
   }
 
-  // What the selected items make, then checks.yml from the checks as they will be.
-  const selected = (it) => it.op === "set" || it.op === "add" || accept.includes(it.id);
+  // What the selected items make, then checks.yml from the checks as they will be. `onlyAccepted`
+  // writes the accepted ids and nothing else: /update-workflow's yeses never carry refresh's adds along.
+  const selected = (it) => (!onlyAccepted && (it.op === "set" || it.op === "add")) || accept.includes(it.id);
   const build = () => {
     const config = structuredClone(current);
     const files = new Map();
@@ -939,7 +1032,8 @@ export function changesSince(from, to, plugin = PLUGIN) {
  * Config and scaffold files are never touched, except by a version's migration and the one setting
  * below. A scaffold file the plugin changed since the stamp is listed for review (op "review"), and
  * only listed. Auto-update for Brigade's catalog, when off, is listed (op "setting") and turned on
- * only with `autoUpdate`.
+ * only with `autoUpdate`. The report's `offers` are refresh's offer items for the config, which
+ * `refresh --apply --only-accepted --accept <ids>` writes on the owner's yes.
  */
 export function update(dir, { apply: doApply = false, remove = false, autoUpdate = false, plugin = PLUGIN, migrations = MIGRATIONS, date } = {}) {
   const stampPath = join(dir, STAMP);
@@ -989,8 +1083,18 @@ export function update(dir, { apply: doApply = false, remove = false, autoUpdate
     changelog: changesSince(stamp.version, to, plugin),
     changes: changes.filter((c) => c.op !== "same").map(({ text, ...rest }) => rest),
     migrations: pending.map((m) => `${m.version}: ${m.describe}`),
+    offers: [],
     notes,
   };
+  // What refresh would now give the config's rows, each a yes of its own: update itself never writes the
+  // config (D11). A config refresh can't read never stops the template copy; it is only said.
+  if (existsSync(join(dir, ".claude", "workflow.json"))) {
+    try {
+      report.offers = refresh(dir, {}, plugin).items.filter((it) => it.op === "offer").map(({ id, summary }) => ({ id, summary }));
+    } catch (error) {
+      notes.push(`Refresh's offers could not be read (${error.message}); fix .claude/workflow.json and run update again to see them.`);
+    }
+  }
   if (!doApply) return report;
 
   const touched = [];
@@ -1134,7 +1238,7 @@ async function main() {
     else if (command === "refresh") {
       const stack = value("--stack") ? JSON.parse(readText(value("--stack"))) : undefined;
       const accept = value("--accept") ? value("--accept").split(",").map((id) => id.trim()) : [];
-      print(refresh(target, { stack, apply: rest.includes("--apply"), accept }));
+      print(refresh(target, { stack, apply: rest.includes("--apply"), accept, onlyAccepted: rest.includes("--only-accepted") }));
     } else if (command === "docker") print(dockerStatus());
     else throw new Error("Usage: setup.mjs detect|propose|plan|apply|verify|update|refresh|docker|automode|labels (see the top of this file).");
   } catch (error) {

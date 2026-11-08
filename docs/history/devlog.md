@@ -9,6 +9,18 @@ Each commit's entry goes on top, in the shape of `docs/_templates/devlog-entry.m
 message cites it (`devlog #N`). At each phase end, `node tools/doc-rotate.mjs` moves the closed
 entries into `docs/history/devlog/`.
 
+## #13 · feat · /update-workflow offers 0.6.0's rows
+
+**Built:**
+- `refresh` gains `offer` items from `ROW_OFFERS`, a role-keyed table: the keys a suggested row
+  lacks, one yes per row; `onlyAccepted` writes the accepted ids alone. `proposeWorkflow` unchanged.
+- `update`'s report lists them as `offers`; `MIGRATIONS` stays empty. The skill asks after the copy.
+- Refresh's shared list is the nameless receipt rows' only. The prompt's `STOP_CHECKS` names
+  `stop-tests.mjs` once for every receipt row, and the unread note names each list (owed by #17).
+**Verified:** a scratch project with 0.5.2's rows: offers listed, one accepted, one declined, the
+gate alone, both loaders on each file; names in use and hand rows; full stop-check suite. Backend only.
+**Next:** #22 walks the checklist after these offers. **Record:** implementation log 008.
+
 ## #12 · feat · gates side by side, with the suite skip
 
 **Built:**

@@ -10,6 +10,7 @@ what was built, why it works that way, and how to say it out loud. The index bel
 <!-- generated:start implementation-log -->
 ### Current phase
 
+- [008](008-update-offers-rows.md) · `#18` · 2026-11-08 · `/update-workflow` offers 0.6.0's rows
 - [007](007-gates-side-by-side.md) · `#19` · 2026-11-08 · Gates side by side, with the suite skip
 - [006](006-per-check-receipts.md) · `#17` · 2026-11-08 · Each stop check keeps its own receipt
 - [005](005-runner-snapshot.md) · `#16` · 2026-11-08 · The runner snapshot: the frozen copy

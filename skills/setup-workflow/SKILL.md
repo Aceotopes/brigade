@@ -189,6 +189,9 @@ On a project already set up (§1.3), when the owner picks the refresh:
    - `change`, `remove`: a row the stack would not suggest, a changed file (`checks.yml`), an older
      `CLAUDE.md`'s missing Stack section. **Never written unless the owner says yes**, item by item
      (AskUserQuestion, up to 4 per call). A hand-written row is kept by default.
+   - `offer`: keys a newer release gives a row the stack suggests (a check's `name`, its own
+     `receipt` and `unread` list, a gate's `unreadOf`), one item per row. Asked and written the same
+     way as `change`.
 3. Run it again with `--apply` and `--accept <the ids the owner said yes to>`. It writes, regenerates
    the indexes (the Stack block in `CLAUDE.md` follows), and stages.
 4. Walk §3's checklist for the parts that changed (a new database: its QA database; a new test

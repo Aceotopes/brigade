@@ -30,6 +30,12 @@ migration in `scripts/migrations.mjs`.
   `stop-tests.mjs`. A crashed run restarts on its copy, and refuses to when the runner's `.mjs`
   files changed since, naming them; a run that reaches its report marks the copy finished. A
   0.5.x plugin's hooks ignore the variable, so update the plugin with the template.
+- **Update offers the new keys, row by row.** `/update-workflow` ends by listing what refresh
+  would add to the config's rows (`offers`): a `name`, `receipt: true` and `unread: ["**/*.md"]`
+  on the typecheck and lint stop checks the stack suggests, a `name` on the tests row, and
+  `unreadOf` on the suite gate. Each is a yes of its own, written by `setup.mjs refresh --apply
+  --only-accepted --accept <ids>`; a hand-written row gets none. No migration runs: a 0.5.x
+  `workflow.json` loads unchanged.
 
 ## 0.5.2 — 2026-11-04
 No config format change. The first version built by a phase run on Brigade itself.

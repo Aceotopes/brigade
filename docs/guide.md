@@ -324,6 +324,7 @@ until you say yes:
 | `review` | A scaffold file whose plugin copy changed. You own your copy, so it is only shown |
 | `notes`, `migrations` | Anything else worth knowing, and the config format changes it makes |
 | `setting` | Auto-update for Brigade's catalog is off in `.claude/settings.json`. A separate yes turns it on; when a rewrite would reformat the file, you are shown the line to add by hand instead |
+| `offers` | Keys a newer release gives your config's rows, such as a typecheck's own receipt or the suite gate's `unreadOf`. Asked after the template copy, one yes per row; a row you wrote by hand never gets one |
 
 Then it runs the checks, drafts the devlog entry and commit message, and stops for your commit.
 

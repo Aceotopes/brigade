@@ -107,3 +107,21 @@ listed in the gotchas index, `docs/agents/gotchas/README.md`.
   no `$` (sh), and no `{word}` (the loader reads it as a placeholder). Pass paths through `env`.
 - Prove side by side with a rendezvous (each job waits for the other's flag), never a stopwatch.
 - `{cache}` is emptied once per gate run, never per gate: the group shares the folder.
+
+**`#18` — update's offers, `scripts/setup.mjs` `ROW_OFFERS` / `rowOffers` / `refresh` `onlyAccepted`, `update` `offers` (built 2026-11-08):**
+- The 0.6.0 keys live in `ROW_OFFERS`, never in `proposeWorkflow`: #22 pins its output, and a new
+  project's lists are a checklist question (D17).
+- A row's offered keys go as one item. A receipt with its own list needs its name, or two nameless
+  lists are refused. A gate's `unreadOf` needs its check's name, so the gate's yes names it.
+  pinned: `tests/setup.test.mjs` (each accepted file through both loaders).
+- Refresh's shared list is the **nameless** receipt rows'. Read from any receipt row, a named
+  Typecheck's `**/*.md` lands on the tests row. pinned: `tests/setup.test.mjs`.
+- `refresh(dir).items` is no longer `[]` right after setup: the offers are there until #22 writes
+  the keys. Filter `op !== "offer"` in a test that means "nothing else to do".
+- An `unread` list is offered only with the `receipt` it belongs to. A row's own `receipt: false`
+  refuses a list, and a row's own receipt gets its list from 0.4.1's `add`; offering it there too
+  makes two items for one key. pinned: `tests/setup.test.mjs`.
+- `update` must never throw over the config: the offers are read in a try, and a failure is a note.
+- The prompt's `STOP_CHECKS` (`run.mjs` `stopCheckLine`) names `stop-tests.mjs` once, since it runs
+  every receipt row. Splitting it per row repeats the command. pinned: `measure.test.mjs`.
+- The runner loader's `error` is `null` on success, never `undefined`: assert `!error`.

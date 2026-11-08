@@ -938,6 +938,22 @@ test("a project with a receipt row is told to test through stop-tests.mjs; one w
   assert.equal(without.RECEIPT, "");
 });
 
+test("several receipt rows are one stop-tests.mjs run in the prompt, and each list is named", () => {
+  // stop-tests.mjs runs every receipt row, so the prompt names it once, where the first one stands.
+  const project = { stopChecks: [
+    { label: "Typecheck", run: "npm run typecheck", name: "typecheck", receipt: true, unread: ["**/*.md"] },
+    { label: "Build", run: "npm run build" },
+    { label: "Lint", run: "npm run lint", name: "lint", receipt: true, unread: ["**/*.md"] },
+    { label: "Tests", run: "npm test", receipt: true, unread: ["docs/**", "*.md"] },
+  ], sessionEnv: {}, migrations: null, browserCheck: null, qa: null };
+  const values = promptValues(project, "", { BASE: "abc", N: 1 });
+  assert.equal(values.STOP_CHECKS, "`node tools/phase-run/stop-tests.mjs` (Typecheck, Lint, Tests), `npm run build`");
+  // Lists that differ are each named with their checks; one list shared by all reads as before.
+  assert.match(values.RECEIPT, /except to `\*\*\/\*\.md` for Typecheck and Lint, and `docs\/\*\*`, `\*\.md` for Tests, which they never read/);
+  const shared = promptValues({ ...project, stopChecks: project.stopChecks.map((c) => (c.receipt ? { ...c, unread: ["docs/**"] } : c)) }, "", { BASE: "abc", N: 1 });
+  assert.match(shared.RECEIPT, /except to `docs\/\*\*`, which they never read/);
+});
+
 /** Claude Code's permission rule match: `*` is any run of characters, everything else literal. */
 function globMatch(pattern, text) {
   const parts = pattern.split("*");

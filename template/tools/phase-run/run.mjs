@@ -619,10 +619,34 @@ function gotchasFile(branch) {
   return fill(docConfig.GOTCHAS_FILE ?? "docs/agents/gotchas/{phase}.md", { phase: branch.replace(/^phase-/, "") });
 }
 
-/** What the prompt says an edit after the pass does, by the tests row's unread list. */
+/**
+ * What the prompt says an edit after the pass does, by the receipt rows' unread lists: one list when
+ * they share it, else each list with the checks that keep it (0.6.0's named rows keep their own).
+ */
 function unreadNote(stopChecks) {
-  const unread = stopChecks.find((c) => c.receipt)?.unread ?? [];
-  return unread.length ? `except to ${unread.map((glob) => `\`${glob}\``).join(", ")}, which the tests never read` : "docs included";
+  const receipts = stopChecks.filter((c) => c.receipt);
+  const lists = new Map();
+  for (const check of receipts) {
+    const key = JSON.stringify(check.unread ?? []);
+    lists.set(key, [...(lists.get(key) ?? []), check.label]);
+  }
+  const globs = (key) => JSON.parse(key).map((glob) => `\`${glob}\``).join(", ");
+  if (lists.size === 1) {
+    const [key] = lists.keys();
+    return key === "[]" ? "docs included" : `except to ${globs(key)}, which ${receipts.length === 1 ? "the tests" : "they"} never read`;
+  }
+  const parts = [...lists].map(([key, labels]) => `${key === "[]" ? "nothing" : globs(key)} for ${labels.join(" and ")}`);
+  return `except to ${parts.slice(0, -1).join(", ")}, and ${parts.at(-1)}, which they never read`;
+}
+
+/** The stop checks as the prompt lists them: stop-tests.mjs once for every receipt row, the rest as their commands. */
+function stopCheckLine(stopChecks, stopTests, base) {
+  const receipts = stopChecks.filter((c) => c.receipt);
+  const which = receipts.length === 1 ? "the tests" : receipts.map((c) => c.label).join(", ");
+  return stopChecks
+    .filter((c) => !c.receipt || c === receipts[0])
+    .map((c) => (c.receipt ? `${stopTests} (${which})` : `\`${c.run.replaceAll("{base}", base)}\``))
+    .join(", ");
 }
 
 function render(template, values) {
@@ -681,9 +705,8 @@ function promptValues(project, prose, ticket) {
     QA: project.qa ? `\`${project.qa.name}\`` : "local data",
     TARGET: target ?? "a shared database",
     // The tests (a `receipt` row) are run through stop-tests.mjs, so their pass leaves the receipt the stop check reads.
-    STOP_CHECKS: project.stopChecks.length
-      ? project.stopChecks.map((c) => (c.receipt ? `${stopTests} (the tests)` : `\`${c.run.replaceAll("{base}", base)}\``)).join(", ")
-      : "nothing, as this project names no stop checks",
+    // It runs every receipt row, so it is named once, where the first one stands.
+    STOP_CHECKS: project.stopChecks.length ? stopCheckLine(project.stopChecks, stopTests, base) : "nothing, as this project names no stop checks",
     RECEIPT: project.stopChecks.some((c) => c.receipt)
       ? ` Run the tests through ${stopTests}, never by hand: it prints a short summary (the failures and the totals), and on a pass records a receipt, so a second run on the same code (or the stop check) skips them. Any edit since makes them run again, ` +
         unreadNote(project.stopChecks) +
