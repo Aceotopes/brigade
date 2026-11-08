@@ -67,15 +67,47 @@ _Avoid_: night run, batch
 A check the runner makes on a ticket's result before the branch is pushed.
 
 **Receipt**:
-A record that a project's tests passed on exactly the current code, from the same base; files the
-project lists as unread (its docs) do not count as code. The stop check skips the tests while it
-holds; a gate never reads one.
+A session's own record that one stop check passed on exactly the code that check reads, from the
+same base. Files on that check's unread paths do not count as its code. The stop check skips that
+check while the receipt holds; a gate never reads one.
 _Avoid_: cache, pass token
 
 **Unread paths**:
-The files a project's tests never read, listed on its tests row, so an edit to them keeps a
-receipt.
-_Avoid_: ignore list, excluded files
+The files one stop check never reads, listed on its own row, so an edit to them keeps its receipt.
+The tests' list also decides a suite skip.
+_Avoid_: ignore list, excluded files, can't-affect list
+
+**Suite skip**:
+The gates leaving out the full suite when every file a ticket changed is on the tests' unread
+paths.
+
+**Tampering gate**:
+The gate that fails a ticket whose diff weakens tests (skips them, deletes assertions, or edits a
+guarded test file or script), unless a test override names it.
+
+**Test override**:
+A line in a ticket, written before the phase run, naming a test file and why it may be removed or
+weakened.
+
+**Runner snapshot**:
+The frozen copy of the runner, its config and the Brigade version that judges a whole phase run.
+_Avoid_: backup, cache
+
+**Ledger**:
+The append-only record of every session's tokens and cost, one row per session, kept per project.
+_Avoid_: log, metrics
+
+**Kind**:
+What a ledger row records: `night` (a phase-run session), `attended`, or `other` for a row a probe
+labelled itself.
+
+**Trim**:
+What a phase-run session starts without: plugins, skills and tools the machine's owner lists as
+unused at night.
+_Avoid_: slim, minimal mode
+
+**Keep list**:
+The plugins and skills one project's phase runs keep despite the trim.
 
 **Stack**:
 The tools a project declares it is built with: language, framework, package manager, database,

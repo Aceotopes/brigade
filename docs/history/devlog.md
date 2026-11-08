@@ -9,6 +9,18 @@ Each commit's entry goes on top, in the shape of `docs/_templates/devlog-entry.m
 message cites it (`devlog #N`). At each phase end, `node tools/doc-rotate.mjs` moves the closed
 entries into `docs/history/devlog/`.
 
+## #5 · docs · 0.6.0 grilled and specced: measure and trim
+
+**Built:**
+- Discovery doc 04: the port of one real project's runner upgrade, D1–D21, a 12-ticket slicing.
+- ADR 0004 (each stop check keeps its own receipt), ADR 0005 (one run, one judge); 0003 amended.
+- GLOSSARY: Receipt and Unread paths per check; Suite skip, Tampering gate, Test override, Runner
+  snapshot, Ledger, Kind, Trim, Keep list.
+- Spec #11 published and listed in `.claude/spec-issues.json`; the handoff rewritten.
+**Decided:** tool rows stay checklist items, not recipes (ADR 0001); setup reuses a compose file.
+**Verified:** doc-check clean; `node --test tests/*.test.mjs` 94/94. No code changed.
+**Next:** `/to-tickets` on #11, probe first. **Record:** adr/0004, adr/0005.
+
 ## #4 · chore · /update-workflow to 0.5.2, the pinned runner moves forward
 
 **Built:**

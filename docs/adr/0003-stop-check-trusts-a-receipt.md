@@ -61,3 +61,8 @@ Built as decided, with one widening: the review of the build found catch-alls pa
 named ones (`**/**`, `**/*.*`, `./**`, `src/..`). So the loaders refuse any glob that names no
 folder or file, or that leaves the repo. As a backstop, a list that still leaves out every file
 gives no key, so no receipt is written.
+
+## Addendum 2026-11-08: a receipt per check (0.6.0, decided, not built)
+
+Each stop check may now keep its own receipt and its own unread list, so the rule that receipt
+rows share one list goes. See ADR 0004. The trust is unchanged: no gate reads a receipt.
