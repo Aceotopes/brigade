@@ -12,6 +12,7 @@ import { BROWSER_CHECK, fill, loadRunConfig, parseRunConfig, qaUrl, sessionEnv, 
 import { readLedger } from "./ledger.mjs";
 import { QUIET_MS, SETTLE_MS, applyMigrations, folderTrusted, gatePlan, gotchasFile, holdReason, loadResults, outsideAreas, projectGates, promptValues, pullRequestBody, recordResult, render, report, runSession, runVariables, screenshotsSince, sessionSettings, turnOver } from "./run.mjs";
 import { finishSnapshot, readManifest, runnerChanges, takeSnapshot } from "./snapshot.mjs";
+import { PATCH_ARGS } from "./tampering.mjs";
 
 const options = { minutes: 120, waitHours: 6, print: true, spec: 179 };
 const call = (claude, extra = {}) => ({ options, prompt: "Build it.", sessionId: "s-1", resume: false, claude, online: async () => true, sleep: async () => {}, ...extra });
@@ -492,6 +493,224 @@ test("the decision function skips a gate on a non-empty diff wholly on its check
   // A copy names two paths too, and a path with a tab or a space is read whole.
   assert.deepEqual(planFor(nameStatus(["C075", "src/a.ts", "docs/a b.md"], ["A", "src/x\ty.ts"])).paths, ["src/a.ts", "docs/a b.md", "src/x\ty.ts"]);
   assert.equal(planFor("").base, "abc123");
+});
+
+// D15 (#20): the tampering gate. Fixture diffs as `git diff -U0` prints them (tampering.mjs's
+// PATCH_ARGS), the rules read through a stand-in for `git show <rev>:<path>`.
+const TAMPER = {
+  testFiles: ["**/*.test.mjs"],
+  markers: [
+    { name: "skip", pattern: "\\.skip\\(|\\{ skip: true" },
+    { name: "only", pattern: "\\.only\\(|\\{ only: true" },
+    { name: "todo", pattern: "\\.todo\\(" },
+  ],
+  assertions: { pattern: "\\bassert\\.", maxNetRemoved: 0 },
+  guarded: [".claude/workflow.json", "vitest.config.ts"],
+  guardedScripts: [{ file: "package.json", script: "test" }],
+  override: { heading: "Tests removed or weakened" },
+};
+const TAMPER_CONFIG = runConfig({ gates: [{ label: "lint", run: "lint" }], tampering: TAMPER });
+const workflowWith = (tampering) => JSON.stringify({ version: 1, phaseRun: { tampering } });
+const patchOf = (...files) =>
+  files
+    .map(({ from, to = from, added = [], removed = [] }) =>
+      [`diff --git a/${from ?? to} b/${to ?? from}`, `--- ${from ? `a/${from}` : "/dev/null"}`, `+++ ${to ? `b/${to}` : "/dev/null"}`, "@@ -1 +1 @@", ...removed.map((line) => `-${line}`), ...added.map((line) => `+${line}`)].join("\n"),
+    )
+    .join("\n");
+function tamperPlan({ diff, patch = "", body = "", message = "", files = {}, base = workflowWith(TAMPER), config = TAMPER_CONFIG } = {}) {
+  const at = { "abc123:.claude/workflow.json": base, ...files };
+  const readAt = (rev, path) => at[`${rev}:${path}`] ?? null;
+  return gatePlan({ base: "abc123", diff, config, patch, readAt, body, message }).tampering;
+}
+const OVERRIDE = "## Tests removed or weakened\n\n- `tests/a.test.mjs`: its flaky case goes; #31 rewrites it.\n";
+
+test("no tampering section means no tampering gate, and the reader is never asked", () => {
+  assert.equal(planFor(modified("tests/a.test.mjs")).tampering, null);
+  assert.equal(gatePlan({ base: "abc123", diff: modified("a"), config: GATE_CONFIG, readAt: () => assert.fail("read") }).tampering, null);
+});
+
+test("a marker on an added line of a test file fails, naming the marker and the file; one removed, or outside the tests, passes", () => {
+  for (const [marker, line] of [["skip", '  test.skip("adds", () => {});'], ["only", 'test("adds", { only: true }, () => {});'], ["todo", 'test.todo("adds");']]) {
+    const verdict = tamperPlan({ diff: modified("tests/a.test.mjs"), patch: patchOf({ from: "tests/a.test.mjs", added: [line] }) });
+    assert.equal(verdict.ok, false, marker);
+    assert.deepEqual(verdict.findings.map((f) => [f.kind, f.path, f.marker]), [["marker", "tests/a.test.mjs", marker]]);
+    assert.match(verdict.output, new RegExp(`tests/a\\.test\\.mjs adds the "${marker}" marker`));
+  }
+  assert.equal(tamperPlan({ diff: modified("tests/a.test.mjs"), patch: patchOf({ from: "tests/a.test.mjs", removed: ['test.skip("x", () => {});'] }) }).ok, true, "removing a skip");
+  assert.equal(tamperPlan({ diff: modified("src/a.mjs"), patch: patchOf({ from: "src/a.mjs", added: ["list.skip(2);"] }) }).ok, true, "not a test file");
+});
+
+test("assertions are counted over every test file together: a net removal past the limit fails, a moved test passes", () => {
+  const two = ["assert.equal(a, 1);", "assert.ok(b); assert.ok(c);"];
+  const removed = tamperPlan({ diff: modified("tests/a.test.mjs"), patch: patchOf({ from: "tests/a.test.mjs", removed: two }) });
+  assert.equal(removed.ok, false);
+  assert.deepEqual(removed.findings.map((f) => [f.kind, f.removed, f.added, f.paths]), [["assertions", 3, 0, ["tests/a.test.mjs"]]]);
+  assert.match(removed.output, /3 assertion match\(es\) removed and 0 added across the test files, 3 net; at most 0 may be/);
+  // Moved: out of one file, into another.
+  const moved = tamperPlan({ diff: modified("tests/a.test.mjs", "tests/b.test.mjs"), patch: patchOf({ from: "tests/a.test.mjs", removed: two }, { from: "tests/b.test.mjs", added: two }) });
+  assert.equal(moved.ok, true);
+  // A deleted test file's assertions count as removed; a source file's never count.
+  assert.equal(tamperPlan({ diff: nameStatus(["D", "tests/a.test.mjs"]), patch: patchOf({ from: "tests/a.test.mjs", to: null, removed: two }) }).ok, false);
+  assert.equal(tamperPlan({ diff: modified("src/a.mjs"), patch: patchOf({ from: "src/a.mjs", removed: two }) }).ok, true);
+  // A test file renamed out of the test globs takes every assertion with it, edited lines or not.
+  const atBase = { "abc123:tests/a.test.mjs": two.join("\n") };
+  const pureRename = "diff --git a/tests/a.test.mjs b/tests/a.mjs\nsimilarity index 100%\nrename from tests/a.test.mjs\nrename to tests/a.mjs";
+  const out = tamperPlan({ diff: nameStatus(["R100", "tests/a.test.mjs", "tests/a.mjs"]), patch: pureRename, files: atBase });
+  assert.deepEqual(out.findings.map((f) => [f.kind, f.removed, f.paths]), [["assertions", 3, ["tests/a.test.mjs"]]]);
+  const unread = tamperPlan({ diff: nameStatus(["R100", "tests/a.test.mjs", "tests/a.mjs"]), patch: pureRename, files: {} });
+  assert.deepEqual(unread.findings.map((f) => [f.kind, f.path]), [["unreadable", "tests/a.test.mjs"]], "its base text unreadable: never passes uncounted");
+  const renamedWithin = "diff --git a/tests/a.test.mjs b/tests/b.test.mjs\nsimilarity index 100%\nrename from tests/a.test.mjs\nrename to tests/b.test.mjs";
+  assert.equal(tamperPlan({ diff: nameStatus(["R100", "tests/a.test.mjs", "tests/b.test.mjs"]), patch: renamedWithin, files: atBase }).ok, true, "renamed among the tests");
+  // Moved into a file the override names: its gains still count, so the move balances.
+  const intoOverridden = tamperPlan({ diff: modified("tests/a.test.mjs", "tests/b.test.mjs"), patch: patchOf({ from: "tests/b.test.mjs", removed: two }, { from: "tests/a.test.mjs", added: two }), body: OVERRIDE });
+  assert.equal(intoOverridden.ok, true);
+  // Within the limit.
+  const loose = workflowWith({ ...TAMPER, assertions: { pattern: "\\bassert\\.", maxNetRemoved: 3 } });
+  assert.equal(tamperPlan({ base: loose, diff: modified("tests/a.test.mjs"), patch: patchOf({ from: "tests/a.test.mjs", removed: two }) }).ok, true);
+});
+
+test("any change to a guarded file fails, both sides of a rename counted", () => {
+  for (const diff of [modified(".claude/workflow.json"), nameStatus(["R100", "vitest.config.ts", "old/vitest.config.ts"]), nameStatus(["D", "vitest.config.ts"])]) {
+    const verdict = tamperPlan({ diff });
+    assert.equal(verdict.ok, false, JSON.stringify(diff));
+    assert.equal(verdict.findings[0].kind, "guarded");
+    assert.match(verdict.output, /is guarded, and this ticket changes it/);
+  }
+  assert.equal(tamperPlan({ diff: modified("src/vitest.config.ts.md") }).ok, true);
+});
+
+test("a change to a guarded script's text fails; the rest of its file is free, and a missing script is a change", () => {
+  const pkg = (scripts, extra = {}) => JSON.stringify({ name: "p", scripts, ...extra });
+  const base = pkg({ test: "node --test", lint: "eslint ." });
+  const at = (head) => ({ "abc123:package.json": base, ...(head === null ? {} : { "HEAD:package.json": head }) });
+  const verdict = tamperPlan({ diff: modified("package.json"), files: at(pkg({ test: "node --test || true", lint: "eslint ." })) });
+  assert.equal(verdict.ok, false);
+  assert.deepEqual(verdict.findings.map((f) => [f.kind, f.path, f.script]), [["script", "package.json", "test"]]);
+  assert.match(verdict.output, /package\.json's "test" script changed/);
+  assert.equal(tamperPlan({ diff: modified("package.json"), files: at(pkg({ test: "node --test", lint: "eslint --fix ." }, { version: "2.0.0" })) }).ok, true);
+  assert.equal(tamperPlan({ diff: modified("package.json"), files: at(pkg({ lint: "eslint ." })) }).ok, false, "the script removed");
+  assert.equal(tamperPlan({ diff: nameStatus(["D", "package.json"]), files: at(null) }).ok, false, "the file deleted");
+  assert.equal(tamperPlan({ diff: modified("package.json"), files: at("{ not json") }).ok, false, "unreadable: never fails open");
+  assert.equal(tamperPlan({ diff: modified("src/a.mjs"), files: {} }).ok, true, "package.json untouched: nothing read");
+});
+
+test("a test override in the ticket body, naming the path as a whole word, lets that path through", () => {
+  const marker = { diff: modified("tests/a.test.mjs"), patch: patchOf({ from: "tests/a.test.mjs", added: ['test.skip("x", () => {});'], removed: ["assert.ok(x);"] }) };
+  const passed = tamperPlan({ ...marker, body: `## What to build\n\nIt.\n\n${OVERRIDE}\n## Areas\n\n- tests/\n` });
+  assert.equal(passed.ok, true, "the marker and the file's assertions both let through");
+  assert.deepEqual(passed.overridden, ["tests/a.test.mjs"]);
+  assert.equal(tamperPlan({ ...marker, body: OVERRIDE.replace(/\n/g, "\r\n") }).ok, true, "a body with CRLF");
+  assert.equal(tamperPlan({ diff: modified("vitest.config.ts"), body: "### Tests removed or weakened:\n- vitest.config.ts, the slow pool goes.\n" }).ok, true, "a guarded file");
+  // Never a near miss: a longer path, a line under another heading, a bare file name.
+  const fenced = "## Notes\n\n```sh\n# Tests removed or weakened\nrm tests/a.test.mjs\n```\n";
+  for (const body of [OVERRIDE.replace("a.test.mjs", "a.test.mjs.bak"), "## Notes\n\n- `tests/a.test.mjs`: flaky.\n", "## Tests removed or weakened\n\n- a.test.mjs: flaky.\n", `${OVERRIDE.split("\n")[0]}\n\n## Areas\n- tests/a.test.mjs\n`, fenced]) {
+    assert.equal(tamperPlan({ ...marker, body }).ok, false, body);
+  }
+  // Only the overridden file leaves the assertion count.
+  const both = tamperPlan({ diff: modified("tests/a.test.mjs", "tests/b.test.mjs"), patch: patchOf({ from: "tests/a.test.mjs", removed: ["assert.ok(1);"] }, { from: "tests/b.test.mjs", removed: ["assert.ok(2);"] }), body: OVERRIDE });
+  assert.deepEqual(both.findings.map((f) => [f.kind, f.removed, f.paths]), [["assertions", 1, ["tests/b.test.mjs"]]]);
+});
+
+test("a reason only in the commit message is refused, and said so for the morning report", () => {
+  const message = "test: drop the flaky case — devlog #9, Closes #7\n\nTests removed or weakened: tests/a.test.mjs, the case was flaky.\n";
+  const verdict = tamperPlan({ diff: modified("tests/a.test.mjs"), patch: patchOf({ from: "tests/a.test.mjs", added: ['test.skip("x", () => {});'] }), message });
+  assert.equal(verdict.ok, false);
+  assert.deepEqual(verdict.refused, ["tests/a.test.mjs"]);
+  assert.match(verdict.output, /A reason in the commit message does not count \(found for tests\/a\.test\.mjs\)/);
+  assert.match(verdict.refusedNote, /The commit message gave a reason for weakening `tests\/a\.test\.mjs`; it was refused/);
+  // Naming the file in a commit message is no reason by itself.
+  assert.deepEqual(tamperPlan({ diff: modified("tests/a.test.mjs"), patch: patchOf({ from: "tests/a.test.mjs", added: ['test.skip("x", () => {});'] }), message: "test: tests/a.test.mjs\n" }).refused, []);
+  // The refusal reaches the morning report whichever way the ticket ends: a built ticket's notes, a
+  // parked or failed one's detail (a runner error's too), through the one place results are recorded.
+  const run = tempRun();
+  run.tamperingNotes = new Map([[14, verdict.refusedNote], [15, verdict.refusedNote]]);
+  recordResult(run, builtResult);
+  recordResult(run, { ...crashResult, number: 15 });
+  recordResult(run, { ...builtResult, number: 16 });
+  assert.deepEqual(run.results.map((r) => [r.notes?.includes(verdict.refusedNote) ?? null, r.detail?.endsWith(verdict.refusedNote) ?? null]), [[true, null], [null, true], [false, null]]);
+  const text = report(run, options, []);
+  assert.equal(text.split(verdict.refusedNote).length - 1, 2, "once under the built ticket, once under the failed one");
+  rmSync(run.dir, { recursive: true, force: true });
+});
+
+test("the rules are the base commit's: a section the ticket loosens is ignored, and a missing or broken one at the base fails", () => {
+  // The ticket rewrote its own rules: the run's copy says anything goes; the base still judges.
+  const loosened = runConfig({ gates: [], tampering: { testFiles: ["nothing/**"] } });
+  const marker = { diff: modified("tests/a.test.mjs", ".claude/workflow.json"), patch: patchOf({ from: "tests/a.test.mjs", added: ['test.only("x", () => {});'] }) };
+  const verdict = tamperPlan({ ...marker, config: loosened });
+  assert.deepEqual(verdict.findings.map((f) => f.kind).sort(), ["guarded", "marker"]);
+  assert.match(verdict.output, /read from the base commit abc123/);
+  for (const [base, why] of [
+    [null, /has no \.claude\/workflow\.json/],
+    ["{ broken", /could not be read as JSON/],
+    [JSON.stringify({ version: 1, phaseRun: {} }), /has no phaseRun\.tampering section, while this run has one/],
+    [workflowWith({ ...TAMPER, markers: [{ name: "skip", pattern: "(" }] }), /phaseRun\.tampering\.markers\[0\]\.pattern is not a valid pattern/],
+  ]) {
+    const broken = tamperPlan({ diff: modified("src/a.mjs"), base });
+    assert.equal(broken.ok, false, String(base));
+    assert.match(broken.problem, why);
+    assert.match(broken.output, /never passes a ticket it cannot judge/);
+  }
+  const noReader = gatePlan({ base: "abc123", diff: modified("src/a.mjs"), config: TAMPER_CONFIG }).tampering;
+  assert.equal(noReader.ok, false, "no reader: never fails open");
+});
+
+test("the tampering verdict is the first gate: nothing else starts, and the browser check is never asked", async () => {
+  const config = runConfig({
+    gates: [{ label: "lint", run: "lint" }, { label: "tests", run: "tests", alone: true }],
+    browserCheck: { screenFiles: "^src/", sourceFiles: "^src/", screenshots: "shots/{N}", minimum: 1, redo: "walk it" },
+    tampering: TAMPER,
+  });
+  const at = { "abc123:.claude/workflow.json": workflowWith(TAMPER) };
+  const plan = gatePlan({ base: "abc123", diff: modified("vitest.config.ts"), config, readAt: (rev, path) => at[`${rev}:${path}`] ?? null });
+  const fake = fakeStart();
+  let asked = false;
+  const cache = mkdtempSync(join(tmpdir(), "tamper-cache-"));
+  try {
+    writeFileSync(join(cache, "kept"), "");
+    const failed = await projectGates(plan, { values: { cache }, browserCheck: () => (asked = true) && null, start: fake.start, tickMs: 5 });
+    assert.equal(failed.gate, "tampering");
+    assert.match(failed.output, /vitest\.config\.ts is guarded/);
+    assert.deepEqual(fake.ran, []);
+    assert.equal(asked, false);
+    assert.equal(existsSync(join(cache, "kept")), true, "it runs before {cache} is even emptied");
+  } finally {
+    rmSync(cache, { recursive: true, force: true });
+  }
+  const clean = gatePlan({ base: "abc123", diff: modified("src/a.ts"), config, readAt: (rev, path) => at[`${rev}:${path}`] ?? null });
+  assert.equal(await projectGates(clean, { values: {}, browserCheck: () => null, start: fake.start, tickMs: 5 }), null);
+  assert.deepEqual(fake.ran.map((r) => r.line), ["lint", "tests"]);
+});
+
+test("the verdict reads real git output: a quoted path, a path with a space, a pure rename", () => {
+  const dir = mkdtempSync(join(tmpdir(), "tamper-git-"));
+  const git = (...args) => {
+    const result = spawnSync("git", args, { cwd: dir, encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout;
+  };
+  git("init", "-q", "-b", "main");
+  git("config", "user.email", "t@example.com");
+  git("config", "user.name", "T");
+  mkdirSync(join(dir, "tests"));
+  mkdirSync(join(dir, ".claude"));
+  writeFileSync(join(dir, ".claude", "workflow.json"), workflowWith(TAMPER));
+  const body = 'test("a", () => {\n  assert.ok(1);\n});\n';
+  for (const name of ["a b.test.mjs", "ü.test.mjs", "moved.test.mjs"]) writeFileSync(join(dir, "tests", name), body);
+  git("add", "-A");
+  git("commit", "-q", "-m", "base");
+  const base = git("rev-parse", "HEAD").trim();
+  writeFileSync(join(dir, "tests", "a b.test.mjs"), body.replace('test("a"', 'test.skip("a"'));
+  writeFileSync(join(dir, "tests", "ü.test.mjs"), body.replace("  assert.ok(1);\n", ""));
+  git("mv", "tests/moved.test.mjs", "tests/renamed.test.mjs");
+  git("commit", "-q", "-am", "work");
+  const readAt = (rev, path) => {
+    const result = spawnSync("git", ["show", `${rev}:${path}`], { cwd: dir, encoding: "utf8" });
+    return result.status === 0 ? result.stdout : null;
+  };
+  const plan = gatePlan({ base, diff: git("diff", "--name-status", "-M", "-z", `${base}..HEAD`), patch: git(...PATCH_ARGS, `${base}..HEAD`), config: TAMPER_CONFIG, readAt });
+  rmSync(dir, { recursive: true, force: true });
+  assert.deepEqual(plan.tampering.findings.map((f) => [f.kind, f.path ?? f.paths.join(",")]), [["marker", "tests/a b.test.mjs"], ["assertions", "tests/ü.test.mjs"]]);
 });
 
 // Runner-seam tests with tiny real jobs: each gate is a `node -e` line, so the parallel group, the

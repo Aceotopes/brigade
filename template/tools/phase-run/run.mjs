@@ -41,6 +41,7 @@ import { LEDGER_PATH, appendRow, ledgerRow, stampVersion } from "./ledger.mjs";
 import { hookTime, loadPrices, sessionCost, stepKind, stepRules, ticketMetrics } from "./metrics.mjs";
 import { finishSnapshot, takeSnapshot } from "./snapshot.mjs";
 import { DEFAULT_RULES as DEFAULT_SIZE, measureTicket as ticketSize } from "./ticket-size.mjs";
+import { PATCH_ARGS, tamperingVerdict } from "./tampering.mjs";
 import { unreadMatcher } from "./unread.mjs";
 import * as docConfig from "../doc-config.mjs";
 
@@ -185,6 +186,12 @@ function git(...args) {
 
 function gitTry(...args) {
   return exec("git", args);
+}
+
+/** A file's text at a commit, or null when it isn't there (or can't be read): the tampering gate's reader. */
+function atCommit(rev, path) {
+  const result = gitTry("show", `${rev}:${path}`);
+  return result.ok ? result.stdout : null;
 }
 
 function gh(...args) {
@@ -1409,13 +1416,16 @@ function diffPaths(nameStatus) {
 }
 
 /**
- * Which of the project's gates run on this ticket, and which skip: the one decision function
- * (#20 adds the tampering verdict to it). `diff` is `git diff --name-status -M -z <base>..HEAD`.
+ * Which of the project's gates run on this ticket, which skip, and the tampering verdict: the one
+ * decision function. `diff` is `git diff --name-status -M -z <base>..HEAD`.
  * A gate skips on `when` when no changed path matches it, and on `unreadOf` (the suite skip, D13)
  * when the diff is non-empty and every path is on that stop check's `unread` list, through the
  * one matcher (unread.mjs). An empty diff never takes the suite skip.
+ * `tampering` (D15, tampering.mjs) is null when the run has no tampering section; its rules are read
+ * at `base` through `readAt(rev, path)`, from the `patch` (PATCH_ARGS), the ticket `body` as fetched
+ * at run start and the commit `message`.
  */
-function gatePlan({ base, diff, config: { gates, stopChecks = [] } }) {
+function gatePlan({ base, diff, config: { gates, stopChecks = [], tampering = null }, patch = "", readAt = null, body = "", message = "" }) {
   const paths = diffPaths(diff);
   const unread = new Map(stopChecks.filter((check) => check.name).map((check) => [check.name, unreadMatcher(check.unread)]));
   const skipOf = (gate) => {
@@ -1424,8 +1434,19 @@ function gatePlan({ base, diff, config: { gates, stopChecks = [] } }) {
     if (gate.unreadOf && paths.length > 0 && paths.every(unread.get(gate.unreadOf))) return "unreadOf";
     return null;
   };
-  return { base, paths, gates: gates.map((gate) => ({ gate, skip: skipOf(gate) })) };
+  return {
+    base,
+    paths,
+    gates: gates.map((gate) => ({ gate, skip: skipOf(gate) })),
+    tampering: tamperingVerdict({ base, rules: tampering, paths, patch, readAt, body, message }),
+  };
 }
+
+/** Why a gate skipped, by `gatePlan`'s skip: one line each, so a new skip can't borrow another's words. */
+const SKIP_REASONS = {
+  when: () => "no changed file matches its `when`",
+  unreadOf: (gate) => `every changed file is on the ${gate.unreadOf} check's unread list (the suite skip)`,
+};
 
 /**
  * Runs `gates` side by side (D12): every one without a pending `after` starts at once, and an
@@ -1475,13 +1496,14 @@ async function gateGroup(gates, { values, start, tickMs }) {
 }
 
 /**
- * The project's gates (phaseRun.gates), as `gatePlan` decided them: the parallel group first, then
- * each `alone` gate by itself (strays stopped first), then the browser check, wherever the config
- * places it. The first failure is returned as `{ gate, output }`, or null. `{cache}` is emptied
- * before any gate starts. The job starter and the side jobs are parameters, so a test can stand in
- * for them.
+ * The project's gates (phaseRun.gates), as `gatePlan` decided them: the tampering verdict first (D12),
+ * then the parallel group, then each `alone` gate by itself (strays stopped first), then the browser
+ * check, wherever the config places it. The first failure is returned as `{ gate, output }`, or null.
+ * `{cache}` is emptied before any gate starts. The job starter and the side jobs are parameters, so
+ * a test can stand in for them.
  */
 async function projectGates(plan, { values, browserCheck, start = startJob, tickMs = GATE_TICK_MS, freePorts = freeTicketPorts, stopStray: stop = () => 0 }) {
+  if (plan.tampering && !plan.tampering.ok) return { gate: "tampering", output: plan.tampering.output };
   if (values.cache) {
     rmSync(values.cache, { recursive: true, force: true });
     mkdirSync(values.cache, { recursive: true });
@@ -1537,12 +1559,23 @@ async function runGates(ticket, base, options, run, startedAt) {
     return fail("docs", "The commit adds no docs/history/implementation-log/NNN-*.md entry. Every ticket gets one, in full.");
   }
 
-  // One rename-aware diff decides every gate's skip and feeds the browser check, so they agree.
-  const plan = gatePlan({ base, diff: git("diff", "--name-status", "-M", "-z", `${base}..HEAD`), config });
+  // One rename-aware diff decides every gate's skip and feeds the browser check, so they agree. The
+  // tampering verdict reads its rules at the base, never from the tree the ticket could edit.
+  const plan = gatePlan({
+    base,
+    diff: git("diff", "--name-status", "-M", "-z", `${base}..HEAD`),
+    config,
+    ...(config.tampering ? { patch: git(...PATCH_ARGS, `${base}..HEAD`), readAt: atCommit, body: ticket.body ?? "", message } : {}),
+  });
   const changed = plan.paths;
   for (const { gate, skip } of plan.gates.filter((g) => g.skip)) {
-    const why = skip === "when" ? "no changed file matches its `when`" : `every changed file is on the ${gate.unreadOf} check's unread list (the suite skip)`;
-    log(`#${n}: the ${gate.label} gate is skipped: ${why}.`, { routine: true });
+    log(`#${n}: the ${gate.label} gate is skipped: ${SKIP_REASONS[skip](gate)}.`, { routine: true });
+  }
+  if (plan.tampering?.overridden.length) log(`#${n}: the tampering gate let ${plan.tampering.overridden.join(", ")} through, by the ticket's test override.`);
+  if (plan.tampering?.refusedNote) {
+    // Kept for the result (recordResult), whichever round or gate ends the ticket.
+    run.tamperingNotes ??= new Map();
+    run.tamperingNotes.set(n, plan.tampering.refusedNote);
   }
   const failed = await projectGates(plan, {
     values: { base, N: n, qaUrl: qaUrl(config, lookup), cache: GATE_CACHE },
@@ -1658,12 +1691,24 @@ function saveResults(run) {
  * runner's own error.
  */
 function recordResult(run, result, at = Date.now()) {
-  const stamped = { ...result, runId: run.runId, reported: false };
+  const stamped = { ...withTamperingNote(run, result), runId: run.runId, reported: false };
   recordNight(run, stamped, at);
   run.results.push(stamped);
   run.all.push(stamped);
   saveResults(run);
   return stamped;
+}
+
+/**
+ * A result with the tampering gate's refusal of a commit-message reason, if any round of this ticket
+ * had one: a built ticket's notes, or a parked or failed ticket's detail (the report renders no notes
+ * for those). Kept even when a later round passed, since the session tried to excuse itself.
+ */
+function withTamperingNote(run, result) {
+  const note = run.tamperingNotes?.get(result.number);
+  if (!note) return result;
+  if (result.status === "built") return { ...result, notes: [...(result.notes ?? []), note] };
+  return { ...result, detail: `${result.detail ?? ""}\n\n${note}` };
 }
 
 /**

@@ -27,7 +27,8 @@
 // (JSON has no comments). Every other key is checked, so a typo fails loudly instead of turning a
 // rule off, except inside `phaseRun`, which belongs to the phase runner and is checked by its
 // preflight (template/tools/phase-run/config.mjs); only a gate's `after` or `unreadOf` that names
-// nothing is refused here too, with the runner's words. The rules the workflow itself needs (no --no-verify, no trailer, the phase-run
+// nothing, and any fault in `phaseRun.tampering` (the tampering gate's rules, which must never be
+// read as none), are refused here too, with the runner's words. The rules the workflow itself needs (no --no-verify, no trailer, the phase-run
 // discipline) stay in guard-shell.mjs; this file holds only one project's habits.
 import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -141,6 +142,8 @@ export function parseWorkflowConfig(data) {
   receiptFiles(checks, "stopGate.checks");
   // The one look inside `phaseRun`: a gate's `after` or `unreadOf` that names nothing (D13).
   gateReferences(data.phaseRun?.gates, checks.map((check) => check.name).filter(Boolean), "phaseRun.gates");
+  // And the tampering section, in full (D15): a broken rule must stop the night wherever it is read.
+  tamperingRules(data.phaseRun?.tampering, "phaseRun.tampering");
   return { rules, checks, wrappers: wrappers.map((w) => w.trim()), ledger };
 }
 
@@ -174,6 +177,76 @@ function parseLedger(ledger) {
     throw new Error(`ledger.weekStarts must be a day in lowercase, one of ${WEEK_DAYS.join(", ")} (it is ${JSON.stringify(ledger.weekStarts)}).`);
   }
   return { attended: ledger.attended ?? DEFAULT_LEDGER.attended, weekStarts: ledger.weekStarts ?? DEFAULT_LEDGER.weekStarts };
+}
+
+/**
+ * The `phaseRun.tampering` section (D15), or null when there is none: no section, no tampering gate.
+ * Both loaders hold this function word for word (template/tools/phase-run/config.mjs and
+ * hooks/workflow-config.mjs), so what one refuses the other refuses alike. Markers or assertions
+ * with no test files would match nothing, a gate that quietly passes everything, so they are refused.
+ */
+function tamperingRules(section, where) {
+  if (section === undefined) return null;
+  const object = (value, at, allowed) => {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error(`${at} must be an object.`);
+    const unknown = Object.keys(value).filter((key) => key !== "note" && !allowed.includes(key));
+    if (unknown.length) throw new Error(`${at} has unknown key(s) ${unknown.join(", ")}; allowed: ${allowed.join(", ")}.`);
+    return value;
+  };
+  const rows = (value, at) => {
+    if (value === undefined) return [];
+    if (!Array.isArray(value)) throw new Error(`${at} must be a list.`);
+    return value;
+  };
+  const words = (value, at) => {
+    if (typeof value !== "string" || !value.trim()) throw new Error(`${at} is missing.`);
+    return value;
+  };
+  // Paths are matched as git prints them, from the root: `./package.json` or `../x` would match nothing.
+  const repoPath = (value, at, example) => {
+    if (typeof value !== "string" || !value.trim() || value !== value.trim() || /^\.?\//.test(value) || value.split("/").includes("..")) {
+      throw new Error(`${at} must be a path from the repo's root, such as "${example}".`);
+    }
+    return value;
+  };
+  const globs = (value, at) => rows(value, at).map((entry, i) => repoPath(entry, `${at}[${i}]`, "**/*.test.mjs"));
+  const regex = (source, at) => {
+    if (typeof source !== "string" || !source) throw new Error(`${at} must be a pattern (a regex, as a string).`);
+    try {
+      return new RegExp(source);
+    } catch (error) {
+      throw new Error(`${at} is not a valid pattern: ${error.message}`);
+    }
+  };
+  object(section, where, ["testFiles", "markers", "assertions", "guarded", "guardedScripts", "override"]);
+  const testFiles = globs(section.testFiles, `${where}.testFiles`);
+  const markers = rows(section.markers, `${where}.markers`).map((row, i) => {
+    const at = `${where}.markers[${i}]`;
+    object(row, at, ["name", "pattern"]);
+    return { name: words(row.name, `${at}.name`), pattern: regex(row.pattern, `${at}.pattern`) };
+  });
+  let assertions = null;
+  if (section.assertions !== undefined) {
+    const at = `${where}.assertions`;
+    object(section.assertions, at, ["pattern", "maxNetRemoved"]);
+    const max = section.assertions.maxNetRemoved;
+    if (!Number.isInteger(max) || max < 0) throw new Error(`${at}.maxNetRemoved must be a whole number, 0 or more (it is ${JSON.stringify(max)}).`);
+    assertions = { pattern: regex(section.assertions.pattern, `${at}.pattern`), maxNetRemoved: max };
+  }
+  if ((markers.length > 0 || assertions) && testFiles.length === 0) {
+    throw new Error(`${where}.testFiles is empty, so its markers and assertions would match no file: list the test files' globs, such as "**/*.test.mjs".`);
+  }
+  const guardedScripts = rows(section.guardedScripts, `${where}.guardedScripts`).map((row, i) => {
+    const at = `${where}.guardedScripts[${i}]`;
+    object(row, at, ["file", "script"]);
+    return { file: repoPath(row.file, `${at}.file`, "package.json"), script: words(row.script, `${at}.script`) };
+  });
+  let override = null;
+  if (section.override !== undefined) {
+    object(section.override, `${where}.override`, ["heading"]);
+    override = { heading: words(section.override.heading, `${where}.override.heading`).trim() };
+  }
+  return { testFiles, markers, assertions, guarded: globs(section.guarded, `${where}.guarded`), guardedScripts, override };
 }
 
 /**

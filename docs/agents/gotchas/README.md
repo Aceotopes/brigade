@@ -20,4 +20,5 @@ plain. The index below is generated.
 - `#17` per-check receipts, `template/tools/phase-run/unread.mjs` `unreadMatcher`, `receipt.mjs` `treeKeys` / `receiptGroups`, `hooks/stop-gate.mjs`
 - `#19` gates side by side, `template/tools/phase-run/run.mjs` `gatePlan` / `gateGroup` / `projectGates` / `startJob`, `config.mjs` `gateReferences` / `gateOrder`
 - `#18` update's offers, `scripts/setup.mjs` `ROW_OFFERS` / `rowOffers` / `refresh` `onlyAccepted`, `update` `offers`
+- `#20` the tampering gate, `template/tools/phase-run/tampering.mjs` `tamperingVerdict` / `patchFiles` / `namesPath`, `config.mjs` and `hooks/workflow-config.mjs` `tamperingRules`
 <!-- generated:end gotchas -->

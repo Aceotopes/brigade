@@ -125,3 +125,24 @@ listed in the gotchas index, `docs/agents/gotchas/README.md`.
 - The prompt's `STOP_CHECKS` (`run.mjs` `stopCheckLine`) names `stop-tests.mjs` once, since it runs
   every receipt row. Splitting it per row repeats the command. pinned: `measure.test.mjs`.
 - The runner loader's `error` is `null` on success, never `undefined`: assert `!error`.
+
+**`#20` — the tampering gate, `template/tools/phase-run/tampering.mjs` `tamperingVerdict` / `patchFiles` / `namesPath`, `config.mjs` and `hooks/workflow-config.mjs` `tamperingRules` (built 2026-11-08):**
+- `tamperingRules` is one text in both loaders, compared whole by `tests/phase-run-config.test.mjs`.
+  Edit both alike; config.mjs exports it with a separate `export { tamperingRules }` line so the
+  function's text stays the hooks'. `hooks/workflow-config.mjs` is CRLF; config.mjs is LF.
+- Unlike #19's narrow rule, the hooks refuse **any** fault in `phaseRun.tampering`: a broken rule
+  must never read as "no rules". It blocks every shell command in a session until fixed. That is by
+  design.
+- The run's config (the snapshot) only switches the gate on; the rules are read at the base through
+  `readAt`. Never judge with `config.tampering`'s own patterns. pinned: `run.test.mjs` ("the rules
+  are the base commit's").
+- `git diff -U0` headers: git adds a tab after a path with a space and C-quotes an unusual one
+  (`"a/tests/\303\274.test.mjs"`). Always diff with `PATCH_ARGS` (pinned prefixes, no colour, no
+  external driver), or an owner's `diff.noprefix` breaks the parse. pinned: `run.test.mjs` (real git).
+- The runner's `exec` trims stdout. Harmless for the patch and for `git show` of JSON, but don't
+  compare raw file text through `atCommit`.
+- A refused commit-message reason lives on `run.tamperingNotes` (a Map, not saved), and joins the
+  result only in `recordResult` (`withTamperingNote`): `notes` when built, `detail` otherwise, since
+  parked and failed results render no notes. Never add it at a call site. pinned: `run.test.mjs`.
+- A pure rename has no `---`/`+++` lines, only `rename from`/`rename to`: read those, or a test file
+  renamed out of `testFiles` drops its assertions uncounted. pinned: `run.test.mjs`.

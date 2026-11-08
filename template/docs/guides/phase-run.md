@@ -182,6 +182,9 @@ The runner knows only the workflow. Everything about your project is in `.claude
   stopped first (a suite that owns ports or a database); `unreadOf: "<stop check name>"` skips a
   gate when every changed file is on that check's `unread` list (the suite skip); `{cache}` in a
   command is a folder emptied before the gates run, for a tool's cache flag.
+- `phaseRun.tampering`: the first gate, read from the ticket's base commit. It fails added skip
+  `markers` in `testFiles`, a net loss of `assertions`, or a change to a `guarded` file or script; a
+  line naming the file under the ticket's `override.heading`, written before the run, lets it through.
 - `phaseRun.preflight` and `phaseRun.ports`: what must be running, and what must be free, before a
   run starts.
 - `phaseRun.qa`, `sessionEnv`, `migrations`: the databases above, and the values pinned in a session.
@@ -289,7 +292,7 @@ Useful options:
    exactly this code (their receipt) are not run again. The script waits for that check to end
    before it does anything of its own, and its own checks trust no receipt.
 6. The script itself then checks, in order: exactly one commit, nothing left uncommitted, an
-   implementation log; then your project's gates (`phaseRun.gates`: typically typecheck, lint and a
+   implementation log; then the tampering gate and your project's gates (`phaseRun.gates`: typically typecheck, lint and a
    build when the ticket touched what it compiles, side by side, then the whole test suite alone,
    then the browser check's screenshots). The first failure stops the rest; then the docs check. If the ticket added a migration, it is applied to the migration
    target last, once everything else is green.

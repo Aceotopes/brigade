@@ -23,6 +23,10 @@
 //                                                   (metrics.mjs); tested before Brigade's own rows
 //     "ticketSize": [{ "key", "kind", "section"?, "max", "label" }]   the size budget /ticket-check warns on
 //                                                   (ticket-size.mjs); left out, Brigade's defaults
+//     "tampering": { "testFiles"?, "markers"?: [{ "name", "pattern" }], "assertions"?: { "pattern", "maxNetRemoved" },
+//                    "guarded"?, "guardedScripts"?: [{ "file", "script" }], "override"?: { "heading" } }
+//                                                   the tampering gate (tampering.mjs), first of the gates;
+//                                                   its rules are read from the base commit, never the tree
 //   }
 //
 // The top-level `ledger` section, `{ "attended"?, "weekStarts"? }` (ledger.mjs), is read here too,
@@ -53,7 +57,7 @@ export const WEEK_DAYS = ["sunday", "monday", "tuesday", "wednesday", "thursday"
 export const DEFAULT_LEDGER = { attended: true, weekStarts: "monday" };
 
 const KEYS = {
-  phaseRun: ["prompt", "preflight", "ports", "qa", "sessionEnv", "strayProcess", "gates", "browserCheck", "migrations", "alwaysInScope", "permissions", "steps", "ticketSize"],
+  phaseRun: ["prompt", "preflight", "ports", "qa", "sessionEnv", "strayProcess", "gates", "browserCheck", "migrations", "alwaysInScope", "permissions", "steps", "ticketSize", "tampering"],
   preflight: ["label", "run", "hint"],
   port: ["port", "what", "freeAfterEachTicket"],
   qa: ["name", "url"],
@@ -147,9 +151,13 @@ export function parseRunConfig(data) {
     steps: list(run.steps, `${where}.steps`).map((row, i) => parseStep(row, `${where}.steps[${i}]`)),
     ticketSize: run.ticketSize === undefined ? null : list(run.ticketSize, `${where}.ticketSize`).map((row, i) => parseSizeRule(row, `${where}.ticketSize[${i}]`)),
     stopChecks,
+    tampering: tamperingRules(run.tampering, `${where}.tampering`),
     ledger: parseLedger(data?.ledger),
   };
 }
+
+// tampering.mjs reads the base commit's section through this same function.
+export { tamperingRules };
 
 /**
  * The top-level `ledger` section, `{ attended?, weekStarts? }`: checked here as the hooks check it
@@ -163,6 +171,76 @@ export function parseLedger(ledger) {
     throw new Error(`ledger.weekStarts must be a day in lowercase, one of ${WEEK_DAYS.join(", ")} (it is ${JSON.stringify(ledger.weekStarts)}).`);
   }
   return { attended: ledger.attended ?? DEFAULT_LEDGER.attended, weekStarts: ledger.weekStarts ?? DEFAULT_LEDGER.weekStarts };
+}
+
+/**
+ * The `phaseRun.tampering` section (D15), or null when there is none: no section, no tampering gate.
+ * Both loaders hold this function word for word (template/tools/phase-run/config.mjs and
+ * hooks/workflow-config.mjs), so what one refuses the other refuses alike. Markers or assertions
+ * with no test files would match nothing, a gate that quietly passes everything, so they are refused.
+ */
+function tamperingRules(section, where) {
+  if (section === undefined) return null;
+  const object = (value, at, allowed) => {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error(`${at} must be an object.`);
+    const unknown = Object.keys(value).filter((key) => key !== "note" && !allowed.includes(key));
+    if (unknown.length) throw new Error(`${at} has unknown key(s) ${unknown.join(", ")}; allowed: ${allowed.join(", ")}.`);
+    return value;
+  };
+  const rows = (value, at) => {
+    if (value === undefined) return [];
+    if (!Array.isArray(value)) throw new Error(`${at} must be a list.`);
+    return value;
+  };
+  const words = (value, at) => {
+    if (typeof value !== "string" || !value.trim()) throw new Error(`${at} is missing.`);
+    return value;
+  };
+  // Paths are matched as git prints them, from the root: `./package.json` or `../x` would match nothing.
+  const repoPath = (value, at, example) => {
+    if (typeof value !== "string" || !value.trim() || value !== value.trim() || /^\.?\//.test(value) || value.split("/").includes("..")) {
+      throw new Error(`${at} must be a path from the repo's root, such as "${example}".`);
+    }
+    return value;
+  };
+  const globs = (value, at) => rows(value, at).map((entry, i) => repoPath(entry, `${at}[${i}]`, "**/*.test.mjs"));
+  const regex = (source, at) => {
+    if (typeof source !== "string" || !source) throw new Error(`${at} must be a pattern (a regex, as a string).`);
+    try {
+      return new RegExp(source);
+    } catch (error) {
+      throw new Error(`${at} is not a valid pattern: ${error.message}`);
+    }
+  };
+  object(section, where, ["testFiles", "markers", "assertions", "guarded", "guardedScripts", "override"]);
+  const testFiles = globs(section.testFiles, `${where}.testFiles`);
+  const markers = rows(section.markers, `${where}.markers`).map((row, i) => {
+    const at = `${where}.markers[${i}]`;
+    object(row, at, ["name", "pattern"]);
+    return { name: words(row.name, `${at}.name`), pattern: regex(row.pattern, `${at}.pattern`) };
+  });
+  let assertions = null;
+  if (section.assertions !== undefined) {
+    const at = `${where}.assertions`;
+    object(section.assertions, at, ["pattern", "maxNetRemoved"]);
+    const max = section.assertions.maxNetRemoved;
+    if (!Number.isInteger(max) || max < 0) throw new Error(`${at}.maxNetRemoved must be a whole number, 0 or more (it is ${JSON.stringify(max)}).`);
+    assertions = { pattern: regex(section.assertions.pattern, `${at}.pattern`), maxNetRemoved: max };
+  }
+  if ((markers.length > 0 || assertions) && testFiles.length === 0) {
+    throw new Error(`${where}.testFiles is empty, so its markers and assertions would match no file: list the test files' globs, such as "**/*.test.mjs".`);
+  }
+  const guardedScripts = rows(section.guardedScripts, `${where}.guardedScripts`).map((row, i) => {
+    const at = `${where}.guardedScripts[${i}]`;
+    object(row, at, ["file", "script"]);
+    return { file: repoPath(row.file, `${at}.file`, "package.json"), script: words(row.script, `${at}.script`) };
+  });
+  let override = null;
+  if (section.override !== undefined) {
+    object(section.override, `${where}.override`, ["heading"]);
+    override = { heading: words(section.override.heading, `${where}.override.heading`).trim() };
+  }
+  return { testFiles, markers, assertions, guarded: globs(section.guarded, `${where}.guarded`), guardedScripts, override };
 }
 
 /**

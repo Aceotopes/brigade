@@ -9,6 +9,20 @@ Each commit's entry goes on top, in the shape of `docs/_templates/devlog-entry.m
 message cites it (`devlog #N`). At each phase end, `node tools/doc-rotate.mjs` moves the closed
 entries into `docs/history/devlog/`.
 
+## #14 · feat · the tampering gate
+
+**Built:**
+- `phaseRun.tampering`: markers, an assertion balance, guarded files and scripts, an override
+  heading. Both loaders check it with one `tamperingRules` text; a bad regex is refused.
+- `tampering.mjs`: the verdict over a `-U0 -M` patch, joined to `gatePlan`. The rules are read from
+  the base commit; a section missing or broken there fails, never passes.
+- A test override in the ticket body lets a path through; a commit-message reason is refused and
+  reported. `projectGates` runs it first; skip reasons became a map.
+**Verified:** fixture diffs for each marker, assertions removed, balanced and moved, a guarded file
+and script, an override and near misses, a commit-message reason, loosened rules (base wins), a
+broken base; real git output; both loaders' words; full stop-check suite. Backend only.
+**Next:** #22 writes a project's tampering rows. **Record:** implementation log 009.
+
 ## #13 · feat · /update-workflow offers 0.6.0's rows
 
 **Built:**

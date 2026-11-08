@@ -167,6 +167,74 @@ test("both loaders refuse a malformed ledger section alike", () => {
   }
 });
 
+// 0.6.0 (#20, D15): `phaseRun.tampering` is checked in full by both loaders, with the same words: a
+// broken rule must stop the night wherever the file is read, never be quietly skipped. This is the
+// one part of phaseRun the hooks refuse on any shape.
+const withTampering = (tampering) => ({ version: 1, phaseRun: { tampering } });
+const TAMPERING = {
+  testFiles: ["**/*.test.mjs"],
+  markers: [{ name: "skip", pattern: "\\.skip\\(" }, { name: "only", pattern: "\\.only\\(", note: "node:test's focus" }],
+  assertions: { pattern: "\\bassert\\.", maxNetRemoved: 0 },
+  guarded: [".claude/workflow.json", "package.json"],
+  guardedScripts: [{ file: "package.json", script: "test" }],
+  override: { heading: "Tests removed or weakened" },
+};
+
+test("both loaders accept the tampering section; no section means no tampering gate", () => {
+  assert.doesNotThrow(() => parseWorkflowConfig(withTampering(TAMPERING)));
+  const rules = parseRunConfig(withTampering(TAMPERING)).tampering;
+  assert.deepEqual(rules.markers.map((m) => [m.name, m.pattern.source]), [["skip", "\\.skip\\("], ["only", "\\.only\\("]]);
+  assert.deepEqual([rules.assertions.maxNetRemoved, rules.guarded, rules.guardedScripts, rules.override], [0, TAMPERING.guarded, TAMPERING.guardedScripts, TAMPERING.override]);
+  assert.equal(parseRunConfig({ version: 1 }).tampering, null);
+  assert.equal(parseRunConfig({ version: 1, phaseRun: {} }).tampering, null);
+  // Only guarded files: no test files needed.
+  assert.deepEqual(parseRunConfig(withTampering({ guarded: ["vitest.config.ts"] })).tampering.testFiles, []);
+});
+
+test("both loaders refuse a bad tampering section, a bad regex among it, with the same words", () => {
+  const cases = [
+    [{ ...TAMPERING, markers: [{ name: "skip", pattern: "(" }] }, /^phaseRun\.tampering\.markers\[0\]\.pattern is not a valid pattern: /],
+    [{ ...TAMPERING, assertions: { pattern: "[", maxNetRemoved: 0 } }, /^phaseRun\.tampering\.assertions\.pattern is not a valid pattern: /],
+    [{ ...TAMPERING, assertions: { pattern: "assert", maxNetRemoved: -1 } }, /assertions\.maxNetRemoved must be a whole number, 0 or more \(it is -1\)\./],
+    [{ ...TAMPERING, assertions: { pattern: "assert" } }, /assertions\.maxNetRemoved must be a whole number/],
+    [{ ...TAMPERING, markers: [{ pattern: "x" }] }, /^phaseRun\.tampering\.markers\[0\]\.name is missing\.$/],
+    [{ ...TAMPERING, markers: [{ name: "skip", regex: "x" }] }, /markers\[0\] has unknown key\(s\) regex; allowed: name, pattern\./],
+    [{ ...TAMPERING, guardedScript: [] }, /^phaseRun\.tampering has unknown key\(s\) guardedScript; allowed: testFiles, markers, assertions, guarded, guardedScripts, override\.$/],
+    [{ ...TAMPERING, guardedScripts: [{ file: "package.json" }] }, /guardedScripts\[0\]\.script is missing\./],
+    [{ ...TAMPERING, guarded: "package.json" }, /^phaseRun\.tampering\.guarded must be a list\.$/],
+    [{ ...TAMPERING, testFiles: [" **/*.test.mjs"] }, /testFiles\[0\] must be a path from the repo's root, such as "\*\*\/\*\.test\.mjs"\./],
+    // As git prints a path, from the root: these would match nothing, a rule quietly off.
+    [{ ...TAMPERING, guarded: ["./vitest.config.ts"] }, /guarded\[0\] must be a path from the repo's root/],
+    [{ ...TAMPERING, guarded: ["../shared/vitest.config.ts"] }, /guarded\[0\] must be a path from the repo's root/],
+    [{ ...TAMPERING, guardedScripts: [{ file: "./package.json", script: "test" }] }, /guardedScripts\[0\]\.file must be a path from the repo's root, such as "package\.json"\./],
+    [{ ...TAMPERING, testFiles: [] }, /testFiles is empty, so its markers and assertions would match no file/],
+    [{ ...TAMPERING, override: { heading: " " } }, /override\.heading is missing\./],
+    [[], /^phaseRun\.tampering must be an object\.$/],
+  ];
+  for (const [tampering, error] of cases) {
+    const messages = [() => parseWorkflowConfig(withTampering(tampering)), () => parseRunConfig(withTampering(tampering))].map((load) => {
+      try {
+        load();
+      } catch (thrown) {
+        return thrown.message;
+      }
+      return "(loaded)";
+    });
+    assert.match(messages[0], error, `hooks: ${JSON.stringify(tampering)}`);
+    assert.equal(messages[1], messages[0], "the runner's words are the hooks'");
+  }
+});
+
+test("the two loaders' tamperingRules are one text, word for word", () => {
+  const body = (file) => {
+    const text = readFileSync(join(PLUGIN, file), "utf8").replace(/\r\n/g, "\n");
+    const start = text.indexOf("function tamperingRules(");
+    assert.notEqual(start, -1, file);
+    return text.slice(start, text.indexOf("\n}\n", start));
+  };
+  assert.equal(body("template/tools/phase-run/config.mjs"), body("hooks/workflow-config.mjs"));
+});
+
 test("Steak To Juan's example holds exactly what run.mjs hardcoded", () => {
   const stj = parseRunConfig(STJ);
   const lookup = (name) => ({ NEON_TEST_DATABASE_URL: "postgresql://u:p@localhost:5432/stj_test", NEON_DATABASE_URL: "postgresql://u:p@ep-cool-1-pooler.ap.aws.neon.tech/db" })[name];
