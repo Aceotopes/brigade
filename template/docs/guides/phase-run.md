@@ -164,10 +164,14 @@ The runner knows only the workflow. Everything about your project is in `.claude
   passed. An optional `"quiet": { "totals", "failures" }` pair of patterns on that row says which
   lines of the test output a session needs (for vitest, `^\s*(Test Files|Tests|Duration)\s` and
   `^\s*FAIL\s`); without it the session sees the last lines of a pass and the tail of a failure.
-  An `"unread"` list of git globs on that row names what the tests never read (setup writes
-  `["docs/**", "*.md"]`; `*.md` is the root only), so a session's devlog written after the pass
-  keeps the receipt. The config refuses a glob that names no folder or file, such as `**`. Each
-  stop check logs `"receipt": "held"`, `"stale"` or `"none"` in `.phase-run/stop-check-log.jsonl`.
+  An `"unread"` list of globs on that row names what the tests never read (setup writes
+  `["docs/**", "*.md"]`; `*.md` is the root only, `**/*.md` every folder's, and a leading `!` puts
+  a path back), so a session's devlog written after the pass keeps the receipt. Any other row may
+  carry `"receipt": true` and its own `"unread"` too (typecheck and lint with `["**/*.md"]`, say),
+  plus a `"name"`: each keeps its own receipt, `.phase-run/<name>-receipt-<ticket>.json` (rows
+  without a name share `test-receipt-<ticket>.json`, and so one list). The config refuses a glob
+  that names no folder or file, such as `**`. Each stop check logs `"receipt": "held"`, `"stale"`
+  or `"none"`, and the checks it skipped, in `.phase-run/stop-check-log.jsonl`.
 - `phaseRun.steps`: `{ "kind", "match" }` rows that name what a session's commands were (your
   browser walks as `browser`, say), for the report's time split.
 - `phaseRun.ticketSize`: the size budget `/ticket-check` warns on (`checkboxes` or `bullets` under a

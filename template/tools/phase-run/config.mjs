@@ -127,9 +127,11 @@ export function parseRunConfig(data) {
     steps: list(run.steps, `${where}.steps`).map((row, i) => parseStep(row, `${where}.steps[${i}]`)),
     ticketSize: run.ticketSize === undefined ? null : list(run.ticketSize, `${where}.ticketSize`).map((row, i) => parseSizeRule(row, `${where}.ticketSize[${i}]`)),
     // The hooks check stopGate (hooks/workflow-config.mjs); a bad pattern here only falls back to the plain tail.
-    // `unread` is checked here too, as the hooks check it: it decides what the receipt vouches for.
-    stopChecks: sharedUnread(
+    // `name` and `unread` are checked here too, as the hooks check them: they decide which receipt a
+    // check keeps and what it vouches for.
+    stopChecks: receiptFiles(
       list(data?.stopGate?.checks, "stopGate.checks").map((check, i) => ({
+        name: checkName(check, `stopGate.checks[${i}]`),
         label: String(check.label),
         run: String(check.run),
         receipt: check.receipt === true,
@@ -157,33 +159,60 @@ export function parseLedger(ledger) {
 }
 
 /**
- * A row's unread paths: git globs the receipt's key leaves out, only on a row with "receipt": true. A
- * glob that names no folder or file (`**`, `*.*`, `.`) could leave out every file, so no edit would make
- * the receipt stale; one that leaves the repo is one git refuses.
+ * A row's name, or null: it names the row's receipt file (`.phase-run/<name>-receipt-<ticket>.json`),
+ * so it is a plain lowercase word, and never `test`, the file rows without a name share.
+ */
+function checkName(check, where) {
+  if (check.name === undefined) return null;
+  if (typeof check.name !== "string" || !check.name) throw new Error(`${where}.name must be text, such as "tests".`);
+  if (!/^[a-z0-9][a-z0-9_-]*$/.test(check.name)) {
+    throw new Error(`${where}.name "${check.name}" must be lowercase letters, digits, "-" or "_", starting with a letter or digit: it names the check's receipt file.`);
+  }
+  if (check.name === "test") throw new Error(`${where}.name "test" is the one rows without a name share (test-receipt-<ticket>.json); choose another, such as "tests".`);
+  return check.name;
+}
+
+/**
+ * A row's unread paths: globs its receipt's key leaves out, only on a row with "receipt": true. A
+ * leading `!` puts paths back, and what follows it is held to the same rules. A glob that names no
+ * folder or file (`**`, `*.*`, `.`) could leave out every file, so no edit would make the receipt
+ * stale; one that leaves the repo could match nothing in it.
  */
 function unreadList(check, where) {
   if (check.unread === undefined) return [];
-  if (check.receipt !== true) throw new Error(`${where}.unread belongs on the tests' row, the one with "receipt": true.`);
-  if (!Array.isArray(check.unread)) throw new Error(`${where}.unread must be a list of git globs, such as ["docs/**", "*.md"].`);
-  check.unread.forEach((glob, j) => {
+  if (check.receipt !== true) throw new Error(`${where}.unread belongs on a row with "receipt": true, whose receipt it keeps.`);
+  if (!Array.isArray(check.unread)) throw new Error(`${where}.unread must be a list of globs, such as ["docs/**", "*.md"].`);
+  check.unread.forEach((entry, j) => {
     const at = `${where}.unread[${j}]`;
-    if (typeof glob !== "string" || !glob.trim()) throw new Error(`${at} must be a git glob, such as "docs/**".`);
-    if (glob !== glob.trim()) throw new Error(`${at} "${glob}" has spaces around it, which git would match as written.`);
-    if (/^\.?\//.test(glob) || glob.split("/").includes("..")) throw new Error(`${at} "${glob}" must be a path inside the repo, from its root, such as "docs/**".`);
+    if (typeof entry !== "string" || !entry.trim()) throw new Error(`${at} must be a glob, such as "docs/**".`);
+    if (entry !== entry.trim()) throw new Error(`${at} "${entry}" has spaces around it, which would be matched as written.`);
+    const glob = entry.replace(/^!/, "");
+    if (/^\.?\//.test(glob) || glob.split("/").includes("..")) throw new Error(`${at} "${entry}" must be a path inside the repo, from its root, such as "docs/**".`);
     if (!/[\p{L}\p{N}]/u.test(glob)) {
-      throw new Error(`${at} "${glob}" names no folder or file, so it could leave out every file; name only what the tests never read, such as "docs/**".`);
+      throw new Error(`${at} "${entry}" names no folder or file, so it could leave out every file; name only what the check never reads, such as "docs/**".`);
     }
   });
   return check.unread;
 }
 
-/** The receipt keeps one key, so every row with "receipt": true leaves out the same paths. */
-function sharedUnread(checks, where) {
-  const rows = checks.map((check, i) => ({ check, i })).filter(({ check }) => check.receipt);
+/**
+ * Each receipt row keeps its own receipt file, so a name is used once. The rows without a name share
+ * the one file 0.5.x wrote (`test-receipt-<ticket>.json`), so they share one key and one list.
+ */
+function receiptFiles(checks, where) {
+  const named = new Map();
+  checks.forEach((check, i) => {
+    if (check.name === null) return;
+    if (named.has(check.name)) throw new Error(`${where}[${i}].name "${check.name}" is also ${where}[${named.get(check.name)}]'s: each name names one receipt file.`);
+    named.set(check.name, i);
+  });
+  const rows = checks.map((check, i) => ({ check, i })).filter(({ check }) => check.receipt && check.name === null);
   const key = (list) => [...list].sort().join("\n");
   const differing = rows.find(({ check }) => key(check.unread) !== key(rows[0].check.unread));
   if (differing) {
-    throw new Error(`${where}[${differing.i}].unread differs from ${where}[${rows[0].i}].unread: every row with "receipt": true shares one unread list.`);
+    throw new Error(
+      `${where}[${differing.i}].unread differs from ${where}[${rows[0].i}].unread: receipt rows without a "name" share one receipt file, so they share one list. Give each its own "name".`,
+    );
   }
   return checks;
 }

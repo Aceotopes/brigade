@@ -48,7 +48,7 @@ test("a config with a mistake names it: version, a typo'd key, a bad when, a bad
     [{ version: 1, guard: { wrappers: ["bunx", ""] } }, /guard\.wrappers must be a list of command prefixes/],
     [{ version: 1, roadmap: { url: "x" } }, /roadmap has unknown key\(s\) url/],
     [check({ receipt: "yes" }), /checks\[0\]\.receipt must be true or false/],
-    [check({ quiet: { totals: "x", failures: "y" } }), /quiet belongs on the tests' row/],
+    [check({ quiet: { totals: "x", failures: "y" } }), /quiet belongs on a row with "receipt": true/],
     [check({ receipt: true, quiet: { totals: "(", failures: "y" } }), /quiet\.totals is not a valid pattern/],
     [check({ receipt: true, quiet: { totals: "x" } }), /quiet\.failures is missing/],
   ];

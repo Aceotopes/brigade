@@ -73,3 +73,19 @@ listed in the gotchas index, `docs/agents/gotchas/README.md`.
   `tests/env-contract.test.mjs`'s regex never sees it set.
 - The restart check compares `.mjs` content, tests left out, never times or `workflow.json`: the
   copy keeping the old config is the point.
+
+**`#17` — per-check receipts, `template/tools/phase-run/unread.mjs` `unreadMatcher`, `receipt.mjs` `treeKeys` / `receiptGroups`, `hooks/stop-gate.mjs` (built 2026-11-08):**
+- The matcher lives in `unread.mjs`, never `receipt.mjs`: the runner (and #19's suite skip) may
+  import the matcher but must never reach the receipt reader. pinned: `template/tools/phase-run/run.test.mjs`
+  (it walks `run.mjs`'s import graph).
+- `receipt.mjs` imports `./unread.mjs`. A test that copies the receipt code into a project must
+  copy both (`RECEIPT_CODES` in `tests/stop-gate.test.mjs`, `STOP_TESTS_FILES` in `measure.test.mjs`),
+  or the hook's import fails and every check quietly runs.
+- The hook tells 0.6.0 receipt code from 0.5.x by `treeKeys`. Keep 0.5.2's path (`sharedReceipt`)
+  as it is: a project's `receipt.mjs` can lag the plugin. pinned: `tests/stop-gate.test.mjs`, run
+  under `tests/fixtures/receipt-0.5.2.mjs` too. Never update that fixture.
+- Rows without a `name` share `test-receipt-<ticket>.json`, so the loaders still refuse two of them
+  with different lists; named rows may differ. Both loaders hold the refusals word for word.
+- Matched paths go to `git update-index --force-remove -z --stdin`, never as arguments: Windows'
+  command line is 8,191 characters.
+- A `/** … */` comment can't hold `**/*.md`: its `*/` ends the comment. Write `**\/*.md` there.

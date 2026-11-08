@@ -9,6 +9,20 @@ Each commit's entry goes on top, in the shape of `docs/_templates/devlog-entry.m
 message cites it (`devlog #N`). At each phase end, `node tools/doc-rotate.mjs` moves the closed
 entries into `docs/history/devlog/`.
 
+## #11 · feat · each stop check keeps its own receipt
+
+**Built:**
+- `unread.mjs`: one JS matcher for `unread` lists (`*`, `?`, `**/`, `!`, last match wins).
+- `receipt.mjs`: a key per check from one `git add -A`; `<name>-receipt-<ticket>.json`, nameless
+  rows keep `test-receipt-<ticket>.json`; the command recorded with `{base}` filled in.
+- `stop-tests.mjs` runs every uncovered receipt check past a failure, one cap on the failures. The
+  stop gate runs only uncovered checks, writes nothing, logs `skipped`; 0.5.2's path beside an old
+  `receipt.mjs`. Both loaders: `name`, per-row lists, the shared-list rule gone.
+**Verified:** loader refusals through both loaders; old-vs-new keys on ten lists; hook seams under
+0.6.0 and frozen 0.5.2 receipt code, three checks after a real stop-tests pass; the runner's imports
+never reach the receipt reader; full stop-check suite; review (5 fixes). Backend only.
+**Next:** the next ticket of #11. **Record:** implementation log 006.
+
 ## #10 · feat · the runner snapshot: one frozen copy judges a run
 
 **Built:**

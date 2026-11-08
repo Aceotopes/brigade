@@ -18,10 +18,11 @@ import { fileURLToPath } from "node:url";
 import { Screen, makePaint, progressText, resultLines, scoreboard, shortStat, shortTitle, visible } from "./display.mjs";
 import { PRICES_STALE_DAYS, addCost, hookTime, loadPrices, pricesAgeDays, sessionCost, sessionCostFrom, stepKind, stepRules, ticketMetrics, toolTime } from "./metrics.mjs";
 import { appendRow, latestPerSession, ledgerCsv, ledgerRow, ledgerText, readLedger, stampVersion, weeklyView, weekOf } from "./ledger.mjs";
-import { readReceipt, receiptHolds, receiptPath, treeKey } from "./receipt.mjs";
+import { readReceipt, receiptGroups, receiptHolds, receiptPath, treeKey, treeKeys } from "./receipt.mjs";
 import { promptValues, report } from "./run.mjs";
 import { quietOutput } from "./stop-tests.mjs";
 import { DEFAULT_RULES, measureTicket } from "./ticket-size.mjs";
+import { unreadMatcher } from "./unread.mjs";
 import { findTicketSession, subagentsOf } from "./wait-subagents.mjs";
 import { answers } from "./wait-url.mjs";
 
@@ -640,6 +641,90 @@ test("an unread list that leaves out every file gives no tree key, so no receipt
   assert.ok(treeKey(dir, [".gitignore"]));
 });
 
+// 0.6.0 (#17, ADR 0004): one JS matcher for every unread list, and one key per check.
+
+test("the matcher: * and ? stay in a folder, **/ crosses folders, a folder covers what is under it, the last match wins, ! puts back", () => {
+  const cases = [
+    [["*.md"], ["README.md", ".x.md"], ["docs/a.md", "README.mdx"]],
+    [["**/*.md"], ["README.md", "docs/a.md", "a/b/c.md"], ["a.mdx", "docs/a.json"]],
+    [["docs/**"], ["docs/a.md", "docs/a/b.json"], ["docs", "docsy/a.md"]],
+    [["docs", "src/"], ["docs/a.md", "src/x/y.js"], ["docsy/a", "src"]],
+    [["src/**/test.js"], ["src/test.js", "src/a/b/test.js"], ["src/atest.js", "test.js"]],
+    [["?.txt"], ["a.txt"], ["ab.txt", "a/b.txt"]],
+    [["[ab]*.txt", "[!c]?.log"], ["a1.txt", "b.txt", "d1.log"], ["c1.txt", "c1.log", "a/b.txt"]],
+    [["docs**"], ["docsy", "docs"], ["docs/a.md"]], // `**` inside a name is a `*`
+    [["docs/**", "!docs/fixtures/**"], ["docs/a.md"], ["docs/fixtures/x.json", "src/a.js"]],
+    [["!docs/a.md", "docs/**"], ["docs/a.md"], []], // the last match wins: put back, then left out again
+    [["notes.[md"], ["notes.[md"], ["notes.m"]], // a class that never closes is a literal `[`
+    [["[[:upper:]]*.md", "[]x]y"], ["README.md", "]y", "xy"], ["readme.md", "docs/README.md"]], // named classes; a leading `]` is a member
+    [["[[:bogus:]]*"], [], ["a", "README.md"]], // an unknown class name matches nothing, as in git
+  ];
+  for (const [list, unread, read] of cases) {
+    const matches = unreadMatcher(list);
+    for (const path of unread) assert.equal(matches(path), true, `${JSON.stringify(list)} leaves out ${path}`);
+    for (const path of read) assert.equal(matches(path), false, `${JSON.stringify(list)} keeps ${path}`);
+  }
+  assert.equal(unreadMatcher([])("README.md"), false);
+});
+
+/** 0.5.2's key: git's own `:(glob)` pathspecs remove the list from a copy of the index. */
+function gitGlobKey(dir, unread) {
+  const index = join(temp("phase-run-old-key-"), "index");
+  const env = { ...process.env, GIT_INDEX_FILE: index };
+  const git = (...args) => spawnSync("git", args, { cwd: dir, encoding: "utf8", env });
+  git("read-tree", "HEAD");
+  git("add", "-A");
+  git("rm", "-r", "-q", "--cached", "--ignore-unmatch", "--", ...unread.map((p) => `:(glob)${p}`));
+  return git("write-tree").stdout.trim();
+}
+
+test("the JS matcher keys a tree as git's :(glob) did, for today's lists and others", () => {
+  const { dir } = gitRepo({
+    "README.md": "r\n", "CHANGELOG.md": "c\n", "docs/a.md": "a\n", "docs/sub/b.json": "{}\n", "docsy/c.md": "c\n",
+    "src/x.js": "x\n", "src/notes.md": "n\n", "src/deep/test.js": "t\n", "b.txt": "b\n",
+  });
+  writeFileSync(join(dir, "docs/new.md"), "untracked\n");
+  writeFileSync(join(dir, "src/x.js"), "edited\n");
+  for (const list of [["docs/**", "*.md"], ["**/*.md"], ["docs/*.md"], ["docs"], ["docs/"], ["?.txt"], ["src/**/test.js"], ["**/*.json", "CHANGELOG.md"], ["[[:upper:]]*.md", "doc*/**"], ["[!R]*.md", "src/[a-n]*"]]) {
+    assert.equal(treeKey(dir, list), gitGlobKey(dir, list), JSON.stringify(list));
+  }
+});
+
+test("treeKeys gives each list its own key from one staging, and a list that leaves out everything no key", () => {
+  const { dir } = gitRepo({ "README.md": "r\n", "docs/a.md": "a\n", "docs/data.json": "{}\n" });
+  const lists = [["**/*.md"], ["docs/**", "*.md"], [], ["*.txt", ".gitignore", "*.md", "docs/**"]];
+  const before = treeKeys(dir, lists);
+  assert.deepEqual(before.slice(0, 3), lists.slice(0, 3).map((list) => treeKey(dir, list)));
+  assert.equal(new Set(before.slice(0, 3)).size, 3);
+  assert.equal(before[3], null);
+  writeFileSync(join(dir, "docs/data.json"), '{ "edited": true }\n');
+  const after = treeKeys(dir, lists);
+  assert.deepEqual([after[0] === before[0], after[1] === before[1], after[2] === before[2]], [false, true, false]);
+});
+
+test("a check's receipt file is named for it, and a nameless check keeps 0.5.x's", () => {
+  assert.equal(receiptPath("/p", "7", "lint"), join("/p", ".phase-run", "lint-receipt-7.json"));
+  assert.equal(receiptPath("/p", "7"), join("/p", ".phase-run", "test-receipt-7.json"));
+  assert.equal(receiptPath("/p", undefined, "lint"), join("/p", ".phase-run", "lint-receipt.json"));
+});
+
+test("a receipt vouches for the command with {base} filled in; a 0.5.x one, written unfilled, still holds under its base", () => {
+  const now = { tree: "t1", base: "b1", command: "npm test -- --since {base}" };
+  assert.equal(receiptHolds({ tree: "t1", base: "b1", commands: ["npm test -- --since b1"], passed: true }, now), true);
+  assert.equal(receiptHolds({ tree: "t1", base: "b1", commands: ["npm test -- --since {base}"], passed: true }, now), true);
+  assert.equal(receiptHolds({ tree: "t1", base: "b1", commands: ["npm test -- --since b0"], passed: true }, now), false);
+});
+
+test("receipt groups: a named check alone, the nameless ones together", () => {
+  const rows = [
+    { name: "lint", label: "Lint", run: "l", receipt: true, unread: ["**/*.md"] },
+    { name: null, label: "Format", run: "f", receipt: false, unread: [] },
+    { name: null, label: "Unit", run: "u", receipt: true, unread: ["docs/**"] },
+    { name: null, label: "E2E", run: "e", receipt: true, unread: ["docs/**"] },
+  ];
+  assert.deepEqual(receiptGroups(rows).map((g) => [g.name, g.checks.map((c) => c.label), g.unread]), [["lint", ["Lint"], ["**/*.md"]], [null, ["Unit", "E2E"], ["docs/**"]]]);
+});
+
 // -------------------------------------------------------------- quiet tests
 
 const LOG = [" RUN  v3", "·····x··", " ❯ test/a.test.ts (3 tests | 1 failed)", " FAIL  test/a.test.ts > adds", "AssertionError: expected 2 to be 3", " Test Files  1 failed | 177 passed (178)", "      Tests  1 failed | 4112 passed (4113)", "   Duration  281.4s"].join("\n");
@@ -662,15 +747,18 @@ test("without a pair, a pass prints its last lines and a failure its tail", () =
 });
 
 /** What stop-tests.mjs needs of the runner to run: itself and what it imports. */
-const STOP_TESTS_FILES = ["stop-tests.mjs", "receipt.mjs", "config.mjs", "metrics.mjs", "ticket-size.mjs", "prices.json"];
+const STOP_TESTS_FILES = ["stop-tests.mjs", "receipt.mjs", "unread.mjs", "config.mjs", "metrics.mjs", "ticket-size.mjs", "prices.json"];
 
-/** A project with this folder's runner copied in, and the given test command as its receipt row. */
-function stopTestsProject(testRun, row = {}) {
+/**
+ * A project with this folder's runner copied in, and the given test command as its receipt row (or,
+ * with `rows`, those stop-check rows).
+ */
+function stopTestsProject(testRun, row = {}, rows = null) {
   const files = Object.fromEntries(STOP_TESTS_FILES.map((name) => [`tools/phase-run/${name}`, readFileSync(join(HERE, name), "utf8")]));
-  files[".claude/workflow.json"] = JSON.stringify({ version: 1, stopGate: { checks: [{ label: "Tests", run: testRun, receipt: true, ...row }] } });
+  files[".claude/workflow.json"] = JSON.stringify({ version: 1, stopGate: { checks: rows ?? [{ label: "Tests", run: testRun, receipt: true, ...row }] } });
   const project = gitRepo(files);
   const run = () => spawnSync(process.execPath, [join(project.dir, "tools/phase-run/stop-tests.mjs"), "main"], { cwd: project.dir, encoding: "utf8", env: { ...outsideRun(), PHASE_RUN_TICKET: "7" } });
-  return { ...project, run, receipt: () => readReceipt(receiptPath(project.dir, "7")) };
+  return { ...project, run, receipt: (name) => readReceipt(receiptPath(project.dir, "7", name)) };
 }
 
 /**
@@ -740,8 +828,59 @@ test("stop-tests.mjs says so when the tests changed a tracked file, and records 
   const project = stopTestsProject("node -e \"require('fs').writeFileSync('a.txt', 'rewritten by the tests')\"");
   const result = project.run();
   assert.equal(result.status, 0);
-  assert.match(result.stdout, /code changed while the tests ran.*no receipt is recorded/);
+  assert.match(result.stdout, /code changed while the checks ran.*no receipt is recorded/);
   assert.equal(project.receipt(), null);
+});
+
+// 0.6.0 (#17): every receipt check runs, each keeps its own receipt.
+const failingWith = (text, status) => `node -e "process.stdout.write('${text}'.repeat(20000)); process.exit(${status})"`;
+
+test("stop-tests.mjs runs every receipt check after a failure, caps the failures together, and records each pass's receipt", () => {
+  const rows = [
+    { name: "typecheck", label: "Typecheck", run: failingWith("T", 4), receipt: true },
+    { name: "lint", label: "Lint", run: 'node -e "console.log(1)"', receipt: true, unread: ["**/*.md"] },
+    { label: "Tests", run: failingWith("U", 5), receipt: true },
+    { label: "Not a receipt check", run: 'node -e "process.exit(9)"' },
+  ];
+  const project = stopTestsProject(null, {}, rows);
+  const result = project.run();
+  assert.equal(result.status, 4, "the first failure's status");
+  assert.match(result.stdout, /Typecheck: FAILED[\s\S]*Lint: passed[\s\S]*Tests: FAILED/);
+  assert.doesNotMatch(result.stdout, /Not a receipt check/);
+  assert.match(result.stdout, /Typecheck FAILED:\n…\(cut to the last 7500 characters\)/);
+  assert.match(result.stdout, /Tests FAILED:\n…\(cut to the last 7500 characters\)/);
+  assert.ok(result.stdout.length < 16_000, `the failures share one cap (${result.stdout.length})`);
+  assert.deepEqual([project.receipt("typecheck"), project.receipt()], [null, null]);
+  const lint = project.receipt("lint");
+  assert.deepEqual([lint.name, lint.commands, lint.unread, lint.tree], ["lint", ['node -e "console.log(1)"'], ["**/*.md"], treeKey(project.dir, ["**/*.md"])]);
+});
+
+test("stop-tests.mjs runs its checks in the config's order, nameless and named mixed, and exits with the first failure's status", () => {
+  const rows = [
+    { label: "Unit", run: 'node -e "console.log(1)"', receipt: true },
+    { name: "lint", label: "Lint", run: 'node -e "process.exit(7)"', receipt: true },
+    { label: "E2E", run: 'node -e "process.exit(6)"', receipt: true },
+  ];
+  const result = stopTestsProject(null, {}, rows).run();
+  assert.equal(result.status, 7);
+  assert.match(result.stdout, /Unit: passed[\s\S]*Lint: FAILED[\s\S]*E2E: FAILED/);
+});
+
+test("stop-tests.mjs skips only the checks whose own receipt still holds, and fills {base} into what it records", () => {
+  const rows = [
+    { name: "lint", label: "Lint", run: 'node -e "console.log(1)" {base}', receipt: true, unread: ["**/*.md"] },
+    { label: "Tests", run: 'node -e "console.log(2)"', receipt: true, unread: ["docs/**", "*.md"] },
+  ];
+  const project = stopTestsProject(null, {}, rows);
+  assert.equal(project.run().status, 0);
+  assert.deepEqual(project.receipt("lint").commands, ['node -e "console.log(1)" main']);
+  mkdirSync(join(project.dir, "docs"), { recursive: true });
+  writeFileSync(join(project.dir, "docs", "data.json"), "{}\n"); // lint might read it; the tests never do
+  const again = project.run();
+  assert.match(again.stdout, /Tests: already passed on exactly this code/);
+  assert.match(again.stdout, /Lint: passed/);
+  writeFileSync(join(project.dir, "docs", "devlog.md"), "the entry\n");
+  assert.match(project.run().stdout, /Every check already passed on exactly this code\. Nothing to run\./);
 });
 
 // ------------------------------------------------------------ the waits

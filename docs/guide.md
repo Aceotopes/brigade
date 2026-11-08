@@ -237,11 +237,16 @@ tries to stop. In `run`, `{base}` is the run's base commit, for example
 runs it through `tools/phase-run/stop-tests.mjs`, and the stop check skips it on code that already
 passed. An optional `"quiet": { "totals", "failures" }` pair of patterns there trims what the
 session reads of the output; the phase-run guide has a vitest example. An `"unread"` list on the
-same row names, in git globs, what the tests never read: setup writes `["docs/**", "*.md"]`
-(`*.md` is the root's Markdown only), so a docs-only edit after the pass keeps the receipt. With no
-list, every file counts. The config refuses a glob that names no folder or file (`**`, `*.*`, `.`)
-or one outside the repo, and every row with `"receipt": true` shares one list. Each stop check
-logs `"receipt": "held"`, `"stale"` or `"none"` in `.phase-run/stop-check-log.jsonl`.
+same row names, in globs, what the tests never read: setup writes `["docs/**", "*.md"]` (`*.md` is
+the root's Markdown only, `**/*.md` every folder's; a leading `!` puts a path back, and the last
+glob that matches wins), so a docs-only edit after the pass keeps the receipt. With no list, every
+file counts. Since 0.6.0 any row may carry `"receipt": true`, its own `"unread"` list and a
+`"name"`: each keeps its own receipt, `.phase-run/<name>-receipt-<ticket>.json`, so a docs edit
+after typecheck and lint passed skips them too. Rows without a name share 0.5.x's
+`test-receipt-<ticket>.json`, and so must share one list. The config refuses a glob that names no
+folder or file (`**`, `*.*`, `.`) or one outside the repo. Each stop check logs
+`"receipt": "held"`, `"stale"` or `"none"`, and `"skipped"`, the checks a receipt covered, in
+`.phase-run/stop-check-log.jsonl`.
 
 **`stack`**: what the project is built with, from your discovery doc at setup: `language`,
 `framework`, `packageManager`, `database`, `migrations`, `testDatabase`, `storage`, and `other` (a

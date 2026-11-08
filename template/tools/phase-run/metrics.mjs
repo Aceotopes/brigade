@@ -320,7 +320,8 @@ export function toolTime(file, rules = DEFAULT_RULES) {
 /**
  * The Stop hook's milliseconds for a ticket between two times, from the rows
  * hooks/stop-gate.mjs appends to stop-check-log.jsonl:
- * `{ ticket, startedAt, endedAt, passed, testsSkipped }`.
+ * `{ ticket, startedAt, endedAt, passed, testsSkipped, skipped, receipt }` (`skipped`, the checks a
+ * receipt covered, since 0.6.0).
  */
 export function hookTime(logFile, ticket, from, to = Infinity) {
   return rows(logFile)

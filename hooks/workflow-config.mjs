@@ -9,10 +9,12 @@
 //         "unless": "<optional regex on the whole command line that lets it through>",
 //         "message": "<what the session is told>" } ],
 //       "wrappers": ["pnpm exec", "pnpm dlx", "pnpm", "npx"] },   prefixes stripped before a rule is tested
-//     "stopGate": { "checks": [ { "label": "Typecheck", "run": "pnpm typecheck" },
-//       { "label": "Tests", "run": "pnpm test", "receipt": true,     the tests: skipped while their receipt holds
-//         "quiet": { "totals": "<regex>", "failures": "<regex>" },   what stop-tests.mjs prints of them
-//         "unread": ["docs/**", "*.md"] } ] },   git globs the tests never read: an edit there keeps the receipt
+//     "stopGate": { "checks": [ { "label": "Format", "run": "pnpm fmt:check" },
+//       { "name": "typecheck", "label": "Typecheck", "run": "pnpm typecheck", "receipt": true, "unread": ["**/*.md"] },
+//       { "name": "tests", "label": "Tests", "run": "pnpm test", "receipt": true,   skipped while its own receipt holds
+//         "quiet": { "totals": "<regex>", "failures": "<regex>" },   what stop-tests.mjs prints of it
+//         "unread": ["docs/**", "*.md"] } ] },   globs that check never reads: an edit there keeps its receipt
+//                                                  (`name` names its receipt file; rows without one share one)
 //     "stack": { "language", "framework", "packageManager", "database", "migrations", "testDatabase",
 //                "storage": "<any text>", "other": ["<any text>"] },   what the project is built with
 //     "roadmap": { "artifact": "<the roadmap page's link>" },
@@ -33,7 +35,7 @@ export const CONFIG_PATH = join(".claude", "workflow.json");
 
 const WHEN = ["always", "phase-run"];
 const RULE_KEYS = ["when", "command", "text", "with", "unless", "message", "note"];
-const CHECK_KEYS = ["label", "run", "receipt", "quiet", "unread", "note"];
+const CHECK_KEYS = ["name", "label", "run", "receipt", "quiet", "unread", "note"];
 /** The stack's parts, in the order the discovery template's table lists them. */
 export const STACK_KEYS = ["language", "framework", "packageManager", "database", "migrations", "testDatabase", "storage", "other"];
 /** What the guard strips before a rule is tested, when the project names none: the wrappers it always knew. */
@@ -126,16 +128,16 @@ export function parseWorkflowConfig(data) {
     }
     if (check.receipt !== undefined && typeof check.receipt !== "boolean") throw new Error(`${where}.receipt must be true or false.`);
     if (check.quiet !== undefined) {
-      if (check.receipt !== true) throw new Error(`${where}.quiet belongs on the tests' row, the one with "receipt": true.`);
+      if (check.receipt !== true) throw new Error(`${where}.quiet belongs on a row with "receipt": true, one stop-tests.mjs runs.`);
       onlyKeys(check.quiet, ["totals", "failures", "note"], `${where}.quiet`);
       for (const key of ["totals", "failures"]) {
         if (check.quiet[key] === undefined) throw new Error(`${where}.quiet.${key} is missing.`);
         pattern(check.quiet[key], `${where}.quiet.${key}`);
       }
     }
-    return { label: check.label, run: check.run, receipt: check.receipt === true, unread: unreadList(check, where) };
+    return { name: checkName(check, where), label: check.label, run: check.run, receipt: check.receipt === true, unread: unreadList(check, where) };
   });
-  sharedUnread(checks, "stopGate.checks");
+  receiptFiles(checks, "stopGate.checks");
   return { rules, checks, wrappers: wrappers.map((w) => w.trim()), ledger };
 }
 
@@ -154,33 +156,60 @@ function parseLedger(ledger) {
 }
 
 /**
- * A row's unread paths: git globs the receipt's key leaves out, only on a row with "receipt": true. A
- * glob that names no folder or file (`**`, `*.*`, `.`) could leave out every file, so no edit would make
- * the receipt stale; one that leaves the repo is one git refuses.
+ * A row's name, or null: it names the row's receipt file (`.phase-run/<name>-receipt-<ticket>.json`),
+ * so it is a plain lowercase word, and never `test`, the file rows without a name share.
+ */
+function checkName(check, where) {
+  if (check.name === undefined) return null;
+  if (typeof check.name !== "string" || !check.name) throw new Error(`${where}.name must be text, such as "tests".`);
+  if (!/^[a-z0-9][a-z0-9_-]*$/.test(check.name)) {
+    throw new Error(`${where}.name "${check.name}" must be lowercase letters, digits, "-" or "_", starting with a letter or digit: it names the check's receipt file.`);
+  }
+  if (check.name === "test") throw new Error(`${where}.name "test" is the one rows without a name share (test-receipt-<ticket>.json); choose another, such as "tests".`);
+  return check.name;
+}
+
+/**
+ * A row's unread paths: globs its receipt's key leaves out, only on a row with "receipt": true. A
+ * leading `!` puts paths back, and what follows it is held to the same rules. A glob that names no
+ * folder or file (`**`, `*.*`, `.`) could leave out every file, so no edit would make the receipt
+ * stale; one that leaves the repo could match nothing in it.
  */
 function unreadList(check, where) {
   if (check.unread === undefined) return [];
-  if (check.receipt !== true) throw new Error(`${where}.unread belongs on the tests' row, the one with "receipt": true.`);
-  if (!Array.isArray(check.unread)) throw new Error(`${where}.unread must be a list of git globs, such as ["docs/**", "*.md"].`);
-  check.unread.forEach((glob, j) => {
+  if (check.receipt !== true) throw new Error(`${where}.unread belongs on a row with "receipt": true, whose receipt it keeps.`);
+  if (!Array.isArray(check.unread)) throw new Error(`${where}.unread must be a list of globs, such as ["docs/**", "*.md"].`);
+  check.unread.forEach((entry, j) => {
     const at = `${where}.unread[${j}]`;
-    if (typeof glob !== "string" || !glob.trim()) throw new Error(`${at} must be a git glob, such as "docs/**".`);
-    if (glob !== glob.trim()) throw new Error(`${at} "${glob}" has spaces around it, which git would match as written.`);
-    if (/^\.?\//.test(glob) || glob.split("/").includes("..")) throw new Error(`${at} "${glob}" must be a path inside the repo, from its root, such as "docs/**".`);
+    if (typeof entry !== "string" || !entry.trim()) throw new Error(`${at} must be a glob, such as "docs/**".`);
+    if (entry !== entry.trim()) throw new Error(`${at} "${entry}" has spaces around it, which would be matched as written.`);
+    const glob = entry.replace(/^!/, "");
+    if (/^\.?\//.test(glob) || glob.split("/").includes("..")) throw new Error(`${at} "${entry}" must be a path inside the repo, from its root, such as "docs/**".`);
     if (!/[\p{L}\p{N}]/u.test(glob)) {
-      throw new Error(`${at} "${glob}" names no folder or file, so it could leave out every file; name only what the tests never read, such as "docs/**".`);
+      throw new Error(`${at} "${entry}" names no folder or file, so it could leave out every file; name only what the check never reads, such as "docs/**".`);
     }
   });
   return check.unread;
 }
 
-/** The receipt keeps one key, so every row with "receipt": true leaves out the same paths. */
-function sharedUnread(checks, where) {
-  const rows = checks.map((check, i) => ({ check, i })).filter(({ check }) => check.receipt);
+/**
+ * Each receipt row keeps its own receipt file, so a name is used once. The rows without a name share
+ * the one file 0.5.x wrote (`test-receipt-<ticket>.json`), so they share one key and one list.
+ */
+function receiptFiles(checks, where) {
+  const named = new Map();
+  checks.forEach((check, i) => {
+    if (check.name === null) return;
+    if (named.has(check.name)) throw new Error(`${where}[${i}].name "${check.name}" is also ${where}[${named.get(check.name)}]'s: each name names one receipt file.`);
+    named.set(check.name, i);
+  });
+  const rows = checks.map((check, i) => ({ check, i })).filter(({ check }) => check.receipt && check.name === null);
   const key = (list) => [...list].sort().join("\n");
   const differing = rows.find(({ check }) => key(check.unread) !== key(rows[0].check.unread));
   if (differing) {
-    throw new Error(`${where}[${differing.i}].unread differs from ${where}[${rows[0].i}].unread: every row with "receipt": true shares one unread list.`);
+    throw new Error(
+      `${where}[${differing.i}].unread differs from ${where}[${rows[0].i}].unread: receipt rows without a "name" share one receipt file, so they share one list. Give each its own "name".`,
+    );
   }
 }
 

@@ -36,18 +36,62 @@ test("both loaders read the tests row's unread paths", () => {
   assert.deepEqual(parseRunConfig(data).stopChecks.map((c) => c.unread), [[], ["docs/**", "*.md"]]);
 });
 
+// 0.6.0 (#17, ADR 0004): each receipt row keeps its own receipt, so each keeps its own list and may
+// carry a name, which names its receipt file.
+test("both loaders read each receipt row's own name and unread list", () => {
+  const data = checks(
+    { name: "typecheck", label: "Typecheck", run: "npm run typecheck", receipt: true, unread: ["**/*.md"] },
+    { label: "Format", run: "npm run fmt" },
+    tests({ name: "tests", unread: ["docs/**", "*.md", "!docs/fixtures/**"] }),
+  );
+  for (const rows of [parseWorkflowConfig(data).checks, parseRunConfig(data).stopChecks]) {
+    assert.deepEqual(
+      rows.map((c) => [c.name, c.receipt, c.unread]),
+      [["typecheck", true, ["**/*.md"]], [null, false, []], ["tests", true, ["docs/**", "*.md", "!docs/fixtures/**"]]],
+    );
+  }
+});
+
+test("both loaders refuse a bad or repeated name, and nameless receipt rows that would share a file with differing lists", () => {
+  const cases = [
+    [checks(tests({ name: 3 })), /checks\[0\]\.name must be/],
+    [checks(tests({ name: "" })), /checks\[0\]\.name must be/],
+    // It names a file: .phase-run/<name>-receipt-<ticket>.json.
+    ...["Tests", "my tests", "../x", "-x", "a/b"].map((name) => [checks(tests({ name })), /checks\[0\]\.name .* lowercase/]),
+    [checks(tests({ name: "test" })), /checks\[0\]\.name "test" is the one rows without a name share/],
+    [checks(tests({ name: "unit" }), tests({ name: "unit", run: "npm run e2e" })), /checks\[1\]\.name "unit" is also stopGate\.checks\[0\]'s/],
+    [checks({ name: "lint", label: "Lint", run: "x" }, tests({ name: "lint" })), /checks\[1\]\.name "lint" is also stopGate\.checks\[0\]'s/],
+    [checks(tests({ unread: ["docs/**"] }), tests({ run: "npm run e2e" })), /checks\[1\]\.unread differs from stopGate\.checks\[0\]\.unread: receipt rows without a "name" share/],
+  ];
+  for (const [data, error] of cases) {
+    assert.throws(() => parseWorkflowConfig(data), error, `hooks: ${JSON.stringify(data.stopGate)}`);
+    assert.throws(() => parseRunConfig(data), error, `runner: ${JSON.stringify(data.stopGate)}`);
+  }
+  // Named rows, or a named row beside a nameless one, may differ.
+  for (const data of [
+    checks(tests({ name: "unit", unread: ["docs/**"] }), tests({ name: "e2e", run: "npm run e2e" })),
+    checks(tests({ unread: ["docs/**"] }), tests({ name: "e2e", run: "npm run e2e", unread: ["**/*.md"] })),
+    checks(tests({ unread: ["docs/**"] }), tests({ run: "npm run e2e", unread: ["docs/**"] })),
+  ]) {
+    assert.doesNotThrow(() => parseWorkflowConfig(data));
+    assert.doesNotThrow(() => parseRunConfig(data));
+  }
+});
+
 test("both loaders refuse a misplaced, malformed or catch-all unread list, naming the row", () => {
   const cases = [
-    [checks({ label: "Lint", run: "x", unread: ["docs/**"] }), /checks\[0\]\.unread belongs on the tests' row/],
+    [checks({ label: "Lint", run: "x", unread: ["docs/**"] }), /checks\[0\]\.unread belongs on a row with "receipt": true/],
     [checks(tests({ unread: "docs/**" })), /checks\[0\]\.unread must be a list/],
-    [checks(tests({ unread: ["docs/**", 3] })), /checks\[0\]\.unread\[1\] must be a git glob/],
-    [checks(tests({ unread: [" "] })), /checks\[0\]\.unread\[0\] must be a git glob/],
+    [checks(tests({ unread: ["docs/**", 3] })), /checks\[0\]\.unread\[1\] must be a glob/],
+    [checks(tests({ unread: [" "] })), /checks\[0\]\.unread\[0\] must be a glob/],
     // A glob that names no folder or file could leave out every file, and the receipt would never go stale.
     ...["**", "**/*", "*/**", ".", "**/**", "**/*.*", "*"].map((glob) => [checks(tests({ unread: ["docs/**", glob] })), /checks\[0\]\.unread\[1\] .* every file/]),
     // Git refuses a path outside the repo, and `./` or `..` can climb back to its root.
     ...["/docs/**", "./**", "src/..", "../shared/**"].map((glob) => [checks(tests({ unread: [glob] })), /checks\[0\]\.unread\[0\] .* inside the repo/]),
     [checks(tests({ unread: [" docs/**"] })), /checks\[0\]\.unread\[0\] .* spaces around it/],
-    [checks(tests({ unread: ["docs/**"] }), tests({ run: "npm run e2e" })), /checks\[1\]\.unread differs from stopGate\.checks\[0\]\.unread/],
+    // A leading `!` puts paths back; what follows it is held to the same rules.
+    ...["!", "!**", "!*.*"].map((glob) => [checks(tests({ unread: ["docs/**", glob] })), /checks\[0\]\.unread\[1\] .* every file/]),
+    ...["!/docs/**", "!../x/**"].map((glob) => [checks(tests({ unread: ["docs/**", glob] })), /checks\[0\]\.unread\[1\] .* inside the repo/]),
   ];
   for (const [data, error] of cases) {
     assert.throws(() => parseWorkflowConfig(data), error, `hooks: ${JSON.stringify(data.stopGate)}`);

@@ -646,3 +646,20 @@ test("a browserCheck with no place in the gates runs after the project's gates",
   const placed = runConfig({ gates: [{ builtin: "browser-check" }, { label: "lint", run: "lint" }], browserCheck: check });
   assert.deepEqual(placed.gates.map((g) => g.label ?? g.builtin), [BROWSER_CHECK, "lint"]);
 });
+
+// ADR 0003, ADR 0004: a session can forge a receipt, so no gate may read one. The runner is what runs
+// the gates; if anything it imports, however deep, reaches receipt.mjs, a gate could start trusting one.
+test("no gate reads a receipt: the runner's imports never reach the receipt reader", () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const reached = new Set();
+  const visit = (file) => {
+    if (reached.has(file)) return;
+    reached.add(file);
+    const source = readFileSync(file, "utf8");
+    for (const [, a, b] of source.matchAll(/\bfrom\s*["'](\.{1,2}\/[^"']+)["']|\bimport\s*\(\s*["'](\.{1,2}\/[^"']+)["']\s*\)/g)) visit(join(dirname(file), a ?? b));
+  };
+  visit(join(here, "run.mjs"));
+  assert.ok(reached.has(join(here, "config.mjs")) && reached.has(join(here, "snapshot.mjs")), "the walk follows the runner's imports");
+  assert.equal(reached.has(join(here, "receipt.mjs")), false, [...reached].join("\n"));
+  for (const file of reached) assert.doesNotMatch(readFileSync(file, "utf8"), /\breadReceipt\b|receipt\.mjs["']/, file);
+});
