@@ -387,7 +387,10 @@ and the runner's own checks):
   it has no way to ask a question;
 - edit the runner, the project's config or its own settings (`tools/phase-run/`,
   `.claude/workflow.json`, `.claude/spec-issues.json`, the prompt file, the run's folder under
-  `.phase-run/`);
+  `.phase-run/`). Behind that, the run is judged by one frozen copy: at its start the runner copies
+  `tools/phase-run/` and `.claude/workflow.json` to `.phase-run/<branch>/runner/`, and the run's
+  gates, every ticket's stop check, shell guard and test command use the copy. A change to the live
+  files made mid-night (by you, or by a shell write) judges the next run, not this one;
 - print `.env` into its transcript (`cat`, `head`, `grep` and the like on that file);
 - start when GitHub cannot say which tickets wait on which (the runner refuses, and builds nothing
   in a guessed order);
@@ -408,6 +411,7 @@ and the runner's own checks):
 | "\<a preflight label\> failed" | Something a `phaseRun.preflight` row needs is not running (a database container, say); its hint says what | Start it, start again |
 | "Something is listening on :\<port\>" | A dev or QA server from `phaseRun.ports` is still running | Stop it (Ctrl+C in its terminal), start again |
 | "A run is already going (or one crashed)" | The lock file from a run is still there | If no run is going, delete `.phase-run/lock` |
+| "This branch's last run died, and the runner's code changed since its copy was taken" | A crashed run restarts on its frozen copy, and the runner's `.mjs` files it names changed since (an `/update-workflow`, say) | To finish on the old runner, put the code back; to start fresh on the new one, delete the `.phase-run/<branch>/runner` folder it names |
 | "…runs here have used \<another host\> as \<the migration target\>" | The migration target's address changed since the first run | If you meant to change it, delete `.phase-run/migration-target`; if not, fix the address |
 | Every ticket says "not labelled run-ready" | `/ticket-check` has not passed them | Run `/ticket-check <spec>` |
 | A ticket says "waiting on #N" | A ticket it depends on is not built yet, or was set aside | Answer or fix `#N` first |

@@ -1,7 +1,7 @@
 // Tests for the phase runner's own logic (#194). Plain node:test: no database, no
 // GitHub, no Claude session. Run: pnpm test:runner (node --test tools/phase-run/).
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -9,7 +9,8 @@ import { fileURLToPath } from "node:url";
 
 import { BROWSER_CHECK, fill, loadRunConfig, parseRunConfig, qaUrl, sessionEnv, targetFingerprint, targetUrl } from "./config.mjs";
 import { readLedger } from "./ledger.mjs";
-import { QUIET_MS, SETTLE_MS, applyMigrations, folderTrusted, gotchasFile, holdReason, loadResults, outsideAreas, projectGates, promptValues, pullRequestBody, recordResult, render, report, runSession, screenshotsSince, sessionSettings, turnOver } from "./run.mjs";
+import { QUIET_MS, SETTLE_MS, applyMigrations, folderTrusted, gotchasFile, holdReason, loadResults, outsideAreas, projectGates, promptValues, pullRequestBody, recordResult, render, report, runSession, runVariables, screenshotsSince, sessionSettings, turnOver } from "./run.mjs";
+import { finishSnapshot, readManifest, runnerChanges, takeSnapshot } from "./snapshot.mjs";
 
 const options = { minutes: 120, waitHours: 6, print: true, spec: 179 };
 const call = (claude, extra = {}) => ({ options, prompt: "Build it.", sessionId: "s-1", resume: false, claude, online: async () => true, sleep: async () => {}, ...extra });
@@ -535,6 +536,107 @@ test("the project's prose is spliced in by section, its header dropped, and an u
   assert.match(fix, /already applied to\s+staging/);
   assert.match(fix, /QA on `cast` only/);
   assert.throws(() => promptValues(project, "## Biuld\n- x\n", ticketValues), /"## Biuld" section has no place in the prompt/);
+});
+
+// ------------------------------------------------------ the frozen runner copy (#16)
+
+/** A repo stand-in with a runner folder and a config, and a run folder beside it. */
+function snapshotProject() {
+  const root = mkdtempSync(join(tmpdir(), "phase-run-snapshot-"));
+  const put = (rel, text) => {
+    mkdirSync(dirname(join(root, rel)), { recursive: true });
+    writeFileSync(join(root, rel), text);
+  };
+  put("tools/phase-run/run.mjs", "// the runner\n");
+  put("tools/phase-run/receipt.mjs", "// the receipt\n");
+  put("tools/phase-run/run.test.mjs", "// its tests\n");
+  put("tools/phase-run/ticket-prompt.md", "the prompt\n");
+  put(".claude/workflow.json", '{ "version": 1 }\n');
+  const runDir = join(root, ".phase-run", "phase-x");
+  const take = (runId, at = AT) => takeSnapshot({ root, runDir, runId, commit: "abc123", at });
+  return { root, runDir, put, take };
+}
+
+test("at run start the copy is taken: the runner folder and the config, with its manifest", () => {
+  const { runDir, take } = snapshotProject();
+  const copy = take("run-1");
+  assert.equal(copy.dir, join(runDir, "runner"));
+  assert.equal(copy.reused, false);
+  assert.deepEqual(copy.manifest, { takenAt: new Date(AT).toISOString(), commit: "abc123", runId: "run-1", finished: false });
+  assert.deepEqual(readManifest(copy.dir), copy.manifest);
+  assert.equal(readFileSync(join(copy.dir, "tools/phase-run/run.mjs"), "utf8"), "// the runner\n");
+  assert.equal(readFileSync(join(copy.dir, "tools/phase-run/ticket-prompt.md"), "utf8"), "the prompt\n");
+  assert.equal(readFileSync(join(copy.dir, ".claude/workflow.json"), "utf8"), '{ "version": 1 }\n');
+});
+
+test("a run that died restarts on the same copy, though its tests or its config changed since", () => {
+  const { put, take } = snapshotProject();
+  const first = take("run-1");
+  put("tools/phase-run/run.test.mjs", "// a test written mid-night\n");
+  put(".claude/workflow.json", '{ "version": 1, "note": "edited mid-night" }\n');
+  const again = take("run-2", AT + 3_600_000);
+  assert.equal(again.reused, true);
+  assert.deepEqual(again.manifest, first.manifest, "the first run's manifest stands");
+  assert.equal(readFileSync(join(again.dir, ".claude/workflow.json"), "utf8"), '{ "version": 1 }\n', "the copy keeps the config it was taken with");
+});
+
+test("the restart is refused, naming the files, when the live runner's code differs from the copy's", () => {
+  const { root, put, take } = snapshotProject();
+  take("run-1");
+  put("tools/phase-run/run.mjs", "// changed\n");
+  put("tools/phase-run/new.mjs", "// added\n");
+  rmSync(join(root, "tools/phase-run/receipt.mjs"));
+  put("tools/phase-run/run.test.mjs", "// a test change is not runner code\n");
+  assert.deepEqual(runnerChanges(root, join(root, ".phase-run", "phase-x", "runner")), ["tools/phase-run/new.mjs", "tools/phase-run/receipt.mjs", "tools/phase-run/run.mjs"]);
+  assert.throws(() => take("run-2"), (error) => {
+    assert.match(error.message, /tools\/phase-run\/new\.mjs, tools\/phase-run\/receipt\.mjs, tools\/phase-run\/run\.mjs/);
+    assert.doesNotMatch(error.message, /run\.test\.mjs/);
+    assert.match(error.message, /\.phase-run[\\/]phase-x[\\/]runner/, "it says which copy to delete for a fresh start");
+    return true;
+  });
+});
+
+test("a finished run marks its copy finished, and the next run takes a fresh one", () => {
+  const { put, take } = snapshotProject();
+  const first = take("run-1");
+  finishSnapshot(first.dir);
+  assert.equal(readManifest(first.dir).finished, true);
+  put("tools/phase-run/run.mjs", "// the next release\n");
+  writeFileSync(join(first.dir, "tools/phase-run/left-over.mjs"), "// only in the old copy\n");
+  const next = take("run-2", AT + 86_400_000);
+  assert.equal(next.reused, false);
+  assert.deepEqual(next.manifest, { takenAt: new Date(AT + 86_400_000).toISOString(), commit: "abc123", runId: "run-2", finished: false });
+  assert.equal(readFileSync(join(next.dir, "tools/phase-run/run.mjs"), "utf8"), "// the next release\n");
+  assert.equal(existsSync(join(next.dir, "tools/phase-run/left-over.mjs")), false, "nothing of the old copy is left");
+});
+
+test("a project with no workflow.json gets a copy whose config has no rules, so the hooks can refuse a copy with none", () => {
+  const { root, take } = snapshotProject();
+  rmSync(join(root, ".claude/workflow.json"));
+  const copy = take("run-1");
+  assert.equal(existsSync(join(copy.dir, ".claude/workflow.json")), true);
+  const { config, error } = loadRunConfig(copy.dir);
+  assert.equal(error, null);
+  assert.deepEqual([config.gates, config.stopChecks], [[], []]);
+  assert.equal(existsSync(join(copy.dir, "tools/phase-run/run.mjs")), true);
+});
+
+test("each ticket's env points the hooks at the copy and the copy at the repo", () => {
+  const env = runVariables({ ticket: 7, base: "abc", spec: 5, runner: "/repo/.phase-run/phase-2/runner", root: "/repo" });
+  assert.deepEqual(env, { PHASE_RUN: "1", PHASE_RUN_TICKET: "7", PHASE_RUN_BASE: "abc", PHASE_RUN_SPEC: "5", PHASE_RUN_RUNNER: "/repo/.phase-run/phase-2/runner", PHASE_RUN_ROOT: "/repo" });
+  assert.equal("PHASE_RUN_SPEC" in runVariables({ ticket: 7, base: "abc", spec: null, runner: "r", root: "/repo" }), false);
+  // The night's Edit deny on the runner and its config stays, with the copy itself under the run folder's.
+  const settings = sessionSettings({}, { allow: [], deny: [] }, { branch: "phase-2", env, background: true, prompt: null });
+  assert.equal(settings.env.PHASE_RUN_RUNNER, "/repo/.phase-run/phase-2/runner");
+  for (const rule of ["Edit(./tools/phase-run/**)", "Edit(./.claude/workflow.json)", "Edit(./.phase-run/phase-2/**)"]) assert.ok(settings.permissions.deny.includes(rule), rule);
+});
+
+test("the session is told to run its check command from the copy", () => {
+  const project = runConfig({}, { stopGate: { checks: [{ label: "Tests", run: "npm test", receipt: true }] } });
+  const values = promptValues(project, "", { ...ticketValues, RUNNER: ".phase-run/phase-2/runner" });
+  const command = "`node .phase-run/phase-2/runner/tools/phase-run/stop-tests.mjs`";
+  assert.equal(values.STOP_CHECKS, `${command} (the tests)`);
+  assert.ok(values.RECEIPT.includes(`Run the tests through ${command}`), values.RECEIPT);
 });
 
 test("a browserCheck with no place in the gates runs after the project's gates", () => {

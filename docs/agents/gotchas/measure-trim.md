@@ -54,3 +54,22 @@ listed in the gotchas index, `docs/agents/gotchas/README.md`.
 - To test a broken price list, copy the plugin (`pluginCopy`) and alter the copy;
   `runHook(..., { plugin })` runs the copy. Never add an env override for the path.
 - Claude Code may print the hook's stdout: it must stay empty on every path, warnings included.
+
+**`#16` — the runner snapshot, `template/tools/phase-run/snapshot.mjs`, `hooks/workflow-config.mjs` `judgeRoot` / `loadJudgeConfig` (built 2026-11-08):**
+- Only what *judges* reads the copy (the rules, the checks, `receipt.mjs`); what is *judged*
+  (git, the tree key, the receipt file, a check's cwd, the verdict) stays the repo's. Mixing them
+  keys or records the copy instead of the work. pinned: `tests/stop-gate.test.mjs`, `measure.test.mjs`.
+- A named copy that is missing, or has no `workflow.json`, must be an error: `loadWorkflowConfig` on
+  a missing file is "no rules", which waves every stop and command through. So `takeSnapshot`
+  always writes a config into the copy. pinned: `tests/stop-gate.test.mjs`, `tests/guard-shell.test.mjs`.
+- The runner's `config` global is set twice: by `preflight` from the live file, then by `main()`
+  from the copy. Code that runs before the snapshot (preflight's ports and commands) reads the live
+  one.
+- A test that spawns a runner script must drop every `PHASE_RUN*` name from the child's env: a
+  suite run inside a night inherits `PHASE_RUN_ROOT`, which points a test project's
+  `stop-tests.mjs` at the real repo. `tests/helpers.mjs` does it for the hooks; `measure.test.mjs`
+  has `outsideRun`.
+- A new `PHASE_RUN_*` name must be a `KEY:` entry in `run.mjs` (`runVariables`), or
+  `tests/env-contract.test.mjs`'s regex never sees it set.
+- The restart check compares `.mjs` content, tests left out, never times or `workflow.json`: the
+  copy keeping the old config is the point.

@@ -10,6 +10,7 @@ what was built, why it works that way, and how to say it out loud. The index bel
 <!-- generated:start implementation-log -->
 ### Current phase
 
+- [005](005-runner-snapshot.md) · `#16` · 2026-11-08 · The runner snapshot: the frozen copy
 - [004](004-attended-ledger-hook.md) · `#15` · 2026-11-08 · The attended ledger hook
 - [003](003-ledger-night-rows.md) · `#14` · 2026-11-08 · The ledger: night rows and views
 - [002](002-pricing-five-rates.md) · `#13` · 2026-11-08 · Pricing: five rates, three models, each request on its own

@@ -27,7 +27,7 @@
 // preflight (template/tools/phase-run/config.mjs). The rules the workflow itself needs (no --no-verify, no trailer, the phase-run
 // discipline) stay in guard-shell.mjs; this file holds only one project's habits.
 import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 export const CONFIG_PATH = join(".claude", "workflow.json");
 
@@ -49,12 +49,39 @@ export const DEFAULT_LEDGER = { attended: true, weekStarts: "monday" };
  */
 export function loadWorkflowConfig(root) {
   const path = join(root, CONFIG_PATH);
-  if (!existsSync(path)) return { rules: [], checks: [], wrappers: DEFAULT_WRAPPERS, ledger: { ...DEFAULT_LEDGER }, error: null };
+  if (!existsSync(path)) return noRules(null);
   try {
     return { ...parseWorkflowConfig(JSON.parse(readFileSync(path, "utf8"))), error: null };
   } catch (error) {
-    return { rules: [], checks: [], wrappers: DEFAULT_WRAPPERS, ledger: { ...DEFAULT_LEDGER }, error: `${CONFIG_PATH.replaceAll("\\", "/")}: ${error.message}` };
+    return noRules(`${CONFIG_PATH.replaceAll("\\", "/")}: ${error.message}`);
   }
+}
+
+/** What a loader returns with no rules to give: no file (`error` null), or one it refuses. */
+function noRules(error) {
+  return { rules: [], checks: [], wrappers: DEFAULT_WRAPPERS, ledger: { ...DEFAULT_LEDGER }, error };
+}
+
+/**
+ * Where the rules that judge this session live: the phase run's frozen copy of the runner and its
+ * config (PHASE_RUN_RUNNER, ADR 0005), or the project itself when no run set one. The copy mirrors
+ * the repo (`<copy>/.claude/workflow.json`, `<copy>/tools/phase-run/`), so either is read the same way.
+ */
+export function judgeRoot(root, env = process.env) {
+  return env.PHASE_RUN_RUNNER ? resolve(root, env.PHASE_RUN_RUNNER) : root;
+}
+
+/**
+ * The rules that judge this session (judgeRoot's). A copy that is named but gone, or has lost its
+ * config (the runner always writes one into it), is an error, never a missing file's "no rules":
+ * that would wave every command and every stop through.
+ */
+export function loadJudgeConfig(root, env = process.env) {
+  const dir = judgeRoot(root, env);
+  if (env.PHASE_RUN_RUNNER && !existsSync(join(dir, CONFIG_PATH))) {
+    return noRules(`the phase run's runner copy (PHASE_RUN_RUNNER=${dir}) is missing, or has lost its ${CONFIG_PATH.replaceAll("\\", "/")}. Restart the run, which takes a fresh copy.`);
+  }
+  return loadWorkflowConfig(dir);
 }
 
 /** The file's JSON, checked and with its patterns compiled. Throws on the first problem. */

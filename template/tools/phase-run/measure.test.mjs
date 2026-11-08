@@ -8,7 +8,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { once } from "node:events";
-import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -661,15 +661,46 @@ test("without a pair, a pass prints its last lines and a failure its tail", () =
   assert.match(long, /not ok 1$/);
 });
 
+/** What stop-tests.mjs needs of the runner to run: itself and what it imports. */
+const STOP_TESTS_FILES = ["stop-tests.mjs", "receipt.mjs", "config.mjs", "metrics.mjs", "ticket-size.mjs", "prices.json"];
+
 /** A project with this folder's runner copied in, and the given test command as its receipt row. */
 function stopTestsProject(testRun, row = {}) {
-  const files = Object.fromEntries(["stop-tests.mjs", "receipt.mjs", "config.mjs", "metrics.mjs", "ticket-size.mjs"].map((name) => [`tools/phase-run/${name}`, readFileSync(join(HERE, name), "utf8")]));
-  files["tools/phase-run/prices.json"] = readFileSync(join(HERE, "prices.json"), "utf8");
+  const files = Object.fromEntries(STOP_TESTS_FILES.map((name) => [`tools/phase-run/${name}`, readFileSync(join(HERE, name), "utf8")]));
   files[".claude/workflow.json"] = JSON.stringify({ version: 1, stopGate: { checks: [{ label: "Tests", run: testRun, receipt: true, ...row }] } });
   const project = gitRepo(files);
-  const run = () => spawnSync(process.execPath, [join(project.dir, "tools/phase-run/stop-tests.mjs"), "main"], { cwd: project.dir, encoding: "utf8", env: { ...process.env, PHASE_RUN_TICKET: "7" } });
+  const run = () => spawnSync(process.execPath, [join(project.dir, "tools/phase-run/stop-tests.mjs"), "main"], { cwd: project.dir, encoding: "utf8", env: { ...outsideRun(), PHASE_RUN_TICKET: "7" } });
   return { ...project, run, receipt: () => readReceipt(receiptPath(project.dir, "7")) };
 }
+
+/**
+ * This process's environment without the phase run's variables: the suite runs inside a run (the
+ * stop check, a gate), and an inherited PHASE_RUN_ROOT would point a test project's stop-tests.mjs
+ * at the real repo.
+ */
+function outsideRun() {
+  return Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^PHASE_RUN/.test(key)));
+}
+
+test("stop-tests.mjs run from the run's copy reads the copy's config and keys and records the repo's code", () => {
+  // The live config's tests fail; the copy's (taken at run start) pass.
+  const project = stopTestsProject('node -e "process.exit(1)"');
+  const copy = join(project.dir, ".phase-run", "phase-x", "runner");
+  mkdirSync(join(copy, "tools/phase-run"), { recursive: true });
+  for (const name of STOP_TESTS_FILES) writeFileSync(join(copy, "tools/phase-run", name), readFileSync(join(project.dir, "tools/phase-run", name)));
+  mkdirSync(join(copy, ".claude"), { recursive: true });
+  writeFileSync(join(copy, ".claude/workflow.json"), JSON.stringify({ version: 1, stopGate: { checks: [{ label: "Tests", run: 'node -e "console.log(1)"', receipt: true }] } }));
+  const result = spawnSync(process.execPath, [join(copy, "tools/phase-run/stop-tests.mjs"), "main"], {
+    cwd: project.dir,
+    encoding: "utf8",
+    env: { ...outsideRun(), PHASE_RUN_TICKET: "7", PHASE_RUN_ROOT: project.dir },
+  });
+  assert.equal(result.status, 0, result.stdout);
+  const receipt = project.receipt();
+  assert.deepEqual(receipt.commands, ['node -e "console.log(1)"'], "the copy's command");
+  assert.equal(receipt.tree, treeKey(project.dir), "the repo's code, in the repo's .phase-run/");
+  assert.equal(existsSync(join(copy, ".phase-run")), false, "nothing is written inside the copy");
+});
 
 test("stop-tests.mjs writes a receipt on a pass, skips on the same code, and writes none on a failure", () => {
   const passing = stopTestsProject('node -e "console.log(1)"');

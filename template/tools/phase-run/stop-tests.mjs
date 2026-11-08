@@ -18,7 +18,11 @@ import { fileURLToPath } from "node:url";
 import { loadRunConfig } from "./config.mjs";
 import { readReceipt, receiptHolds, receiptPath, receiptUnread, treeKey, writeReceipt } from "./receipt.mjs";
 
-const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
+// The config is read beside this file: the repo's, or the run's frozen copy's when the session runs
+// the copy (ADR 0005), so its receipt is made under the rules the stop hook judges with. The work it
+// tests is the repo's: PHASE_RUN_ROOT inside a run, else the folder this file sits in.
+const CONFIG_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
+const ROOT = process.env.PHASE_RUN_ROOT ? resolve(process.env.PHASE_RUN_ROOT) : CONFIG_ROOT;
 const FAILURE_CAP = 15_000;
 const PASS_LINES = 5;
 
@@ -35,7 +39,7 @@ export function quietOutput(text, passed, quiet = null) {
 }
 
 function main() {
-  const loaded = loadRunConfig(ROOT);
+  const loaded = loadRunConfig(CONFIG_ROOT);
   if (loaded.error) {
     console.log(loaded.error);
     return 2;

@@ -141,3 +141,60 @@ test("with no receipt written, the log says none", async () => {
   assert.equal(check().status, 2);
   assert.equal(lastLog().receipt, "none");
 });
+
+// ------------------------------------------------------ the frozen runner copy (#16)
+
+const PASSING = { version: 1, stopGate: { checks: [{ label: "Fine", run: "node -e 0" }] } };
+const FAILING = { version: 1, stopGate: { checks: [{ label: "Broken", run: 'node -e "process.exit(1)"' }] } };
+const COPY = ".phase-run/phase-x/runner";
+
+/** A project whose live workflow.json is `live`, with a runner copy holding `copy` (both written as given). */
+function copyProject(live, copy) {
+  const { dir, git } = repo("brigade-project-", { ".gitignore": ".phase-run/\n", ".claude/workflow.json": JSON.stringify(live) });
+  if (copy) write(dir, { [`${COPY}/.claude/workflow.json`]: JSON.stringify(copy) });
+  write(dir, { "changed.txt": "the ticket's work\n" });
+  const check = (env = {}) => stop(dir, { PHASE_RUN: "1", PHASE_RUN_TICKET: "7", PHASE_RUN_BASE: git("rev-parse", "HEAD"), ...env });
+  return { dir, check, runner: join(dir, COPY) };
+}
+
+test("with PHASE_RUN_RUNNER set the stop gate runs the copy's checks; without it, the live tree's", () => {
+  const frozenFails = copyProject(PASSING, FAILING);
+  const failed = frozenFails.check({ PHASE_RUN_RUNNER: frozenFails.runner });
+  assert.equal(failed.status, 2);
+  assert.match(failed.stderr, /Broken failed/);
+  assert.equal(frozenFails.check().status, 0, "attended reading: the live tree's passing check");
+
+  const frozenPasses = copyProject(FAILING, PASSING);
+  assert.equal(frozenPasses.check({ PHASE_RUN_RUNNER: frozenPasses.runner }).status, 0, "the live tree's failing check is not run");
+});
+
+test("with PHASE_RUN_RUNNER set the stop gate imports the copy's receipt code, not the project's", async () => {
+  const { dir, check, lastLog } = await receiptProject();
+  const runner = join(dir, COPY);
+  // The copy's receipt code vouches for everything; the project's (real) code sees no receipt at all.
+  write(dir, {
+    [`${COPY}/.claude/workflow.json`]: readFileSync(join(dir, ".claude/workflow.json"), "utf8"),
+    [`${COPY}/tools/phase-run/receipt.mjs`]: [
+      "export const receiptPath = () => 'none';",
+      "export const readReceipt = () => ({ passed: true });",
+      "export const treeKey = () => 'tree';",
+      "export const receiptHolds = () => true;",
+      "export const receiptUnread = () => [];",
+    ].join("\n"),
+  });
+  assert.equal(check().status, 2, "live receipt code: no receipt, the failing tests run");
+  assert.equal(check({ PHASE_RUN_RUNNER: runner }).status, 0, "the copy's code held the receipt");
+  assert.equal(lastLog().testsSkipped, true);
+});
+
+test("a PHASE_RUN_RUNNER that names no folder, or a copy that lost its config, fails the stop gate", () => {
+  const { dir, check } = copyProject(PASSING, null);
+  const result = check({ PHASE_RUN_RUNNER: join(dir, COPY) });
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /runner copy[\s\S]*is missing/);
+  // The folder is there, its workflow.json gone (a shell write): still an error, never "no checks".
+  write(dir, { [`${COPY}/manifest.json`]: "{}\n" });
+  const lost = check({ PHASE_RUN_RUNNER: join(dir, COPY) });
+  assert.equal(lost.status, 2);
+  assert.match(lost.stderr, /has lost its \.claude\/workflow\.json/);
+});

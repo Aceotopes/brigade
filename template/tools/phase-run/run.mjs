@@ -39,6 +39,7 @@ import { BROWSER_CHECK, fill, fillEnv, loadRunConfig, qaUrl, sessionEnv as pinne
 import { Screen, notify, ticketMinutes } from "./display.mjs";
 import { LEDGER_PATH, appendRow, ledgerRow, stampVersion } from "./ledger.mjs";
 import { hookTime, loadPrices, sessionCost, stepKind, stepRules, ticketMetrics } from "./metrics.mjs";
+import { finishSnapshot, takeSnapshot } from "./snapshot.mjs";
 import { DEFAULT_RULES as DEFAULT_SIZE, measureTicket as ticketSize } from "./ticket-size.mjs";
 import * as docConfig from "../doc-config.mjs";
 
@@ -599,6 +600,9 @@ function proseSections(text) {
  */
 function promptValues(project, prose, ticket) {
   const { BASE: base, N } = ticket;
+  // The session's own check command is the run's copy's (ticket.RUNNER, from the repo's root), so
+  // its receipt is made by the code the stop hook judges with (ADR 0005). Live with no copy.
+  const stopTests = `\`node ${ticket.RUNNER ? `${ticket.RUNNER}/` : ""}tools/phase-run/stop-tests.mjs\``;
   const sections = proseSections(prose);
   const spliced = Object.fromEntries(Object.entries(PROSE_SECTIONS).map(([name, key]) => [key, render(sections[name] ?? "", ticket)]));
   const target = project.migrations?.target.name ?? null;
@@ -612,10 +616,10 @@ function promptValues(project, prose, ticket) {
     TARGET: target ?? "a shared database",
     // The tests (a `receipt` row) are run through stop-tests.mjs, so their pass leaves the receipt the stop check reads.
     STOP_CHECKS: project.stopChecks.length
-      ? project.stopChecks.map((c) => (c.receipt ? "`node tools/phase-run/stop-tests.mjs` (the tests)" : `\`${c.run.replaceAll("{base}", base)}\``)).join(", ")
+      ? project.stopChecks.map((c) => (c.receipt ? `${stopTests} (the tests)` : `\`${c.run.replaceAll("{base}", base)}\``)).join(", ")
       : "nothing, as this project names no stop checks",
     RECEIPT: project.stopChecks.some((c) => c.receipt)
-      ? " Run the tests through `node tools/phase-run/stop-tests.mjs`, never by hand: it prints a short summary (the failures and the totals), and on a pass records a receipt, so a second run on the same code (or the stop check) skips them. Any edit since makes them run again, " +
+      ? ` Run the tests through ${stopTests}, never by hand: it prints a short summary (the failures and the totals), and on a pass records a receipt, so a second run on the same code (or the stop check) skips them. Any edit since makes them run again, ` +
         unreadNote(project.stopChecks) +
         ": so write your docs and logs first, and run the tests last."
       : "",
@@ -1671,6 +1675,22 @@ function sessionFacts(result, previous) {
   };
 }
 
+/**
+ * The run's variables in one ticket's session. PHASE_RUN_RUNNER points the plugin's hooks at the
+ * run's frozen copy of the runner and its config (snapshot.mjs, ADR 0005); PHASE_RUN_ROOT points
+ * the copy's own scripts (stop-tests.mjs) back at the repo they check.
+ */
+function runVariables({ ticket, base, spec, runner, root }) {
+  return {
+    PHASE_RUN: "1",
+    PHASE_RUN_TICKET: String(ticket),
+    PHASE_RUN_BASE: base,
+    ...(spec ? { PHASE_RUN_SPEC: String(spec) } : {}),
+    PHASE_RUN_RUNNER: runner,
+    PHASE_RUN_ROOT: root,
+  };
+}
+
 async function runTicket(ticket, options, run) {
   const n = ticket.number;
   const base = git("rev-parse", "HEAD");
@@ -1678,13 +1698,7 @@ async function runTicket(ticket, options, run) {
   let sessionId = randomUUID();
   // The session the ticket's night row prices, however the ticket ends (recordNight).
   run.ticketSession = { number: n, sessionId };
-  const env = {
-    ...sessionEnv(),
-    PHASE_RUN: "1",
-    PHASE_RUN_TICKET: String(n),
-    PHASE_RUN_BASE: base,
-    ...(options.spec ? { PHASE_RUN_SPEC: String(options.spec) } : {}),
-  };
+  const env = { ...sessionEnv(), ...runVariables({ ticket: n, base, spec: options.spec, runner: run.runner, root: ROOT }) };
   rmSync(join(STATE, `verdict-${n}.json`), { force: true });
   rmSync(stopCheckMarker(n), { force: true });
   // What every call for this ticket shares. Its settings file (the run's
@@ -1707,6 +1721,7 @@ async function runTicket(ticket, options, run) {
     SPEC: options.spec ? `#${options.spec}` : "none (a one-off ticket)",
     BASE: base,
     FRONTEND: ticket.labels.includes("frontend") ? "yes" : "no",
+    RUNNER: relative(ROOT, run.runner).replaceAll("\\", "/"), // the copy, as the session's shell names it
   };
   Object.assign(values, promptValues(config, projectProse, values));
 
@@ -2032,6 +2047,7 @@ async function main() {
     ledgerFile: join(ROOT, LEDGER_PATH), // one night row per ticket (recordNight)
     brigade: stampVersion(ROOT), // the runner that judges the night: the project's stamp, null with none
     ticketSession: null,
+    runner: null, // the run's frozen copy of the runner and its config (takeSnapshot, below)
   };
   mkdirSync(run.dir, { recursive: true });
   run.all = loadResults(resultsFile(run));
@@ -2039,6 +2055,20 @@ async function main() {
   const reportFile = join(run.dir, `report-${run.runId.slice(0, 16).replace(/[:T]/g, "-")}.md`);
   mkdirSync(join(STATE, "tmp"), { recursive: true }); // where a session keeps its scratch files
   logFile = join(run.dir, "run.log");
+  // One frozen copy of the runner and its config judges the whole run (snapshot.mjs, ADR 0005):
+  // a restart after a crash reuses it, and is refused when the live runner's code changed since.
+  try {
+    const snapshot = takeSnapshot({ root: ROOT, runDir: run.dir, runId: run.runId, commit: git("rev-parse", "HEAD"), at: Date.now() });
+    run.runner = snapshot.dir;
+    log(snapshot.reused ? `Restarted on the runner copy taken ${snapshot.manifest.takenAt} (run ${snapshot.manifest.runId}).` : `Runner copy taken at ${snapshot.manifest.commit.slice(0, 7)}.`, { routine: true });
+  } catch (error) {
+    die(error.message);
+  }
+  // The runner's own gates and the prompt's checks come from the copy too, as the hooks' do: on a
+  // restart the live config may have changed since the copy was taken.
+  const frozen = loadRunConfig(run.runner);
+  if (frozen.error) die(`The run's copy of the config cannot be read (${run.runner}): ${frozen.error}`);
+  config = frozen.config;
   liveFile = join(run.dir, "live.json");
   const appliedFile = join(run.dir, "migrations-applied.json");
   if (existsSync(appliedFile)) for (const name of JSON.parse(readFileSync(appliedFile, "utf8"))) run.migrationsApplied.add(name);
@@ -2108,6 +2138,7 @@ async function main() {
   writeFileSync(reportFile, text);
   for (const result of run.all) result.reported = true;
   saveResults(run);
+  finishSnapshot(run.runner); // the run reached its report: the next one takes a fresh copy
   if (run.pullRequest) exec("gh", ["pr", "comment", branch, "--body-file", reportFile]);
   log(`Run finished. Report: ${reportFile}${run.pullRequest ? ` · pull request: ${run.pullRequest}` : ""}`);
   rmSync(liveFile, { force: true });
@@ -2136,6 +2167,7 @@ export {
   recordResult,
   report,
   runSession,
+  runVariables,
   screenshotsSince,
   sessionEnv,
   sessionSettings,

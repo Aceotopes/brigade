@@ -22,6 +22,14 @@ migration in `scripts/migrations.mjs`.
   out of step), at the plugin's version. It reads only what the transcript gained since its last
   run, keeping its place in `.phase-run/ledger-state/`. It never prints or blocks, does nothing
   in a phase run, and `"ledger": { "attended": false }` turns it off.
+- **One frozen runner judges a whole run** (ADR 0005). At run start the runner copies
+  `tools/phase-run/` and `.claude/workflow.json` to `.phase-run/<branch>/runner/`, with a
+  `manifest.json` (`takenAt`, `commit`, `runId`, `finished`). Each ticket's settings carry
+  `PHASE_RUN_RUNNER` (the copy) and `PHASE_RUN_ROOT` (the repo); the stop gate and the shell guard
+  then read the copy's config and import its receipt code, and the session runs the copy's
+  `stop-tests.mjs`. A crashed run restarts on its copy, and refuses to when the runner's `.mjs`
+  files changed since, naming them; a run that reaches its report marks the copy finished. A
+  0.5.x plugin's hooks ignore the variable, so update the plugin with the template.
 
 ## 0.5.2 — 2026-11-04
 No config format change. The first version built by a phase run on Brigade itself.

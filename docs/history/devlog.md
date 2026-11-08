@@ -9,6 +9,20 @@ Each commit's entry goes on top, in the shape of `docs/_templates/devlog-entry.m
 message cites it (`devlog #N`). At each phase end, `node tools/doc-rotate.mjs` moves the closed
 entries into `docs/history/devlog/`.
 
+## #10 · feat · the runner snapshot: one frozen copy judges a run
+
+**Built:**
+- `snapshot.mjs`: at run start, `tools/phase-run/` and `.claude/workflow.json` are copied to
+  `.phase-run/<branch>/runner/` with a manifest. A crashed run restarts on that copy, refused,
+  naming the files, when the runner's `.mjs` changed. A finished run's copy is taken fresh.
+- Each ticket's env carries `PHASE_RUN_RUNNER` and `PHASE_RUN_ROOT`. The stop gate and the guard
+  read the copy's config and receipt code, and fail closed on a missing copy. The prompt's check
+  command runs the copy's `stop-tests.mjs`.
+**Verified:** hook seams with and without the copy (stop-gate, guard-shell), five snapshot tests,
+stop-tests from a copy layout, env contract, prompt render; full stop-check suite. Backend only:
+no browser check.
+**Next:** the next ticket of #11. **Record:** implementation log 005.
+
 ## #9 · feat · the attended ledger hook
 
 **Built:**

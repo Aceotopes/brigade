@@ -25,7 +25,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileS
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { loadWorkflowConfig } from "./workflow-config.mjs";
+import { judgeRoot, loadJudgeConfig } from "./workflow-config.mjs";
 
 const TAIL = 5000;
 
@@ -60,7 +60,11 @@ function run(label, command) {
   return `${label} failed (\`${command}\`). The end of its output:\n\n${output.slice(-TAIL)}`;
 }
 
-const config = loadWorkflowConfig(ROOT);
+// The checks and the receipt code are the run's frozen copy's when PHASE_RUN_RUNNER names one (ADR
+// 0005), so nothing written mid-night changes how later tickets are judged. The work they judge
+// (git, the verdict, the receipt file, each check's cwd) stays the project's.
+const JUDGE = judgeRoot(ROOT);
+const config = loadJudgeConfig(ROOT);
 if (!config.error && config.checks.length === 0) process.exit(0);
 
 const base = process.env.PHASE_RUN_BASE || "main";
@@ -88,7 +92,7 @@ if (ticket) {
 // The session's own tools/phase-run/stop-tests.mjs leaves a receipt when the
 // tests pass. A `receipt` check whose receipt still holds (this exact code,
 // this base, this command) is not run again; every other check is. The receipt
-// code is the project's, imported from it: a project without it, or one this
+// code is the project's (the run's copy of it), imported from it: a project without it, or one this
 // cannot load, has every check run, as before receipts existed. The tests row's
 // `unread` paths (the loader makes every receipt row share one list) are left
 // out of the key, so a docs-only edit after the pass keeps the receipt.
@@ -112,7 +116,7 @@ for (const check of config.checks) {
 
 async function loadReceipts() {
   try {
-    return await import(pathToFileURL(join(ROOT, "tools", "phase-run", "receipt.mjs")).href);
+    return await import(pathToFileURL(join(JUDGE, "tools", "phase-run", "receipt.mjs")).href);
   } catch {
     return null;
   }

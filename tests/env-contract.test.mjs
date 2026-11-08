@@ -17,6 +17,7 @@ const READERS = [
   "hooks/ledger.mjs",
   "hooks/stop-gate.mjs",
   "hooks/version-check.mjs",
+  "hooks/workflow-config.mjs",
   "template/tools/doc-check.mjs",
   // What a session runs, under the runner's variables.
   "template/tools/phase-run/stop-tests.mjs",
@@ -48,6 +49,11 @@ test("every PHASE_RUN name a hook or doc-check reads is one the runner sets", ()
   // The names in the session's env block: `PHASE_RUN_X:` keys.
   const set = new Set([...runner.matchAll(/\b(PHASE_RUN(?:_[A-Z]+)*)\s*:/g)].map((m) => m[1]));
   assert.ok(set.has("PHASE_RUN"), "run.mjs no longer sets PHASE_RUN: the hooks would never switch on");
+  // The frozen runner copy (ADR 0005): the hooks read the copy, and the copy's scripts find the repo.
+  assert.ok(set.has("PHASE_RUN_RUNNER"), "run.mjs no longer sets PHASE_RUN_RUNNER: the hooks would judge by the live tree");
+  assert.ok(set.has("PHASE_RUN_ROOT"), "run.mjs no longer sets PHASE_RUN_ROOT: the copy's stop-tests.mjs would test the copy");
+  assert.match(read("hooks/workflow-config.mjs"), /PHASE_RUN_RUNNER/, "the hooks' config loader reads the copy");
+  assert.match(read("template/tools/phase-run/stop-tests.mjs"), /PHASE_RUN_ROOT/, "stop-tests.mjs finds the repo from the copy");
   for (const rel of READERS) {
     for (const [name] of read(rel).matchAll(NAME)) {
       if (OWNER_SET.includes(name)) continue;
