@@ -123,7 +123,8 @@ these steps:
     twelve tickets in one evening. The finish ticket (#24) reviewed the phase against its spec,
     saw each hook change in real sessions with the plugin loaded from its folder, and made the
     shell guard read only its own part of the config. The decisions are in the
-    [0.6.0 discovery doc](discovery/04-brigade-0.6.0.md).
+    [0.6.0 discovery doc](discovery/04-brigade-0.6.0.md). 0.6.1 (the next day) fixes the guide's
+    test-override example, which named a real folder and broke doc-check in projects that have one.
 
 ## Changing the workflow
 

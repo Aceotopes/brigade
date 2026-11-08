@@ -293,7 +293,7 @@ your config names (`override.heading`):
 ```md
 ## Tests removed or weakened
 
-- `tests/old-flow.test.mjs`: replaced by `tests/new-flow.test.mjs`; #31 removed the old flow.
+- `<folder>/old-flow.test.mjs`: replaced by `<folder>/new-flow.test.mjs`; #31 removed the old flow.
 ```
 
 - One line per path, written as it is in the repo, and why. The path is matched as a whole word, so

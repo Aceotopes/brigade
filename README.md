@@ -222,7 +222,7 @@ migrations, a browser check and the prose each session is given. Every key is de
 
 ## Status
 
-Version **0.6.0** (see [CHANGELOG.md](CHANGELOG.md)). Brigade is built with Brigade: its own
+Version **0.6.1** (see [CHANGELOG.md](CHANGELOG.md)). Brigade is built with Brigade: its own
 setup adopted this repo in merge mode, and real unattended phase runs built a ticket of 0.5.2 and
 twelve of 0.6.0's. It has been proven on throwaway repos:
 - **measure and trim** (0.6.0): real Claude Code sessions in a scratch repo, with the plugin loaded

@@ -9,6 +9,17 @@ Each commit's entry goes on top, in the shape of `docs/_templates/devlog-entry.m
 message cites it (`devlog #N`). At each phase end, `node tools/doc-rotate.mjs` moves the closed
 entries into `docs/history/devlog/`.
 
+## #20 · fix · 0.6.1: the guide's override example names no real folder
+
+**Built:** the template phase-run guide's test-override example uses `<folder>/…` placeholder
+paths. 0.6.0's named files under `tests/`, which doc-check refused as missing in any project with a
+`tests/` folder, so the project's commits were blocked after `/update-workflow`. A new day-one test
+runs the template's doc-check in a project with the usual code folders. Released as 0.6.1:
+`plugin.json`, the CHANGELOG, the README's version, development entry 14.
+**Verified:** the new test failed on the two example lines, then passed; suites 148/26/153, doc-check clean.
+Found by `/update-workflow`'s verify on this repo, before any other project updated.
+**Next:** update the plugin here and redo `/update-workflow` on 0.6.1. **Record:** this entry only.
+
 ## #19 · feat · finish 0.6.0: the guard reads only its own part, the review's fixes, the release
 
 **Built:** the shell guard refuses only a fault in its own part of `workflow.json` (`parseGuard`,

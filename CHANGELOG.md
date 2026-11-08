@@ -4,6 +4,13 @@ What changed in each version, for `/update-workflow` to show a project before it
 template. Newest first. A version that changes a config file's format says so, and ships its
 migration in `scripts/migrations.mjs`.
 
+## 0.6.1 — 2026-11-09
+No config format change. Update the plugin, then `/update-workflow`.
+- **The phase-run guide's test-override example names no real folder.** 0.6.0's example used paths
+  under `tests/`, so in a project with a `tests/` folder, doc-check refused every commit after
+  `/update-workflow`: the example's files don't exist there. The template's own
+  day-one check now runs in a project with the usual code folders too.
+
 ## 0.6.0 — 2026-11-08
 Measure and trim. **No config format change, and no migration:** a 0.5.x `workflow.json` loads
 unchanged, and `/update-workflow` ends by offering 0.6.0's new rows, one yes each. Update the plugin
