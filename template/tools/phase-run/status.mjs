@@ -13,7 +13,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { forYou, liveText, makePaint, progressText, scoreboard, shortStat } from "./display.mjs";
-import { costOf, loadPrices, sessionUsage } from "./metrics.mjs";
+import { loadPrices, sessionCost } from "./metrics.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -40,8 +40,8 @@ function backfill(result, dir, prices) {
   if (result.session?.metrics) return result;
   const build = readJson(join(dir, `ticket-${result.number}-build.json`));
   if (!build?.transcript || !existsSync(build.transcript)) return result;
-  const usage = sessionUsage(build.transcript);
-  return { ...result, session: { ...result.session, metrics: { costUsd: costOf(usage, prices), peakContext: usage.peakContext, estimated: true } } };
+  const cost = sessionCost(build.transcript, prices);
+  return { ...result, session: { ...result.session, metrics: { costUsd: cost.costUsd, peakContext: cost.peakContext, estimated: true } } };
 }
 
 function card(result, paint) {

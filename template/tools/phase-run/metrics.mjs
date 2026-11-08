@@ -5,21 +5,50 @@
 // - Tokens: each assistant response's `usage`, once per message id (one
 //   response is written as several lines), for the session and every
 //   subagent it started (`<session>/subagents/*.jsonl`).
-// - Cost: those tokens at prices.json's rates. A usage gauge, not a bill.
+// - Cost: each request at prices.json's rates (requestCost), a usage gauge,
+//   not a bill. A response that called the advisor lists its requests in
+//   `usage.iterations`; its top-level usage leaves the advisor's pass out, so
+//   the iterations are what is priced. sessionCostFrom prices only what a
+//   transcript added since a saved state, for the ledger and the attended hook.
 // - Time: each tool call's wait (its result's timestamp minus its call's),
 //   sorted by what the call was (stepRules). The Stop hook's own minutes come
 //   from .phase-run/stop-check-log.jsonl, the gates' from the runner's clock.
 //   "Claude" is what is left: the ticket's wall time minus everything
 //   measured, mostly the model thinking and writing. It is a remainder, not
 //   a reading.
-import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, statSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
+/** The five rates every price row carries, in US dollars per million tokens. */
+const RATES = ["input", "cacheWrite5m", "cacheWrite1h", "cacheRead", "output"];
+
+/** Past this many days since its checkedOn, the price list's test warns. */
+export const PRICES_STALE_DAYS = 90;
+
+const isRate = (value) => typeof value === "number" && Number.isFinite(value) && value >= 0;
+
+/** The price list, refused (thrown) when a row or its `above` tier misses a rate, or `fallback` names no row. */
 export function loadPrices(file = join(HERE, "prices.json")) {
-  return JSON.parse(readFileSync(file, "utf8"));
+  const prices = JSON.parse(readFileSync(file, "utf8"));
+  const rows = prices.perMillion ?? {};
+  for (const [model, row] of Object.entries(rows)) {
+    const missing = RATES.filter((rate) => !isRate(row?.[rate]));
+    if (missing.length) throw new Error(`${file}: the row "${model}" has no ${missing.join(", ")}`);
+    if (row.above === undefined) continue;
+    const short = ["promptTokens", ...RATES].filter((rate) => !isRate(row.above?.[rate]));
+    if (short.length) throw new Error(`${file}: the row "${model}"'s above tier has no ${short.join(", ")}`);
+  }
+  if (!Object.hasOwn(rows, prices.fallback)) throw new Error(`${file}: the fallback "${prices.fallback}" names no row`);
+  return prices;
+}
+
+/** Whole days from the price list's checkedOn to `at`, or null when it has none. */
+export function pricesAgeDays(prices, at) {
+  const checked = Date.parse(`${prices.checkedOn}T00:00:00Z`);
+  return Number.isNaN(checked) ? null : Math.floor((at - checked) / 86_400_000);
 }
 
 function rows(file) {
@@ -36,58 +65,142 @@ function rows(file) {
   return out;
 }
 
-const emptyUsage = () => ({ calls: 0, input: 0, cacheWrite: 0, cacheRead: 0, output: 0, peakContext: 0, byModel: {} });
+// ------------------------------------------------------------------ pricing
 
-function addUsage(total, model, usage) {
+/**
+ * One request's cost in nano-dollars (a whole number: dollars × 1e9), so
+ * costs add up exactly in any order, and two steps sum to the whole. The cache
+ * write goes at its lifetime's rate; what `cache_creation` does not split goes
+ * at the one-hour rate. A prompt (input + writes + reads) over a row's
+ * `above.promptTokens` is priced at that tier; an unlisted model at `fallback`.
+ */
+function requestCost(model, usage, prices) {
+  const write = usage.cache_creation_input_tokens ?? 0;
+  const fiveMinutes = usage.cache_creation?.ephemeral_5m_input_tokens ?? 0;
+  const oneHour = usage.cache_creation?.ephemeral_1h_input_tokens ?? 0;
   const tokens = {
     input: usage.input_tokens ?? 0,
-    cacheWrite: usage.cache_creation_input_tokens ?? 0,
+    cacheWrite5m: fiveMinutes,
+    cacheWrite1h: oneHour + Math.max(0, write - fiveMinutes - oneHour),
     cacheRead: usage.cache_read_input_tokens ?? 0,
     output: usage.output_tokens ?? 0,
   };
+  const prompt = tokens.input + tokens.cacheWrite5m + tokens.cacheWrite1h + tokens.cacheRead;
+  let rate = prices.perMillion[model] ?? prices.perMillion[prices.fallback];
+  if (rate.above && prompt > rate.above.promptTokens) rate = rate.above;
+  // per million tokens → nano-dollars: tokens × rate / 1e6 × 1e9
+  return RATES.reduce((sum, key) => sum + Math.round(tokens[key] * rate[key] * 1000), 0);
+}
+
+const isAdvisor = (iteration) => iteration.type === "advisor_message";
+
+/** The requests one response made: its iterations when it lists them (an advisor pass at its own model), else its usage. */
+function requestsOf(message) {
+  const usage = message.usage;
+  const model = message.model ?? "unknown";
+  const iterations = Array.isArray(usage.iterations) ? usage.iterations : [];
+  if (!iterations.some((it) => !isAdvisor(it))) {
+    return [{ model, usage }, ...iterations.map((it) => ({ model: it.model ?? model, usage: it, advisor: true }))];
+  }
+  return iterations.map((it) => ({ model: it.model ?? model, usage: it, advisor: isAdvisor(it) }));
+}
+
+const emptyCost = () => ({ nanoUsd: 0, costUsd: 0, calls: 0, advisorCalls: 0, input: 0, cacheWrite: 0, cacheRead: 0, output: 0, peakContext: 0 });
+
+/** Adds one response: its cost, the session's own tokens (top-level usage), and its context unless it called the advisor. */
+function addResponse(total, message, prices, ownPeak) {
+  const usage = message.usage;
   total.calls += 1;
-  const mine = (total.byModel[model] ??= { input: 0, cacheWrite: 0, cacheRead: 0, output: 0 });
-  for (const [key, value] of Object.entries(tokens)) {
-    total[key] += value;
-    mine[key] += value;
+  for (const request of requestsOf(message)) {
+    total.nanoUsd += requestCost(request.model, request.usage, prices);
+    if (request.advisor) total.advisorCalls += 1;
   }
-  return tokens.input + tokens.cacheWrite + tokens.cacheRead;
+  total.input += usage.input_tokens ?? 0;
+  total.cacheWrite += usage.cache_creation_input_tokens ?? 0;
+  total.cacheRead += usage.cache_read_input_tokens ?? 0;
+  total.output += usage.output_tokens ?? 0;
+  const context = (usage.input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0);
+  if (ownPeak && !(usage.iterations ?? []).some(isAdvisor)) total.peakContext = Math.max(total.peakContext, context);
 }
 
-/** Token totals of one transcript file. `peakContext` leaves out a response that called the advisor (it adds the advisor's read). */
-export function usageOf(file, total = emptyUsage()) {
-  const seen = new Set();
-  for (const row of rows(file)) {
-    const message = row.message;
-    if (row.type !== "assistant" || !message?.usage) continue;
-    const key = message.id ?? row.uuid;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    const context = addUsage(total, message.model ?? "unknown", message.usage);
-    if (!(message.usage.iterations ?? []).some((it) => it.type === "advisor_message")) total.peakContext = Math.max(total.peakContext, context);
+/**
+ * The complete lines a file gained since byte `offset`, and the offset after
+ * them. A last line still being written is left for next time, unless it
+ * already parses. A file shorter than the offset was replaced: read it again
+ * (its counted ids still skip what was priced). A transcript is only ever
+ * appended to, so a replacement as long or longer is not looked for.
+ */
+function linesSince(file, offset) {
+  if (!existsSync(file)) return { text: "", next: 0 };
+  const size = statSync(file).size;
+  const from = size < offset ? 0 : offset;
+  if (size === from) return { text: "", next: from };
+  const bytes = Buffer.alloc(size - from);
+  const fd = openSync(file, "r");
+  try {
+    readSync(fd, bytes, 0, bytes.length, from);
+  } finally {
+    closeSync(fd);
   }
-  return total;
+  const end = bytes.lastIndexOf(0x0a) + 1;
+  const tail = bytes.subarray(end).toString("utf8");
+  let whole = false;
+  try {
+    JSON.parse(tail);
+    whole = true;
+  } catch {
+    // still being written
+  }
+  return whole ? { text: bytes.toString("utf8"), next: size } : { text: bytes.subarray(0, end).toString("utf8"), next: from + end };
 }
 
-/** A session's tokens with its subagents' added (the peak is the session's own). */
-export function sessionUsage(transcript) {
-  const total = usageOf(transcript);
-  const peak = total.peakContext;
-  const dir = transcript ? join(transcript.replace(/\.jsonl$/, ""), "subagents") : null;
-  if (dir && existsSync(dir)) {
-    for (const name of readdirSync(dir).filter((n) => n.endsWith(".jsonl"))) usageOf(join(dir, name), total);
-  }
-  total.peakContext = peak;
-  return total;
+/** The session's own transcript, then each subagent's beside it (`<session>/subagents/*.jsonl`). */
+function sessionFiles(transcript) {
+  if (!transcript) return [];
+  transcript = resolve(transcript); // the state's keys: one spelling per file
+  const dir = join(transcript.replace(/\.jsonl$/, ""), "subagents");
+  const subagents = existsSync(dir) ? readdirSync(dir).filter((n) => n.endsWith(".jsonl")).sort().map((n) => join(dir, n)) : [];
+  return [transcript, ...subagents];
 }
 
-export function costOf(usage, prices) {
-  let dollars = 0;
-  for (const [model, tokens] of Object.entries(usage.byModel)) {
-    const rate = prices.perMillion[model] ?? prices.perMillion[prices.fallback];
-    for (const key of ["input", "cacheWrite", "cacheRead", "output"]) dollars += (tokens[key] * rate[key]) / 1e6;
-  }
-  return Math.round(dollars * 100) / 100;
+/**
+ * What a session's transcript and its subagents' added since `state`, priced
+ * per request; with no state, the whole session. Returns the cost of the
+ * added part and the new state. The state is plain JSON, one entry per file:
+ * the byte offset read to, and the response ids already counted (a response
+ * is written as several lines, which can fall either side of a step).
+ */
+export function sessionCostFrom(transcript, prices, state = { files: {} }) {
+  const cost = emptyCost();
+  const files = { ...state.files };
+  sessionFiles(transcript).forEach((file, index) => {
+    const before = files[file] ?? { offset: 0, seen: [] };
+    const read = linesSince(file, before.offset);
+    const seen = new Set(before.seen); // kept across a rewrite too, so nothing is counted twice
+    for (const line of read.text.split("\n")) {
+      if (!line) continue;
+      let row;
+      try {
+        row = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      const message = row.message;
+      if (row.type !== "assistant" || !message?.usage) continue;
+      const key = message.id ?? row.uuid;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      addResponse(cost, message, prices, index === 0);
+    }
+    files[file] = { offset: read.next, seen: [...seen] };
+  });
+  cost.costUsd = Math.round(cost.nanoUsd / 1e7) / 100;
+  return { cost, state: { files } };
+}
+
+/** A whole session's cost and tokens: its transcript and its subagents', each request priced on its own. */
+export function sessionCost(transcript, prices) {
+  return sessionCostFrom(transcript, prices).cost;
 }
 
 // ------------------------------------------------------------- step kinds
@@ -182,7 +295,7 @@ const minutes = (ms) => Math.round(ms / 60_000);
  * Minutes: total = start to the end; the named buckets are measured; claude is the rest.
  */
 export function ticketMetrics({ transcript, startedAt, endedAt, gatesMs, hookMs, prices, rules = DEFAULT_RULES }) {
-  const usage = sessionUsage(transcript);
+  const cost = sessionCost(transcript, prices);
   const tools = toolTime(transcript, rules);
   const measured = {
     tests: tools.testing ?? 0,
@@ -196,9 +309,9 @@ export function ticketMetrics({ transcript, startedAt, endedAt, gatesMs, hookMs,
   const totalMs = endedAt - startedAt;
   const rest = Math.max(0, totalMs - Object.values(measured).reduce((a, b) => a + b, 0));
   return {
-    costUsd: costOf(usage, prices),
-    tokens: { calls: usage.calls, input: usage.input, cacheWrite: usage.cacheWrite, cacheRead: usage.cacheRead, output: usage.output },
-    peakContext: usage.peakContext,
+    costUsd: cost.costUsd,
+    tokens: { calls: cost.calls, input: cost.input, cacheWrite: cost.cacheWrite, cacheRead: cost.cacheRead, output: cost.output },
+    peakContext: cost.peakContext,
     minutes: { total: minutes(totalMs), claude: minutes(rest), ...Object.fromEntries(Object.entries(measured).map(([k, v]) => [k, minutes(v)])) },
   };
 }

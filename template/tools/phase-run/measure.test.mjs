@@ -8,7 +8,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { once } from "node:events";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -16,7 +16,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { Screen, makePaint, progressText, resultLines, scoreboard, shortStat, shortTitle, visible } from "./display.mjs";
-import { costOf, hookTime, loadPrices, stepKind, stepRules, ticketMetrics, toolTime, usageOf } from "./metrics.mjs";
+import { PRICES_STALE_DAYS, hookTime, loadPrices, pricesAgeDays, sessionCost, sessionCostFrom, stepKind, stepRules, ticketMetrics, toolTime } from "./metrics.mjs";
 import { readReceipt, receiptHolds, receiptPath, treeKey } from "./receipt.mjs";
 import { promptValues, report } from "./run.mjs";
 import { quietOutput } from "./stop-tests.mjs";
@@ -30,32 +30,133 @@ const lines = (rows) => `${rows.map((row) => JSON.stringify(row)).join("\n")}\n`
 
 // ------------------------------------------------------------------ metrics
 
-const prices = { fallback: "m", perMillion: { m: { input: 4, cacheWrite: 8, cacheRead: 0.2, output: 20 } } };
+const prices = {
+  checkedOn: "2026-11-07",
+  fallback: "m",
+  perMillion: {
+    m: { input: 4, cacheWrite5m: 5, cacheWrite1h: 8, cacheRead: 0.2, output: 20 },
+    adv: { input: 10, cacheWrite5m: 12.5, cacheWrite1h: 20, cacheRead: 0.25, output: 50 },
+  },
+};
 
-test("tokens are counted once per response, and priced per model", () => {
-  const file = join(temp("phase-run-usage-"), "s.jsonl");
+/** A large-prompt tier for row `m`: double its rates over 200K prompt tokens. */
+const ABOVE = { promptTokens: 200_000, input: 8, cacheWrite5m: 10, cacheWrite1h: 16, cacheRead: 0.4, output: 40 };
+
+const reply = (id, usage, model = "m") => ({ type: "assistant", message: { id, model, usage, content: [] } });
+
+/** One transcript of the given rows, priced whole. */
+function priced(rows, list = prices) {
+  const file = join(temp("phase-run-cost-"), "s.jsonl");
+  writeFileSync(file, lines(rows));
+  return sessionCost(file, list);
+}
+
+test("tokens are counted once per response, and priced per request", () => {
   const usage = { input_tokens: 10, cache_creation_input_tokens: 1_000_000, cache_read_input_tokens: 2_000_000, output_tokens: 100_000 };
   // One response written as two lines (text, then a tool call), plus a second response.
-  writeFileSync(file, lines([
-    { type: "assistant", message: { id: "r1", model: "m", usage, content: [] } },
-    { type: "assistant", message: { id: "r1", model: "m", usage, content: [] } },
-    { type: "assistant", message: { id: "r2", model: "m", usage: { ...usage, cache_creation_input_tokens: 0 }, content: [] } },
-  ]));
-  const total = usageOf(file);
+  const total = priced([reply("r1", usage), reply("r1", usage), reply("r2", { ...usage, cache_creation_input_tokens: 0 })]);
   assert.equal(total.calls, 2);
   assert.equal(total.cacheRead, 4_000_000);
   assert.equal(total.peakContext, 3_000_010);
-  // 1M write × $8 + 4M read × $0.20 + 0.2M out × $20 + 20 in = 8 + 0.8 + 4 + 0.00008
-  assert.equal(costOf(total, prices), 12.8);
+  // 1M write with no lifetime split × $8 + 4M read × $0.20 + 0.2M out × $20 + 20 in × $4 = 8 + 0.8 + 4 + 0.00008
+  assert.equal(total.nanoUsd, 12_800_080_000);
+  assert.equal(total.costUsd, 12.8);
+});
+
+test("a cache write is priced at its lifetime's rate, and what the split leaves out at the one-hour rate", () => {
+  const write = (split) => priced([reply("r1", { cache_creation_input_tokens: 1_000_000, ...(split && { cache_creation: split }) })]).nanoUsd;
+  assert.equal(write({ ephemeral_5m_input_tokens: 1_000_000, ephemeral_1h_input_tokens: 0 }), 5e9);
+  assert.equal(write({ ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 1_000_000 }), 8e9);
+  assert.equal(write(null), 8e9);
+  assert.equal(write({ ephemeral_5m_input_tokens: 400_000, ephemeral_1h_input_tokens: 0 }), 6.8e9); // 0.4M × $5 + 0.6M × $8
+});
+
+test("a request over a tier's promptTokens is priced at that tier, and an unlisted model at the fallback", () => {
+  const tiered = { ...prices, perMillion: { m: { ...prices.perMillion.m, above: ABOVE } } };
+  assert.equal(priced([reply("r1", { input_tokens: 200_000 })], tiered).nanoUsd, 800_000_000); // at the threshold: base rate
+  assert.equal(priced([reply("r1", { input_tokens: 100_001, cache_read_input_tokens: 100_000, output_tokens: 1_000 })], tiered).nanoUsd, 800_008_000 + 40_000_000 + 40_000_000);
+  assert.equal(priced([reply("r1", { input_tokens: 1_000_000 }, "claude-unlisted-9")]).nanoUsd, 4e9);
+});
+
+// The shape of a real response that called the advisor: its top-level usage is the
+// session's own two requests, and the advisor's pass is only in `iterations`.
+const ADVISED = {
+  input_tokens: 4,
+  cache_creation_input_tokens: 4360,
+  cache_read_input_tokens: 266_038,
+  output_tokens: 2287,
+  cache_creation: { ephemeral_1h_input_tokens: 2424, ephemeral_5m_input_tokens: 0 },
+  iterations: [
+    { type: "message", input_tokens: 2, output_tokens: 26, cache_read_input_tokens: 131_807, cache_creation_input_tokens: 2424, cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 2424 } },
+    { type: "advisor_message", model: "adv", input_tokens: 135_883, output_tokens: 9959, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+    { type: "message", input_tokens: 2, output_tokens: 2261, cache_read_input_tokens: 134_231, cache_creation_input_tokens: 1936, cache_creation: { ephemeral_5m_input_tokens: 1936, ephemeral_1h_input_tokens: 0 } },
+  ],
+};
+
+test("an advisor pass is priced at the advisor's model, beside the session's own requests", () => {
+  const total = priced([reply("r1", ADVISED)]);
+  // Own: 4 in × $4 + 266,038 read × $0.20 + 2,424 1h write × $8 + 1,936 5m write × $5 + 2,287 out × $20 = $0.128035600
+  // Advisor at adv: 135,883 in × $10 + 9,959 out × $50 = $1.856780000
+  assert.equal(total.nanoUsd, 1_984_815_600);
+  assert.equal(total.costUsd, 1.98);
+  assert.equal(total.advisorCalls, 1);
+  assert.equal(total.output, 2287); // the session's own tokens; the advisor's are only priced
 });
 
 test("a response that called the advisor is left out of the peak context", () => {
-  const file = join(temp("phase-run-advisor-"), "s.jsonl");
-  writeFileSync(file, lines([
-    { type: "assistant", message: { id: "r1", model: "m", usage: { input_tokens: 100 }, content: [] } },
-    { type: "assistant", message: { id: "r2", model: "m", usage: { input_tokens: 900, iterations: [{ type: "advisor_message" }] }, content: [] } },
-  ]));
-  assert.equal(usageOf(file).peakContext, 100);
+  const total = priced([reply("r1", { input_tokens: 100 }), reply("r2", { input_tokens: 900, iterations: [{ type: "advisor_message", model: "adv" }] })]);
+  assert.equal(total.peakContext, 100);
+});
+
+test("a session's cost includes the subagent transcripts beside it; its peak is its own", () => {
+  const dir = temp("phase-run-subagents-");
+  const file = join(dir, "s.jsonl");
+  writeFileSync(file, lines([reply("r1", { input_tokens: 1_000_000 })]));
+  mkdirSync(join(dir, "s", "subagents"), { recursive: true });
+  writeFileSync(join(dir, "s", "subagents", "agent-a.jsonl"), lines([reply("a1", { input_tokens: 2_000_000, output_tokens: 1_000_000 }, "adv")]));
+  const total = sessionCost(file, prices);
+  assert.equal(total.nanoUsd, 4e9 + 20e9 + 50e9);
+  assert.equal(total.calls, 2);
+  assert.equal(total.peakContext, 1_000_000);
+});
+
+test("the incremental form prices only what was added, and two steps equal the whole", () => {
+  const dir = temp("phase-run-steps-");
+  const file = join(dir, "s.jsonl");
+  const usage = { input_tokens: 10, cache_creation_input_tokens: 5_000, cache_read_input_tokens: 70_000, output_tokens: 300 };
+  const text = lines([reply("r1", usage), reply("r1", usage), reply("r2", ADVISED), reply("r3", { ...usage, output_tokens: 9 })]);
+  const firstLine = text.indexOf("\n") + 1;
+  const midSecondResponse = text.indexOf('"r2"') + 20;
+
+  writeFileSync(file, text.slice(0, firstLine)); // between the two lines of one response
+  const one = sessionCostFrom(file, prices);
+  appendFileSync(file, text.slice(firstLine, midSecondResponse)); // ends mid-line
+  const two = sessionCostFrom(file, prices, one.state);
+  appendFileSync(file, text.slice(midSecondResponse));
+  mkdirSync(join(dir, "s", "subagents"), { recursive: true });
+  writeFileSync(join(dir, "s", "subagents", "agent-a.jsonl"), lines([reply("a1", usage, "adv")])); // a subagent started late
+  const three = sessionCostFrom(file, prices, two.state);
+
+  assert.equal(two.cost.calls, 0); // the duplicate line and the half-written one add nothing yet
+  const whole = sessionCost(file, prices);
+  assert.equal(one.cost.nanoUsd + two.cost.nanoUsd + three.cost.nanoUsd, whole.nanoUsd);
+  assert.equal(one.cost.calls + two.cost.calls + three.cost.calls, whole.calls);
+  assert.equal(whole.calls, 4);
+  assert.equal(Math.max(one.cost.peakContext, two.cost.peakContext, three.cost.peakContext), whole.peakContext);
+  assert.equal(sessionCostFrom(file, prices, three.state).cost.nanoUsd, 0); // nothing new
+});
+
+test("the incremental form knows a file however its path is spelled, and never counts a response twice when a file is rewritten", () => {
+  const dir = temp("phase-run-rewrite-");
+  const file = join(dir, "s.jsonl");
+  writeFileSync(file, lines([reply("r1", { input_tokens: 1_000_000 }), reply("r2", { input_tokens: 1_000_000 })]));
+  const one = sessionCostFrom(file, prices);
+  assert.equal(sessionCostFrom(`${dir}/./s.jsonl`, prices, one.state).cost.nanoUsd, 0);
+  writeFileSync(file, lines([reply("r1", { input_tokens: 1_000_000 })])); // shorter than the saved offset
+  const two = sessionCostFrom(file, prices, one.state);
+  assert.equal(two.cost.nanoUsd, 0);
+  appendFileSync(file, lines([reply("r3", { input_tokens: 1_000_000 })]));
+  assert.equal(sessionCostFrom(file, prices, two.state).cost.nanoUsd, 4e9);
 });
 
 test("each kind of step gets a plain word, from Brigade's rows", () => {
@@ -111,10 +212,57 @@ test("a ticket's minutes: the measured waits, the hook and the gates, and Claude
   assert.deepEqual(metrics.minutes, { total: 80, claude: 51, tests: 5, checks: 0, browser: 3, waiting: 4, reviewing: 0, hook: 10, gates: 7 });
 });
 
-test("prices.json names a fallback it has a row for, and four rates per row", () => {
+test("prices.json lists Opus 5.5, Sonnet 5.5 and Fable 5.1 only, five rates each, Opus as the fallback", () => {
   const real = loadPrices();
-  assert.ok(real.perMillion[real.fallback]);
-  for (const rate of Object.values(real.perMillion)) assert.deepEqual(Object.keys(rate).sort(), ["cacheRead", "cacheWrite", "input", "output"]);
+  assert.equal(real.fallback, "claude-opus-5-5");
+  assert.match(real.checkedOn, /^\d{4}-\d{2}-\d{2}$/);
+  // US dollars per million tokens: input, 5-minute write, 1-hour write, cache read, output (spec #11, D1).
+  assert.deepEqual(real.perMillion, {
+    "claude-opus-5-5": { input: 4, cacheWrite5m: 5, cacheWrite1h: 8, cacheRead: 0.2, output: 20 },
+    "claude-sonnet-5-5": { input: 2, cacheWrite5m: 2.5, cacheWrite1h: 4, cacheRead: 0.2, output: 10 },
+    "claude-fable-5-1": { input: 10, cacheWrite5m: 12.5, cacheWrite1h: 20, cacheRead: 0.25, output: 50 },
+  });
+});
+
+const RATE = prices.perMillion.m;
+
+/** A price list of the one row `m`, written to a file and loaded as loadPrices reads one. */
+function loadRow(row, fallback = "m") {
+  const file = join(temp("phase-run-prices-"), "prices.json");
+  writeFileSync(file, JSON.stringify({ checkedOn: "2026-11-07", fallback, perMillion: { m: row } }));
+  return loadPrices(file);
+}
+
+test("loading the price list refuses a row missing any of the five rates", () => {
+  for (const missing of Object.keys(RATE)) {
+    const { [missing]: _, ...row } = RATE;
+    assert.throws(() => loadRow(row), new RegExp(`"m".*${missing}`));
+  }
+});
+
+test("loading the price list refuses a fallback that names no row", () => {
+  assert.throws(() => loadRow(RATE, "gone"), /fallback "gone"/);
+});
+
+test("an `above` tier is accepted with a promptTokens and five rates, and refused short of a rate", () => {
+  assert.equal(loadRow({ ...RATE, above: ABOVE }).perMillion.m.above.promptTokens, 200_000);
+  const { output: _, ...short } = ABOVE;
+  assert.throws(() => loadRow({ ...RATE, above: short }), /"m".*above.*output/);
+  const { promptTokens: __, ...noThreshold } = ABOVE;
+  assert.throws(() => loadRow({ ...RATE, above: noThreshold }), /"m".*above.*promptTokens/);
+});
+
+test("a price list's age is counted in whole days from its checkedOn", () => {
+  const list = { checkedOn: "2026-11-07" };
+  assert.equal(pricesAgeDays(list, Date.UTC(2027, 1, 5, 12)), 90); // 5 Feb 2027: not yet stale
+  assert.equal(pricesAgeDays(list, Date.UTC(2027, 1, 6, 12)), 91);
+  assert.equal(pricesAgeDays({}, Date.UTC(2027, 1, 6)), null);
+});
+
+// The one test that reads the real clock, so it only ever warns.
+test("prices.json was checked in the last 90 days (a warning, never a failure)", (t) => {
+  const age = pricesAgeDays(loadPrices(), Date.now());
+  if (age == null || age > PRICES_STALE_DAYS) t.diagnostic(`WARNING: tools/phase-run/prices.json's checkedOn is ${age ?? "missing"} days old; check the rates against Claude's price list and update it.`);
 });
 
 // -------------------------------------------------------------- ticket size

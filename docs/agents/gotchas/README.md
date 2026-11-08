@@ -11,4 +11,7 @@ plain. The index below is generated.
 <!-- generated:start gotchas -->
 **[Gotchas — Phase dogfood: Brigade on itself](dogfood.md)**
 - `#9` setup's Node test gates, `scripts/setup.mjs` `detect` / `stackChecks`
+
+**[Gotchas — Phase measure-trim: Brigade 0.6.0, measure and trim](measure-trim.md)**
+- `#13` pricing a session, `template/tools/phase-run/metrics.mjs` `sessionCost` / `sessionCostFrom`
 <!-- generated:end gotchas -->

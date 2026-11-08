@@ -4,6 +4,13 @@ What changed in each version, for `/update-workflow` to show a project before it
 template. Newest first. A version that changes a config file's format says so, and ships its
 migration in `scripts/migrations.mjs`.
 
+## Unreleased
+- **Each request priced the way Claude bills it.** `tools/phase-run/prices.json` has five rates
+  per model (`input`, `cacheWrite5m`, `cacheWrite1h`, `cacheRead`, `output`), a `checkedOn` date,
+  an optional `above` tier, and only Opus 5.5, Sonnet 5.5 and Fable 5.1 (the Haiku row is gone).
+  A row missing a rate, or a `fallback` with no row, now stops it loading. A ticket's cost now
+  includes its advisor passes, at the advisor's model.
+
 ## 0.5.2 — 2026-11-04
 No config format change. The first version built by a phase run on Brigade itself.
 - **Setup proposes Node tests for a repo without `package.json`.** `detect` lists the test files

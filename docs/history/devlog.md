@@ -9,6 +9,18 @@ Each commit's entry goes on top, in the shape of `docs/_templates/devlog-entry.m
 message cites it (`devlog #N`). At each phase end, `node tools/doc-rotate.mjs` moves the closed
 entries into `docs/history/devlog/`.
 
+## #7 · feat · pricing: five rates, three models, each request on its own
+
+**Built:**
+- `prices.json`: `checkedOn`, Opus fallback, five rates for Opus 5.5, Sonnet 5.5, Fable 5.1 (no Haiku).
+- `loadPrices` refuses a row or `above` tier short of a rate, and a fallback with no row.
+- `requestCost`: 5m/1h writes at their own rates, an unsplit write at 1h, the `above` tier, fallback.
+- `sessionCost` / `sessionCostFrom`: transcript and subagents, advisor passes at their own model,
+  incremental from a saved state, in whole nano-dollars; the report and `status.mjs` use them.
+**Verified:** `measure.test.mjs` 43/43 (refusals, tiers, advisor, subagents, 3-step = whole, a
+rewrite); the stop-check suite; code review (2 fixes). Backend only: no browser check.
+**Next:** #14, the ledger. **Record:** implementation log 002.
+
 ## #6 · research · the 0.6.0 probe, Brigade under the night's flags
 
 **Built:**
