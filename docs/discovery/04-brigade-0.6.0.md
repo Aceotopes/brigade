@@ -1,5 +1,47 @@
 # Discovery: Brigade 0.6.0, measure and trim
 
+> **Addendum 2026-11-08 (the finish, #24):** the whole-phase review, the open question, and the
+> live checks.
+> - **The reverse out-of-step (owner): the shell guard checks only its own part**, `version` and
+>   `guard`. A fault anywhere else (a key from a newer Brigade, say) lets shell commands run with
+>   the guard's rules still applied, and the session-start notice names it. The stop gate (phase
+>   runs only) and the runner's preflight stay strict, so such a file still stops a run. This
+>   protects the next release's config under a 0.6.0 plugin; 0.5.x plugins already shipped still
+>   refuse 0.6.0 keys, so the CHANGELOG keeps "update the plugin first". It also ends #20's "any
+>   fault in `phaseRun.tampering` blocks every shell command": the tampering gate reads its rules
+>   from the base commit and never fails open by itself.
+> - **Review decisions (owner):**
+>   - a night row carries the installed plugin's version, as #25 built, which reverses #14's "the
+>     stamp", so night and attended rows say the same thing;
+>   - a night's base settings and its prompts are read from the run's copy too (ADR 0005);
+>   - a test override line must say why, beside the path (user story 57).
+> - **Fixed without a decision:** a ledger row appended after a torn line starts a line of its own,
+>   and a stale comment and two misnamed tests now name the installed version.
+> - **Recorded, not changed:**
+>   - rows without a `name` still share one `unread` list, which follows from D10's file name;
+>   - a reason in the commit message without the heading's words still fails the gate, but isn't
+>     reported as refused;
+>   - a failed `gh pr create` after a built ticket's push lists that ticket twice in the report;
+>   - a passing `stop-tests.mjs` hides the price list's age warning.
+> - **Seen live** (Claude Code 2.1.319, a scratch repo set up by `setup.mjs`, the plugin by
+>   `--plugin-dir`, night settings built by the runner's own exports):
+>   - one attended reply left a priced `attended` row ($0.08, against Claude Code's $0.083), and
+>     `"attended": false` left none;
+>   - on a night's docs-only edit, the stop gate skipped `lint` and `tests` (`receipt: held`), and on
+>     a code edit it reran both (`stale`);
+>   - with `PHASE_RUN_RUNNER` set, the guard blocked the copy's rule and let the live-only one
+>     through. The `autoUpdate: false` override and the `skillOverrides` were accepted with no
+>     settings error, and the session came up with 6 plugins, 0 MCP servers and 64 skills;
+>   - trim cut a night session's first prompt from 37,112 and 46,133 tokens (two controls, with 8
+>     plugins, 113 skills and 3 MCP servers) to 31,084 (two trimmed runs);
+>   - with an unknown top-level key, the notice named it, `ls` ran, and the guard's rule still held.
+> - **Not seen:**
+>   - a real 0.6.0 night: the runner's own snapshot and version read, gates side by side, and
+>     tampering on a real ticket;
+>   - a `--bg` resume keeping trim's flags (a `--bg` launch needs a folder opened in Claude Code
+>     once);
+>   - auto-update firing.
+
 > **Addendum 2026-11-08 (the probe, #12):** run attended on Claude Code 2.1.319, in scratch git
 > repos where Brigade was the *installed* plugin, enabled at project scope.
 > - **(a) Yes: Brigade's hooks and skills survive the night's flags.**

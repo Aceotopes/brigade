@@ -45,10 +45,16 @@ export function tamperingVerdict({ base, rules, paths, patch = "", readAt, body 
   const heading = judged.override?.heading ?? null;
   const overrides = sectionLines(body, heading);
   const overridden = new Set();
-  /** Whether the override names `path`; each path it lets through is recorded in `overridden`. */
+  const bare = new Set();
+  /**
+   * Whether the override names `path` and says why; each path it lets through is recorded in
+   * `overridden`, and one named with no reason in `bare`, for the output.
+   */
   const overrideAllows = (path) => {
-    const allowed = overrides.some((line) => namesPath(line, path));
+    const naming = overrides.filter((line) => namesPath(line, path));
+    const allowed = naming.some((line) => givesReason(line, path));
     if (allowed) overridden.add(path);
+    else if (naming.length) bare.add(path);
     return allowed;
   };
   const isTest = globList(judged.testFiles);
@@ -110,7 +116,7 @@ export function tamperingVerdict({ base, rules, paths, patch = "", readAt, body 
     ? `The commit message gave a reason for weakening ${refused.map((p) => `\`${p}\``).join(", ")}; it was refused. Only a line under "${heading}" in the ticket body, written before the run, lets a path through.`
     : null;
   const ok = findings.length === 0;
-  return { ok, findings, overridden: [...overridden], refused, refusedNote, problem: null, output: ok ? "" : report(findings, { base, heading, refused }) };
+  return { ok, findings, overridden: [...overridden], refused, refusedNote, problem: null, output: ok ? "" : report(findings, { base, heading, refused, bare: [...bare] }) };
 }
 
 /** The base commit's rules, through the loaders' own checks. Throws, saying why, when there are none to read. */
@@ -149,9 +155,10 @@ const FINDING_LINES = {
   unreadable: (f) => `${f.path} left the test files, and its text at the base could not be read to count its assertions`,
 };
 
-function report(findings, { base, heading, refused }) {
+function report(findings, { base, heading, refused, bare = [] }) {
   const lines = [`This ticket weakens its tests or what judges them (phaseRun.tampering, read from the base commit ${short(base)}):`];
   for (const f of findings) lines.push(`- ${FINDING_LINES[f.kind](f)}`);
+  for (const path of bare) lines.push("", `"${heading}" names ${path} with no reason, so it lets nothing through: an override line says why, such as "- ${path}: its flaky case goes; #31 rewrites it."`);
   if (refused.length) lines.push("", `A reason in the commit message does not count (found for ${refused.join(", ")}).`);
   lines.push(
     "",
@@ -249,6 +256,17 @@ export function sectionLines(text, heading) {
 export function namesPath(line, path) {
   const escaped = path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return new RegExp(`(?<![\\w./-])${escaped}(?![\\w/-]|\\.\\w)`).test(line);
+}
+
+/**
+ * Whether an override line says why, beside naming `path` (the spec's "names a path and why"): any
+ * word left once the path, every other path-shaped word (folders or a dot, ending in an extension of
+ * two letters or more, so a line naming two files is no reason for either, while "e.g." stays a
+ * word), list markers, emphasis and punctuation are taken out.
+ */
+function givesReason(line, path) {
+  const rest = line.replaceAll(path, " ").replace(/(?:[\w@-]+[./])+[\w@-]*[A-Za-z]{2,}/g, " ").replace(/^\s*(?:[-*+]|\d+[.)])\s+/, "");
+  return /[\p{L}\p{N}]/u.test(rest);
 }
 
 /** A reason in the commit message: the override heading's words, then the path named after them. */

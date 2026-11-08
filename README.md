@@ -22,6 +22,9 @@ one with a script, not a reminder in a prompt:
 | Docs drift from the code, or bloat until nobody reads them | **`doc-check`** fails a commit on stale phrases, paths that no longer exist, missing headers, docs over their line budget, and out-of-date indexes. The **`doc-sync`** skill keeps each doc to one job |
 | Big work gets planned from memory, one feature at a time | **The ladder**: discovery docs for the whole product, modules for each area, phases sized to test in a morning, tickets sized for one session. Each grill names its sources |
 | Frontends get redone, each screen inventing its own look | **The design rung**: the app shell and visual system come first, each module's screens are prototyped in the real app and approved before its tickets, and `/ticket-check` refuses a screen ticket until they are |
+| A session passes by switching tests off, or loosening what judges it | The **tampering gate** fails a ticket that adds skip or focus markers, removes assertions, or changes a guarded file, unless the ticket body says which file and why |
+| The rules change halfway through a night (a shell write, your own edit, a plugin update) | The runner takes a **frozen copy** of itself and the config at the start; the hooks judge the whole night by it, and a Brigade version change stops the run cleanly |
+| Nobody knows what a night, or a day of attended work, costs | Every session leaves a priced row in the project's **ledger**, read by week or as CSV, and **trim** starts night sessions without the plugins, skills and MCP servers they never use |
 | Setting all this up by hand in every repo | **`/setup-workflow`** reads your discovery doc's stack and your files, and writes everything: new repos and existing ones. Its **refresh** keeps the config in step when the stack changes |
 | A copied workflow goes stale when the plugin improves | New releases arrive by auto-update, and the **out-of-step notice** says at launch when the project is behind. **`/update-workflow`** re-copies the plugin's files, using a version stamp to tell your edits from untouched files |
 | Nobody can see where the project stands | **`/roadmap`** checks the roadmap's tables against GitHub and publishes the **roadmap page**: modules in build order, their phases, and what comes next |
@@ -47,7 +50,7 @@ Brigade has three parts:
 
 | Part | What it is | Where it lives |
 |---|---|---|
-| **The plugin** | The two hooks, five skills, and the scripts behind setup and `/roadmap` (with the roadmap page's template) | Installed into Claude Code; updated with the plugin |
+| **The plugin** | The hooks, five skills, and the scripts behind setup and `/roadmap` (with the roadmap page's template) | Installed into Claude Code; updated with the plugin |
 | **The template** | The doc tools, the phase runner, the workflow docs and the doc-check CI job | Copied into your repo by setup, because CI and `node` run them there; re-copied by `/update-workflow` |
 | **Your config** | `.claude/workflow.json` (your rules, checks and gates), the doc-check settings, the CI checks | Written once by setup from your stack; yours from then on, and never overwritten |
 
@@ -219,9 +222,14 @@ migrations, a browser check and the prose each session is given. Every key is de
 
 ## Status
 
-Version **0.5.2** (see [CHANGELOG.md](CHANGELOG.md)). Brigade is built with Brigade: its own
-setup adopted this repo in merge mode, and a real unattended phase run built a ticket of 0.5.2. It
-has been proven on throwaway repos:
+Version **0.6.0** (see [CHANGELOG.md](CHANGELOG.md)). Brigade is built with Brigade: its own
+setup adopted this repo in merge mode, and real unattended phase runs built a ticket of 0.5.2 and
+twelve of 0.6.0's. It has been proven on throwaway repos:
+- **measure and trim** (0.6.0): real Claude Code sessions in a scratch repo, with the plugin loaded
+  from its folder, showed an attended reply leaving a priced ledger row (and none when turned off);
+  a night session's hooks judging by the run's frozen copy, not the live config; each stop check
+  skipped on a docs-only edit and rerun on a code edit; trim's settings accepted, cutting the first
+  prompt from 37K-46K tokens to 31K; and a config from a newer Brigade leaving the shell working;
 - **the out-of-step notice** (0.5.0): real Claude Code sessions in scratch repos showed the right
   line, or none, for a project older, newer, not set up, current, and inside a phase run; where a
   line was shown, Claude was told it and did not act on it;
@@ -245,8 +253,10 @@ Known limits:
 - Claude Code runs the phase run's sessions only in a folder you have opened in it once and
   trusted; the runner checks before it starts.
 - The end-of-run Windows notification is built but has not yet been seen live.
-- Auto-update fetching a real release into a project, and the notice that follows it, has not yet
-  been seen live: it needs a release after 0.5.0 to reach a project set up with 0.5.0.
+- Auto-update has never been seen to fetch a release by itself, in any kind of session: after a
+  release, run `claude plugin marketplace update` and `claude plugin update` in each project.
+- 0.6.0's runner has not yet run a real night: the snapshot, the version read, side-by-side gates,
+  tampering and trim are proven by tests and simulated night sessions only.
 
 ## More
 

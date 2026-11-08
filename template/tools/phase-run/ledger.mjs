@@ -11,12 +11,13 @@
 // - `kind` is `night` (the runner, one row as each ticket ends) or `attended`
 //   (the plugin's Stop hook). Any other label, a probe's for one, is counted
 //   under `other` and kept as it is in the CSV.
-// - `brigade` is the version that judged the session: a night's is the
-//   project's stamp (.claude/workflow-version.json), `null` with no stamp.
+// - `brigade` is the installed Brigade plugin's version, the one whose hooks
+//   judged the session, for night and attended rows alike (#25); `null` when
+//   it could not be read.
 //
 // The views (status.mjs --ledger and --csv) cut weeks on the machine's local
 // date, from `ledger.weekStarts` in .claude/workflow.json.
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 import { DEFAULT_LEDGER, WEEK_DAYS } from "./config.mjs";
@@ -58,7 +59,24 @@ export function ledgerRow({ at, sessionId, transcript = null, kind, ticket = nul
 /** Appends one row as one line. Throws when it cannot: the caller decides what a lost row means. */
 export function appendRow(file, row) {
   mkdirSync(dirname(file), { recursive: true });
-  appendFileSync(file, `${JSON.stringify(row)}\n`);
+  // A writer killed mid-append leaves a torn last line with no newline: start a fresh line, or this
+  // row is glued to it and readLedger drops both.
+  appendFileSync(file, `${endsTorn(file) ? "\n" : ""}${JSON.stringify(row)}\n`);
+}
+
+/** Whether the file's last byte is something other than a newline (an empty or missing file is not torn). */
+function endsTorn(file) {
+  if (!existsSync(file)) return false;
+  const fd = openSync(file, "r");
+  try {
+    const { size } = fstatSync(fd);
+    if (size === 0) return false;
+    const last = Buffer.alloc(1);
+    readSync(fd, last, 0, 1, size - 1);
+    return last[0] !== 0x0a;
+  } finally {
+    closeSync(fd);
+  }
 }
 
 /** Every row the file holds; a line that does not parse (one still being written) is skipped. */

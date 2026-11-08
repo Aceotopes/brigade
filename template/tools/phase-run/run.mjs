@@ -1002,8 +1002,17 @@ function sessionSettings(base, project, { branch, env, background, prompt, catal
   }, catalog);
 }
 
+/**
+ * A file of the runner's that a session's rules come from (its base settings, its prompts): the run's
+ * frozen copy's (ADR 0005), so a shell write to the live tools/phase-run/ mid-night changes nothing
+ * for later tickets. With no copy yet (a dry run), the runner's own.
+ */
+function runnerFile(runner, name) {
+  return runner ? join(runner, "tools", "phase-run", name) : join(HERE, name);
+}
+
 function writeSessionSettings(run, number, env, { background = true } = {}) {
-  const base = JSON.parse(readFileSync(join(HERE, "settings.json"), "utf8"));
+  const base = JSON.parse(readFileSync(runnerFile(run.runner, "settings.json"), "utf8"));
   const settings = sessionSettings(base, config.permissions, { branch: run.branch, env, background, prompt: config.prompt, catalog: run.catalog });
   const path = join(run.dir, `settings-${number}.json`);
   writeFileSync(path, `${JSON.stringify(trimmedSettings(settings, run.trim, ROOT, config.keep), null, 2)}\n`);
@@ -2008,7 +2017,7 @@ async function runTicket(ticket, options, run) {
   const measured = (facts) => ({ ...facts, metrics: measureTicketRun(ticket, startedAt, sessionId, gatesMs) });
   let call = await runSession({
     ...session,
-    prompt: render(readFileSync(join(HERE, "ticket-prompt.md"), "utf8"), values),
+    prompt: render(readFileSync(runnerFile(run.runner, "ticket-prompt.md"), "utf8"), values),
     sessionId,
     resume: false,
     transcript: join(run.dir, `ticket-${n}-build.json`),
@@ -2069,7 +2078,7 @@ async function runTicket(ticket, options, run) {
     setCurrent({ stage: `fix round ${round + 1}`, steps: 0 });
     showProgress();
     call = await runSession({
-      prompt: render(readFileSync(join(HERE, "fix-prompt.md"), "utf8"), {
+      prompt: render(readFileSync(runnerFile(run.runner, "fix-prompt.md"), "utf8"), {
         ...values,
         GATE: gates.gate,
         OUTPUT: tail(gates.output),
@@ -2474,6 +2483,7 @@ export {
   report,
   runSession,
   runVariables,
+  runnerFile,
   screenshotsSince,
   sessionEnv,
   sessionSettings,

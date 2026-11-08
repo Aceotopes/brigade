@@ -115,6 +115,15 @@ these steps:
     version, and the runner refuses a session's edit to `tools/phase-run/`. After each release,
     update the plugin and run `/update-workflow` here too. Ticket #9 (setup proposes Node test
     gates) was built by a real phase run, which also found and fixed the tests' `PHASE_RUN` leak.
+14. **0.6.0, measure and trim** (2026-11-08): a port of one real project's verified runner upgrade.
+    It prices every session, night and attended, into a per-project ledger. One frozen runner copy
+    judges a run (ADR 0005), and each stop check keeps its own receipt (ADR 0004). It also brings
+    gates side by side with the suite skip, the tampering gate, trim, setup's tool rows and the
+    compose scan. An attended probe (#12) came first; then a phase run on Brigade itself built
+    twelve tickets in one evening. The finish ticket (#24) reviewed the phase against its spec,
+    saw each hook change in real sessions with the plugin loaded from its folder, and made the
+    shell guard read only its own part of the config. The decisions are in the
+    [0.6.0 discovery doc](discovery/04-brigade-0.6.0.md).
 
 ## Changing the workflow
 

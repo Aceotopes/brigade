@@ -284,14 +284,15 @@ test("a model's cost is summed across rows exactly before it is rounded", () => 
 test("rows are appended one line each, and a torn line is skipped on reading", () => {
   const file = join(temp("phase-run-ledger-"), ".phase-run", "ledger.jsonl");
   appendRow(file, FIXTURE_LEDGER[0]);
+  // A writer killed mid-append (the attended hook at its timeout) leaves no newline: the next row
+  // must start a line of its own, or it is glued to the torn one and both are lost.
   appendFileSync(file, '{"at":"2026-11-0');
-  appendFileSync(file, "\n");
   appendRow(file, FIXTURE_LEDGER[1]);
   assert.deepEqual(readLedger(file), FIXTURE_LEDGER.slice(0, 2));
   assert.deepEqual(readLedger(join(temp("phase-run-ledger-"), "none.jsonl")), []);
 });
 
-test("a night row's version is the project's stamp, and null with no stamp", () => {
+test("the stamp's version is read, and null with no stamp", () => {
   const stamped = temp("phase-run-stamp-");
   mkdirSync(join(stamped, ".claude"));
   writeFileSync(join(stamped, ".claude", "workflow-version.json"), JSON.stringify({ plugin: "brigade", version: "0.6.0" }));

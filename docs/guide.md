@@ -270,7 +270,9 @@ every key; in short:
   size budget `/ticket-check` warns on.
 
 A `note` key is allowed anywhere, since JSON has no comments. Any other unknown key is an error, so
-a typo stops the run at preflight instead of quietly turning a rule off.
+a typo stops the run at preflight instead of quietly turning a rule off. The shell guard is the one
+exception: it refuses only a fault in its own `guard` section, so a key from a newer Brigade (or a
+typo elsewhere) leaves your shell working, and the session-start notice names it.
 
 ### The other config files
 

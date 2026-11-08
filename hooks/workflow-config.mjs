@@ -28,7 +28,9 @@
 // rule off, except inside `phaseRun`, which belongs to the phase runner and is checked by its
 // preflight (template/tools/phase-run/config.mjs); only a gate's `after` or `unreadOf` that names
 // nothing, and any fault in `phaseRun.tampering` (the tampering gate's rules, which must never be
-// read as none), are refused here too, with the runner's words. The rules the workflow itself needs (no --no-verify, no trailer, the phase-run
+// read as none), are refused here too, with the runner's words. The shell guard loads only its own
+// part (loadJudgeGuard): a fault elsewhere leaves the shell working, and the session-start notice
+// names it. The rules the workflow itself needs (no --no-verify, no trailer, the phase-run
 // discipline) stay in guard-shell.mjs; this file holds only one project's habits.
 import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -88,12 +90,29 @@ export function loadJudgeConfig(root, env = process.env) {
   return loadWorkflowConfig(dir);
 }
 
+/**
+ * What the shell guard needs (loadJudgeConfig's rules and wrappers), refusing only a fault in its own
+ * part: a missing copy, a file that isn't JSON, a wrong `version`, or a bad `guard` section. A fault
+ * anywhere else (a key from a newer Brigade, say: the reverse out-of-step, discovery 04) is returned
+ * as `elsewhere`, and the guard's rules still apply, so the project's shell keeps working. The stop
+ * gate and the runner's preflight stay strict about the rest.
+ */
+export function loadJudgeGuard(root, env = process.env) {
+  const full = loadJudgeConfig(root, env);
+  const path = join(judgeRoot(root, env), CONFIG_PATH);
+  if (!full.error || !existsSync(path)) return { ...full, elsewhere: null };
+  try {
+    return { ...noRules(null), ...parseGuard(JSON.parse(readFileSync(path, "utf8"))), elsewhere: full.error };
+  } catch (error) {
+    return { ...noRules(`${CONFIG_PATH.replaceAll("\\", "/")}: ${error.message}`), elsewhere: null };
+  }
+}
+
 /** The file's JSON, checked and with its patterns compiled. Throws on the first problem. */
 export function parseWorkflowConfig(data) {
-  if (data?.version !== 1) throw new Error(`"version" must be 1 (it is ${JSON.stringify(data?.version)}).`);
+  const { rules, wrappers } = parseGuard(data); // `version` first, then the guard's own part
   // `phaseRun` is the phase runner's (template/tools/phase-run/config.mjs checks it at preflight).
   onlyKeys(data, ["version", "guard", "stopGate", "phaseRun", "stack", "roadmap", "ledger", "note"], "the file");
-  onlyKeys(data.guard ?? {}, ["block", "wrappers", "note"], "guard");
   onlyKeys(data.stopGate ?? {}, ["checks", "note"], "stopGate");
   onlyKeys(data.stack ?? {}, [...STACK_KEYS, "note"], "stack");
   for (const key of STACK_KEYS.filter((k) => k !== "other" && data.stack?.[k] !== undefined)) {
@@ -105,23 +124,6 @@ export function parseWorkflowConfig(data) {
   onlyKeys(data.roadmap ?? {}, ["artifact", "note"], "roadmap");
   if (data.roadmap?.artifact !== undefined && typeof data.roadmap.artifact !== "string") throw new Error("roadmap.artifact must be text.");
   const ledger = parseLedger(data.ledger);
-  const wrappers = data.guard?.wrappers === undefined ? DEFAULT_WRAPPERS : list(data.guard.wrappers, "guard.wrappers");
-  if (!wrappers.every((w) => typeof w === "string" && w.trim())) throw new Error("guard.wrappers must be a list of command prefixes, such as \"pnpm exec\".");
-  const rules = list(data.guard?.block, "guard.block").map((rule, i) => {
-    const where = `guard.block[${i}]`;
-    onlyKeys(rule, RULE_KEYS, where);
-    if (!WHEN.includes(rule.when)) throw new Error(`${where}.when must be one of ${WHEN.join(", ")}.`);
-    if (Boolean(rule.command) === Boolean(rule.text)) throw new Error(`${where} needs exactly one of "command" and "text".`);
-    if (typeof rule.message !== "string" || !rule.message.trim()) throw new Error(`${where}.message is missing.`);
-    return {
-      when: rule.when,
-      command: pattern(rule.command, `${where}.command`),
-      text: pattern(rule.text, `${where}.text`),
-      with: pattern(rule.with, `${where}.with`),
-      unless: pattern(rule.unless, `${where}.unless`),
-      message: rule.message,
-    };
-  });
   const checks = list(data.stopGate?.checks, "stopGate.checks").map((check, i) => {
     const where = `stopGate.checks[${i}]`;
     onlyKeys(check, CHECK_KEYS, where);
@@ -144,7 +146,34 @@ export function parseWorkflowConfig(data) {
   gateReferences(data.phaseRun?.gates, checks.map((check) => check.name).filter(Boolean), "phaseRun.gates");
   // And the tampering section, in full (D15): a broken rule must stop the night wherever it is read.
   tamperingRules(data.phaseRun?.tampering, "phaseRun.tampering");
-  return { rules, checks, wrappers: wrappers.map((w) => w.trim()), ledger };
+  return { rules, checks, wrappers, ledger };
+}
+
+/**
+ * The guard's own part, `version` and `guard`, with its patterns compiled: all the shell guard reads.
+ * Throws on a fault there; the rest of the file is not looked at.
+ */
+function parseGuard(data) {
+  if (data?.version !== 1) throw new Error(`"version" must be 1 (it is ${JSON.stringify(data?.version)}).`);
+  onlyKeys(data.guard ?? {}, ["block", "wrappers", "note"], "guard");
+  const wrappers = data.guard?.wrappers === undefined ? DEFAULT_WRAPPERS : list(data.guard.wrappers, "guard.wrappers");
+  if (!wrappers.every((w) => typeof w === "string" && w.trim())) throw new Error("guard.wrappers must be a list of command prefixes, such as \"pnpm exec\".");
+  const rules = list(data.guard?.block, "guard.block").map((rule, i) => {
+    const where = `guard.block[${i}]`;
+    onlyKeys(rule, RULE_KEYS, where);
+    if (!WHEN.includes(rule.when)) throw new Error(`${where}.when must be one of ${WHEN.join(", ")}.`);
+    if (Boolean(rule.command) === Boolean(rule.text)) throw new Error(`${where} needs exactly one of "command" and "text".`);
+    if (typeof rule.message !== "string" || !rule.message.trim()) throw new Error(`${where}.message is missing.`);
+    return {
+      when: rule.when,
+      command: pattern(rule.command, `${where}.command`),
+      text: pattern(rule.text, `${where}.text`),
+      with: pattern(rule.with, `${where}.with`),
+      unless: pattern(rule.unless, `${where}.unless`),
+      message: rule.message,
+    };
+  });
+  return { rules, wrappers: wrappers.map((w) => w.trim()) };
 }
 
 /**

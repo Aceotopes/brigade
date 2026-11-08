@@ -11,7 +11,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { BROWSER_CHECK, fill, loadRunConfig, parseRunConfig, qaUrl, sessionEnv, targetFingerprint, targetUrl } from "./config.mjs";
 import { brigadeCatalog, installedBrigade, parsePluginList, readInstalledBrigade, versionStop } from "./brigade.mjs";
 import { readLedger } from "./ledger.mjs";
-import { QUIET_MS, SETTLE_MS, applyMigrations, backgroundArgs, folderTrusted, gatePlan, gotchasFile, holdReason, loadResults, outsideAreas, printArgs, projectGates, promptValues, pullRequestBody, recordResult, render, report, runSession, runVariables, screenshotsSince, sessionSettings, trimmedSettings, turnOver } from "./run.mjs";
+import { QUIET_MS, SETTLE_MS, applyMigrations, backgroundArgs, folderTrusted, gatePlan, gotchasFile, holdReason, loadResults, outsideAreas, printArgs, projectGates, promptValues, pullRequestBody, recordResult, render, report, runSession, runVariables, runnerFile, screenshotsSince, sessionSettings, trimmedSettings, turnOver } from "./run.mjs";
 import { finishSnapshot, readManifest, runnerChanges, takeSnapshot } from "./snapshot.mjs";
 import { PATCH_ARGS } from "./tampering.mjs";
 import { TRIM_FLAGS, readTrim, trimPath } from "./trim.mjs";
@@ -123,7 +123,7 @@ test("a measured result and a crash each leave one priced night row in the ledge
   }
 });
 
-test("a night row records a null version when the project has no stamp", () => {
+test("a night row records a null version when the installed Brigade could not be read", () => {
   const run = ledgerRun({ brigade: null });
   recordResult(run, crashResult, AT);
   assert.equal(readLedger(run.ledgerFile)[0].brigade, null);
@@ -611,6 +611,17 @@ test("a test override in the ticket body, naming the path as a whole word, lets 
   // Only the overridden file leaves the assertion count.
   const both = tamperPlan({ diff: modified("tests/a.test.mjs", "tests/b.test.mjs"), patch: patchOf({ from: "tests/a.test.mjs", removed: ["assert.ok(1);"] }, { from: "tests/b.test.mjs", removed: ["assert.ok(2);"] }), body: OVERRIDE });
   assert.deepEqual(both.findings.map((f) => [f.kind, f.removed, f.paths]), [["assertions", 1, ["tests/b.test.mjs"]]]);
+});
+
+test("a test override says why: a line naming only the path lets nothing through, and the output says so (#24)", () => {
+  const marker = { diff: modified("tests/a.test.mjs"), patch: patchOf({ from: "tests/a.test.mjs", added: ['test.skip("x", () => {});'] }) };
+  for (const line of ["- tests/a.test.mjs", "- `tests/a.test.mjs`", "* tests/a.test.mjs:", "1. **tests/a.test.mjs** —", "tests/a.test.mjs.", "- tests/a.test.mjs, tests/b.test.mjs"]) {
+    const verdict = tamperPlan({ ...marker, body: `## Tests removed or weakened\n\n${line}\n` });
+    assert.equal(verdict.ok, false, line);
+    assert.match(verdict.output, /"Tests removed or weakened" names tests\/a\.test\.mjs with no reason/, line);
+  }
+  assert.equal(tamperPlan({ ...marker, body: "## Tests removed or weakened\n\n- tests/a.test.mjs (#31 rewrites it)\n" }).ok, true, "any words beside the path are a reason");
+  assert.equal(tamperPlan({ ...marker, body: "## Tests removed or weakened\n\n- tests/a.test.mjs: e.g.\n" }).ok, true, "an abbreviation is a word, not a path");
 });
 
 test("a reason only in the commit message is refused, and said so for the morning report", () => {
@@ -1107,7 +1118,7 @@ test("the project's settings are read through a BOM; one that isn't JSON trims n
   const root = mkdtempSync(join(tmpdir(), "phase-trim-root-"));
   mkdirSync(join(root, ".claude"), { recursive: true });
   const trim = { plugins: ["vercel@official", "figma@official"], skills: [], flags: [] };
-  writeFileSync(join(root, ".claude", "settings.json"), `﻿${JSON.stringify({ enabledPlugins: { "vercel@official": true } })}`);
+  writeFileSync(join(root, ".claude", "settings.json"), `\uFEFF${JSON.stringify({ enabledPlugins: { "vercel@official": true } })}`);
   assert.deepEqual(trimmedSettings({}, trim, root, { plugins: [], skills: [] }).enabledPlugins, { "figma@official": false });
   writeFileSync(join(root, ".claude", "settings.json"), "{ broken");
   assert.deepEqual(trimmedSettings({ env: {} }, trim, root, { plugins: [], skills: [] }), { env: {} });
@@ -1295,4 +1306,17 @@ test("no gate reads a receipt: the runner's imports never reach the receipt read
   assert.ok(reached.has(join(here, "config.mjs")) && reached.has(join(here, "snapshot.mjs")), "the walk follows the runner's imports");
   assert.equal(reached.has(join(here, "receipt.mjs")), false, [...reached].join("\n"));
   for (const file of reached) assert.doesNotMatch(readFileSync(file, "utf8"), /\breadReceipt\b|receipt\.mjs["']/, file);
+});
+
+// ADR 0005, found in #24's review: a night's settings and prompts are rules too. Read live, a shell
+// write to tools/phase-run/ mid-night would change what later tickets may do and are told.
+test("a night reads its base settings and its prompts from the run's copy, never the live runner", () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const copy = join(mkdtempSync(join(tmpdir(), "brigade-copy-")), "runner");
+  for (const name of ["settings.json", "ticket-prompt.md", "fix-prompt.md"]) {
+    assert.equal(runnerFile(copy, name), join(copy, "tools", "phase-run", name));
+    assert.equal(runnerFile(null, name), join(here, name), "no run copy (a dry run): the runner's own folder");
+  }
+  const source = readFileSync(join(here, "run.mjs"), "utf8");
+  assert.doesNotMatch(source, /join\(HERE, "(settings\.json|ticket-prompt\.md|fix-prompt\.md)"\)/, "every read goes through runnerFile");
 });

@@ -8,8 +8,9 @@ One file per ticket, `NNN-<slug>.md`, from `docs/_templates/implementation-log.m
 what was built, why it works that way, and how to say it out loud. The index below is generated.
 
 <!-- generated:start implementation-log -->
-### Current phase
+### Phase measure-trim — Brigade 0.6.0, measure and trim (with 0.5.2's entries before it)
 
+- [014](014-finish-0-6-0.md) · `#24` · 2026-11-08 · Finishing 0.6.0: the guard's own part, and the review's fixes
 - [013](013-compose-scan.md) · `#23` · 2026-11-08 · Setup reuses an existing compose file
 - [012](012-one-brigade-version.md) · `#25` · 2026-11-08 · One run, one Brigade version
 - [011](011-setup-tool-rows.md) · `#22` · 2026-11-08 · Setup asks for tool rows

@@ -1,7 +1,8 @@
 ---
 job: Phase measure-trim (Brigade 0.6.0, measure and trim): the traps a session must know before touching its files.
 kind: living
-max-lines: 800
+max-lines: 228
+growth: closed
 ---
 # Gotchas — Phase measure-trim: Brigade 0.6.0, measure and trim
 
@@ -209,3 +210,19 @@ listed in the gotchas index, `docs/agents/gotchas/README.md`.
   beside it (`compose.override.yaml`) is merged by Docker but never read here: the skill asks.
 - Refresh only reports `compose`; the preflight row and the address are the skill's to propose,
   never an item (the stack's rows stay stack-shaped, ADR 0001).
+
+**`#24` — the finish: the guard's own part, `hooks/workflow-config.mjs` `parseGuard` / `loadJudgeGuard`, `version-check.mjs` `configLine`, `run.mjs` `runnerFile`, `tampering.mjs` `givesReason` (built 2026-11-08):**
+- The shell guard loads with `loadJudgeGuard`, never `loadJudgeConfig`: a fault outside `guard`
+  must leave the shell working. `parseGuard` is the one guard parser, called by
+  `parseWorkflowConfig` too; never fork it. pinned: `tests/workflow-config.test.mjs`.
+- The stop gate and the runner stay strict, and the session-start notice is where a fault outside
+  `guard` is said. pinned: `tests/version-check.test.mjs`.
+- A night's `settings.json` and prompts go through `runnerFile(run.runner, name)`, never
+  `join(HERE, …)`. pinned: `template/tools/phase-run/run.test.mjs` (it scans `run.mjs`).
+- An override line must say why beside the path, so a test fixture's override needs words after it.
+  pinned: `run.test.mjs`.
+- A live check with `--plugin-dir` in a scratch repo: write `enabledPlugins` with
+  `brigade@<catalog>` into its settings by hand (an install writes it), or `brigadeCatalog` finds no
+  catalog and the auto-update override is never written.
+- A guard rule written into JSON from a shell: `"\b"` is JSON's backspace, not a word boundary, so
+  `^echo x\b` matches nothing. Anchor with `^echo x` or `(\s|$)`.

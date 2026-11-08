@@ -80,7 +80,7 @@ export function projectKeeps(root) {
   if (existsSync(path)) {
     try {
       // A BOM is stripped: PowerShell 5.1 writes UTF-8 with one, and JSON.parse refuses it.
-      enabled = JSON.parse(readFileSync(path, "utf8").replace(/^﻿/, "")).enabledPlugins ?? {};
+      enabled = JSON.parse(readFileSync(path, "utf8").replace(/^\uFEFF/, "")).enabledPlugins ?? {};
     } catch (error) {
       throw new Error(`${path} is not JSON (${error.message}), so the plugins it enables can't be kept from trim.`);
     }

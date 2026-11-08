@@ -119,6 +119,36 @@ test("a broken config refuses every shell command and says why", () => {
   assert.match(result.stderr, /\.claude\/workflow\.json: .*JSON[\s\S]*until then no shell command runs/);
 });
 
+// The reverse out-of-step (#24): a config a release ahead of the plugin, or wrong outside `guard`, must
+// not stop every shell command. The guard refuses only a fault in what it reads itself.
+const AHEAD = (extra) => JSON.stringify({ version: 1, guard: { block: [{ when: "always", command: "^forbidden\\b", message: "no forbidden here" }] }, ...extra });
+
+test("a fault outside the guard's own part lets shell commands run, and the guard's rules still hold", () => {
+  const faults = {
+    "an unknown top-level key": { someFutureKey: {} },
+    "an unknown key on a stop check": { stopGate: { checks: [{ label: "Tests", run: "node --test", someFutureKey: true }] } },
+    "a broken tampering section": { phaseRun: { tampering: { testFiles: [] } } },
+    "a gate naming no stop check": { phaseRun: { gates: [{ label: "suite", run: "x", unreadOf: "nothing" }] } },
+    "a bad ledger value": { ledger: { weekStarts: "Monday" } },
+  };
+  for (const [what, extra] of Object.entries(faults)) {
+    const { dir } = project(AHEAD(extra));
+    assert.equal(guard(dir, "ls").status, 0, `${what}: ls runs`);
+    assert.match(guard(dir, "forbidden x").stderr, /no forbidden here/, `${what}: the guard's own rule holds`);
+  }
+});
+
+test("a fault in the guard's own part still refuses every shell command", () => {
+  for (const guardPart of [{ block: [{ when: "sometimes", command: "^x", message: "m" }] }, { block: [], someFutureKey: 1 }, { wrappers: [""] }]) {
+    const { dir } = project(JSON.stringify({ version: 1, guard: guardPart }));
+    const result = guard(dir, "ls");
+    assert.equal(result.status, 2);
+    assert.match(result.stderr, /\.claude\/workflow\.json: guard[\s\S]*until then no shell command runs/);
+  }
+  const { dir } = project(JSON.stringify({ version: 2 }));
+  assert.equal(guard(dir, "ls").status, 2, "a version it can't read is a fault in every part");
+});
+
 // --------------------------------------------------------------- the stop gate
 
 const CHECKS = (checks) => JSON.stringify({ version: 1, stopGate: { checks } });
