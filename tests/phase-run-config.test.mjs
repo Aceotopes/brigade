@@ -99,6 +99,41 @@ test("both loaders refuse a misplaced, malformed or catch-all unread list, namin
   }
 });
 
+// 0.6.0 (#19, D12, D13): a gate's `after` names another gate's label, and its `unreadOf` a stop
+// check's `name`. The hooks skip `phaseRun`, except to refuse these two names alike: a name that
+// names nothing must fail loudly wherever the file is read, never be quietly ignored.
+const withGates = (gates, ...rows) => ({ version: 1, stopGate: { checks: rows }, phaseRun: { gates } });
+const named = tests({ name: "tests", unread: ["docs/**"] });
+
+test("both loaders refuse an after or unreadOf that names nothing, with the same words", () => {
+  const cases = [
+    [withGates([{ label: "build", run: "b" }, { label: "typecheck", run: "t", after: "biuld" }]), /phaseRun\.gates\[1\]\.after "biuld" names no gate: it must be another gate's label \(build, typecheck\)\./],
+    [withGates([{ label: "suite", run: "s", unreadOf: "tset" }], named), /phaseRun\.gates\[0\]\.unreadOf "tset" names no stop check: it must be a stopGate\.checks row's "name" \(tests\)\./],
+    // A row without a name has no list a gate can point at.
+    [withGates([{ label: "suite", run: "s", unreadOf: "tests" }], tests({ unread: ["docs/**"] })), /phaseRun\.gates\[0\]\.unreadOf "tests" names no stop check: .*\(no row has one\)\./],
+  ];
+  for (const [data, error] of cases) {
+    const messages = [() => parseWorkflowConfig(data), () => parseRunConfig(data)].map((load) => {
+      try {
+        load();
+      } catch (thrown) {
+        return thrown.message;
+      }
+      return "(loaded)";
+    });
+    assert.match(messages[0], error, "hooks");
+    assert.equal(messages[1], messages[0], "the runner's words are the hooks'");
+  }
+  const good = withGates([{ label: "build", run: "b" }, { label: "typecheck", run: "t", after: "build" }, { label: "suite", run: "s", unreadOf: "tests", alone: true }], named);
+  assert.doesNotThrow(() => parseWorkflowConfig(good));
+  assert.deepEqual(parseRunConfig(good).gates.map((g) => [g.label, g.after, g.unreadOf]), [["build", null, null], ["typecheck", "build", null], ["suite", null, "tests"]]);
+  // Any other shape in phaseRun stays the runner's to refuse: the hooks never break a shell over it.
+  for (const gates of ["lint", [null, 3, { label: 4, after: 5 }], [{ label: "a", run: "a", after: ["b"] }]]) {
+    assert.doesNotThrow(() => parseWorkflowConfig(withGates(gates)), JSON.stringify(gates));
+    assert.throws(() => parseRunConfig(withGates(gates)), undefined, JSON.stringify(gates));
+  }
+});
+
 // The ledger section is read by both loaders: the hooks' (the attended hook's switch) and the
 // runner's (the weekly view's first day).
 const withLedger = (ledger) => ({ version: 1, ledger });

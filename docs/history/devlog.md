@@ -9,6 +9,20 @@ Each commit's entry goes on top, in the shape of `docs/_templates/devlog-entry.m
 message cites it (`devlog #N`). At each phase end, `node tools/doc-rotate.mjs` moves the closed
 entries into `docs/history/devlog/`.
 
+## #12 · feat · gates side by side, with the suite skip
+
+**Built:**
+- Gate rows gain `after` and `unreadOf`; `{cache}` joins the gate placeholders. Both loaders refuse
+  a name that names nothing, word for word; the runner also refuses `after` circles and `alone` links.
+- `gatePlan`: one decision function over a rename-aware name-status diff (both sides count). The
+  suite skip needs a non-empty diff wholly on a check's list.
+- The gates run side by side: `after` waits for a pass; same-tick failures are all reported; the
+  rest are tree-killed and awaited. `alone` gates run after, then the browser check.
+**Verified:** real `node -e` jobs for parallel, `after`, `alone`, first-failure kill and same-tick
+failures; the suite skip on docs-only, mixed, empty and renamed diffs; `{cache}` emptied; full
+stop-check suite. Backend only.
+**Next:** #20, the tampering verdict in `gatePlan`. **Record:** implementation log 007.
+
 ## #11 · feat · each stop check keeps its own receipt
 
 **Built:**

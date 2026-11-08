@@ -18,4 +18,5 @@ plain. The index below is generated.
 - `#15` the attended ledger hook, `hooks/ledger.mjs` `record` / `readState` / `attendedOn`, `metrics.mjs` `addCost`
 - `#16` the runner snapshot, `template/tools/phase-run/snapshot.mjs`, `hooks/workflow-config.mjs` `judgeRoot` / `loadJudgeConfig`
 - `#17` per-check receipts, `template/tools/phase-run/unread.mjs` `unreadMatcher`, `receipt.mjs` `treeKeys` / `receiptGroups`, `hooks/stop-gate.mjs`
+- `#19` gates side by side, `template/tools/phase-run/run.mjs` `gatePlan` / `gateGroup` / `projectGates` / `startJob`, `config.mjs` `gateReferences` / `gateOrder`
 <!-- generated:end gotchas -->

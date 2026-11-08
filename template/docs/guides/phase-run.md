@@ -176,8 +176,12 @@ The runner knows only the workflow. Everything about your project is in `.claude
   browser walks as `browser`, say), for the report's time split.
 - `phaseRun.ticketSize`: the size budget `/ticket-check` warns on (`checkboxes` or `bullets` under a
   section, or `words`); left out, 8 criteria, 8 Areas entries and 800 words.
-- `phaseRun.gates`: the checks the runner itself makes, in order, after a session finishes; a gate
-  with `when` runs only if the ticket touched matching files.
+- `phaseRun.gates`: the checks the runner itself makes after a session finishes, side by side; a gate
+  with `when` runs only if the ticket touched matching files. `after: "<label>"` waits for that gate
+  to pass (build, then typecheck); `alone: true` runs a gate by itself after the rest, with strays
+  stopped first (a suite that owns ports or a database); `unreadOf: "<stop check name>"` skips a
+  gate when every changed file is on that check's `unread` list (the suite skip); `{cache}` in a
+  command is a folder emptied before the gates run, for a tool's cache flag.
 - `phaseRun.preflight` and `phaseRun.ports`: what must be running, and what must be free, before a
   run starts.
 - `phaseRun.qa`, `sessionEnv`, `migrations`: the databases above, and the values pinned in a session.
@@ -285,9 +289,9 @@ Useful options:
    exactly this code (their receipt) are not run again. The script waits for that check to end
    before it does anything of its own, and its own checks trust no receipt.
 6. The script itself then checks, in order: exactly one commit, nothing left uncommitted, an
-   implementation log; then your project's gates (`phaseRun.gates`: typically typecheck, lint, a
-   build when the ticket touched what it compiles, the browser check's screenshots, the whole test
-   suite); then the docs check. If the ticket added a migration, it is applied to the migration
+   implementation log; then your project's gates (`phaseRun.gates`: typically typecheck, lint and a
+   build when the ticket touched what it compiles, side by side, then the whole test suite alone,
+   then the browser check's screenshots). The first failure stops the rest; then the docs check. If the ticket added a migration, it is applied to the migration
    target last, once everything else is green.
 7. **A check failed:** its output goes back to the same session to fix, up to three times.
 8. **All passed:** the branch is pushed and the pull request is updated. Next ticket.

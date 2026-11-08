@@ -89,3 +89,21 @@ listed in the gotchas index, `docs/agents/gotchas/README.md`.
 - Matched paths go to `git update-index --force-remove -z --stdin`, never as arguments: Windows'
   command line is 8,191 characters.
 - A `/** … */` comment can't hold `**/*.md`: its `*/` ends the comment. Write `**\/*.md` there.
+
+**`#19` — gates side by side, `template/tools/phase-run/run.mjs` `gatePlan` / `gateGroup` / `projectGates` / `startJob`, `config.mjs` `gateReferences` / `gateOrder` (built 2026-11-08):**
+- `gateReferences` lives in both loaders, word for word; change both. The hooks one must stay
+  narrow: a refusal there is `noRules(error)`, which blocks every shell command in a session, so it
+  fires only on an `after` or `unreadOf` that names nothing, and skips any other shape. pinned:
+  `tests/phase-run-config.test.mjs` (it compares the two messages).
+- `gatePlan` takes the diff as `git diff --name-status -M -z` prints it. Without `-z` a path with a
+  tab or quote comes back quoted, and without `-M` a rename is a delete and an add, depending on
+  the owner's `diff.renames`. pinned: `template/tools/phase-run/run.test.mjs`.
+- Off Windows a gate job is `detached` so `process.kill(-pid)` reaches what the shell started; a
+  plain `child.kill()` (as `killTree` does) leaves the real test runner going. pinned: `run.test.mjs`
+  (the long job's pid must be gone). A detached group no longer hears the terminal's Ctrl-C, so
+  `startJob`'s `openJobs` are killed on the runner's `exit`; decide a kill on `close`, never on the
+  shell's exit, or a child holding the pipe hangs `stop()`. pinned: `run.test.mjs`.
+- A `node -e "…"` gate in a test runs through `cmd.exe` on Windows: no inner double quotes, no `%`,
+  no `$` (sh), and no `{word}` (the loader reads it as a placeholder). Pass paths through `env`.
+- Prove side by side with a rendezvous (each job waits for the other's flag), never a stopwatch.
+- `{cache}` is emptied once per gate run, never per gate: the group shares the folder.

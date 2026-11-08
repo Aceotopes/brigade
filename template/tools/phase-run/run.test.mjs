@@ -1,15 +1,16 @@
 // Tests for the phase runner's own logic (#194). Plain node:test: no database, no
 // GitHub, no Claude session. Run: pnpm test:runner (node --test tools/phase-run/).
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { BROWSER_CHECK, fill, loadRunConfig, parseRunConfig, qaUrl, sessionEnv, targetFingerprint, targetUrl } from "./config.mjs";
 import { readLedger } from "./ledger.mjs";
-import { QUIET_MS, SETTLE_MS, applyMigrations, folderTrusted, gotchasFile, holdReason, loadResults, outsideAreas, projectGates, promptValues, pullRequestBody, recordResult, render, report, runSession, runVariables, screenshotsSince, sessionSettings, turnOver } from "./run.mjs";
+import { QUIET_MS, SETTLE_MS, applyMigrations, folderTrusted, gatePlan, gotchasFile, holdReason, loadResults, outsideAreas, projectGates, promptValues, pullRequestBody, recordResult, render, report, runSession, runVariables, screenshotsSince, sessionSettings, turnOver } from "./run.mjs";
 import { finishSnapshot, readManifest, runnerChanges, takeSnapshot } from "./snapshot.mjs";
 
 const options = { minutes: 120, waitHours: 6, print: true, spec: 179 };
@@ -342,8 +343,28 @@ test("a mistake in the run config is named: a typo'd key, a bad pattern, a port,
   assert.match(loadRunConfig(broken).error, /^\.claude\/workflow\.json: .*JSON/);
 });
 
+// D12 (#19): `after` orders two gates of the parallel group. The hooks refuse only a name that names
+// nothing (tests/phase-run-config.test.mjs); the rest is the runner's, which would wait forever.
+test("an after links two gates of the parallel group, by a label only one gate has, and never in a circle", () => {
+  const row = (label, over = {}) => ({ label, run: label, ...over });
+  const cases = [
+    [[row("a", { after: 3 })], /gates\[0\]\.after is missing/],
+    [[row("a", { unreadOf: "" })], /gates\[0\]\.unreadOf is missing/],
+    [[row("a", { after: "a" })], /gates\[0\]\.after "a" waits on itself: a → a\./],
+    [[row("a", { after: "c" }), row("b", { after: "a" }), row("c", { after: "b" })], /gates\[0\]\.after "c" waits on itself: a → c → b → a\./],
+    [[row("a"), row("suite", { alone: true, after: "a" })], /gates\[1\]\.after belongs on a gate of the parallel group: an "alone" gate already runs after all of it\./],
+    [[row("suite", { alone: true }), row("b", { after: "suite" })], /gates\[1\]\.after "suite" names an "alone" gate, which runs after the whole parallel group: this gate would never start\./],
+    [[row("a"), { label: "a", run: "a2" }, row("b", { after: "a" })], /gates\[2\]\.after "a" names a label two gates share: give each its own label\./],
+  ];
+  for (const [gates, error] of cases) assert.throws(() => runConfig({ gates }), error, JSON.stringify(gates));
+  // Two gates may share a label nobody waits on, as before.
+  assert.doesNotThrow(() => runConfig({ gates: [row("a"), { label: "a", run: "a2" }] }));
+});
+
 test("a placeholder is allowed only where it makes sense: a gate cannot reach the migration target", () => {
-  assert.throws(() => runConfig({ gates: [{ label: "x", run: "deploy {targetUrl}" }] }), /gates\[0\]\.run uses \{targetUrl\}; allowed here: \{base\}, \{N\}, \{qaUrl\}/);
+  assert.throws(() => runConfig({ gates: [{ label: "x", run: "deploy {targetUrl}" }] }), /gates\[0\]\.run uses \{targetUrl\}; allowed here: \{base\}, \{N\}, \{qaUrl\}, \{cache\}/);
+  assert.doesNotThrow(() => runConfig({ gates: [{ label: "lint", run: "eslint --cache-location {cache}/eslintcache", env: { CACHE: "{cache}" } }] }));
+  assert.throws(() => runConfig({ preflight: [{ label: "x", run: "x {cache}" }] }), /preflight\[0\]\.run uses \{cache\}/);
   assert.throws(() => runConfig({ gates: [{ label: "x", run: "x", env: { DB: "{targetUrl}" } }] }), /gates\[0\]\.env\.DB uses \{targetUrl\}/);
   assert.throws(() => runConfig({ sessionEnv: { DB: "{base}" } }), /sessionEnv\.DB uses \{base\}; allowed here: \{qaUrl\}/);
   assert.throws(() => runConfig({ qa: { name: "q", url: "postgres://{qaUrl}" } }), /only placeholder allowed here is \{loopbackNotUsedBy:VAR\}/);
@@ -382,7 +403,221 @@ test("a field that uses {qaUrl} with no qa section is refused", () => {
   assert.doesNotThrow(() => runConfig({ gates: [{ note: "points at {qaUrl} once qa is set", label: "build", run: "build" }] }));
 });
 
-// The project's gates, with a fake shell standing in: what ran, in what order, with what.
+// The project's gates. A name-status diff as `git diff --name-status -M -z` prints it: each row's
+// fields, each ended by a NUL.
+const nameStatus = (...rows) => rows.map((row) => `${row.join("\0")}\0`).join("");
+const modified = (...paths) => nameStatus(...paths.map((path) => ["M", path]));
+
+// A fake job starter: what started, with what, and each job over at once.
+function fakeStart(failing = []) {
+  const ran = [];
+  const start = (line, env) => {
+    ran.push({ line, env });
+    const ok = !failing.some((word) => line.includes(word));
+    return { done: Promise.resolve({ ok, output: ok ? "" : `${line} broke` }), stop: async () => {} };
+  };
+  return { ran, start };
+}
+
+const GATE_CONFIG = runConfig({
+  qa: { name: "cast", url: "postgresql://pg@localhost/cast" },
+  gates: [
+    { label: "lint", run: "npm run lint" },
+    { label: "build", run: "npm run build", when: "^src/", env: { DATABASE_URL: "{qaUrl}" }, freePorts: true },
+    { label: "tests", run: "npm test -- --changed {base}", alone: true },
+  ],
+});
+const planFor = (diff, config = GATE_CONFIG) => gatePlan({ base: "abc123", diff, config });
+
+test("the project's gates start with their env and {base} filled in, the alone gate last, after its strays", async () => {
+  const fake = fakeStart();
+  const jobs = [];
+  const failed = await projectGates(planFor(modified("src/a.ts")), {
+    values: { base: "abc123", N: 7, qaUrl: "postgresql://pg@localhost/cast" },
+    browserCheck: () => null,
+    start: fake.start,
+    tickMs: 5,
+    freePorts: async () => jobs.push("freed ports"),
+    stopStray: (when) => jobs.push(`stray ${when}`),
+  });
+  assert.equal(failed, null);
+  assert.deepEqual(fake.ran.map((r) => r.line), ["npm run lint", "npm run build", "npm test -- --changed abc123"]);
+  assert.deepEqual(fake.ran[1].env, { DATABASE_URL: "postgresql://pg@localhost/cast" });
+  assert.deepEqual(jobs, ["freed ports", "stray before the tests gate"], "the group's ports are freed once, before it starts");
+});
+
+test("a gate whose when matches no changed file is skipped, and a failure in the group keeps the alone gates from starting", async () => {
+  const docsOnly = fakeStart();
+  await projectGates(planFor(modified("docs/x.md")), { values: { base: "b" }, browserCheck: () => null, start: docsOnly.start, tickMs: 5 });
+  assert.deepEqual(docsOnly.ran.map((r) => r.line), ["npm run lint", "npm test -- --changed b"], "no src/ change: no build");
+  const broken = fakeStart(["lint"]);
+  const failed = await projectGates(planFor(modified("docs/x.md")), { values: { base: "b" }, browserCheck: () => null, start: broken.start, tickMs: 5 });
+  assert.deepEqual(failed, { gate: "lint", output: "npm run lint broke" });
+  assert.deepEqual(broken.ran.map((r) => r.line), ["npm run lint"], "nothing after the first failure starts");
+});
+
+// D12 changed this: the browser check used to run where the config placed it. It stays after
+// everything now, whatever its place in the list, so a project gate's failure is reported first.
+test("the browser-check gate runs after every project gate, wherever the config places it, and its problem is the failure", async () => {
+  const config = runConfig({
+    gates: [{ label: "lint", run: "lint" }, { builtin: "browser-check" }, { label: "tests", run: "tests", alone: true }],
+    browserCheck: { screenFiles: "^src/", sourceFiles: "^src/", screenshots: "shots/{N}", minimum: 2, redo: "walk it" },
+  });
+  const fake = fakeStart();
+  const failed = await projectGates(planFor(modified("src/a.ts"), config), { values: {}, browserCheck: () => "shots/7/ holds 0 screenshot(s)", start: fake.start, tickMs: 5 });
+  assert.deepEqual(failed, { gate: "browser check", output: "shots/7/ holds 0 screenshot(s)" });
+  assert.deepEqual(fake.ran.map((r) => r.line), ["lint", "tests"]);
+  let asked = false;
+  const lint = fakeStart(["lint"]);
+  await projectGates(planFor(modified("src/a.ts"), config), { values: {}, browserCheck: () => (asked = true) && null, start: lint.start, tickMs: 5 });
+  assert.equal(asked, false, "a failed gate ends the run before the browser check");
+});
+
+// D13 (#19): the suite skip. One stop check's unread list, through the one matcher (unread.mjs).
+const SKIP_CONFIG = runConfig(
+  { gates: [{ label: "typecheck", run: "tsc" }, { label: "suite", run: "npm test", unreadOf: "tests", alone: true }, { label: "build", run: "next build", when: "^src/" }] },
+  { stopGate: { checks: [{ name: "tests", label: "Tests", run: "npm test", receipt: true, unread: ["docs/**", "**/*.md"] }] } },
+);
+const skipped = (diff) => planFor(diff, SKIP_CONFIG).gates.map(({ gate, skip }) => `${gate.label}${skip ? ` (${skip})` : ""}`);
+
+test("the decision function skips a gate on a non-empty diff wholly on its check's unread list, and on no matching when", () => {
+  assert.deepEqual(skipped(modified("docs/guide.md", "README.md")), ["typecheck", "suite (unreadOf)", "build (when)"], "docs only");
+  assert.deepEqual(skipped(modified("docs/guide.md", "src/a.ts")), ["typecheck", "suite", "build"], "mixed");
+  assert.deepEqual(skipped(""), ["typecheck", "suite", "build (when)"], "an empty diff never takes the suite skip");
+  // Both sides of a rename count: a doc moved into src/ is a change the suite reads.
+  const renamed = planFor(nameStatus(["R087", "docs/old.md", "src/new.ts"]), SKIP_CONFIG);
+  assert.deepEqual(renamed.paths, ["docs/old.md", "src/new.ts"]);
+  assert.deepEqual(renamed.gates.map((g) => g.skip), [null, null, null]);
+  assert.deepEqual(skipped(nameStatus(["R100", "docs/a.md", "docs/b.md"], ["D", "notes.md"])), ["typecheck", "suite (unreadOf)", "build (when)"]);
+  // A copy names two paths too, and a path with a tab or a space is read whole.
+  assert.deepEqual(planFor(nameStatus(["C075", "src/a.ts", "docs/a b.md"], ["A", "src/x\ty.ts"])).paths, ["src/a.ts", "docs/a b.md", "src/x\ty.ts"]);
+  assert.equal(planFor("").base, "abc123");
+});
+
+// Runner-seam tests with tiny real jobs: each gate is a `node -e` line, so the parallel group, the
+// waits and the kills are the real ones. Each job reads its folder from DIR, and leaves flags there.
+const node = (code) => `node -e "const fs=require('fs'),d=process.env.DIR;${code}"`;
+/** Waits (up to 15 s) for `flag` in DIR, then runs `then`; exits 9 if it never comes. */
+const waitFor = (flag, then) => `const t=Date.now();const i=setInterval(()=>{if(fs.existsSync(d+'/${flag}')){clearInterval(i);${then}}else if(Date.now()-t>15000)process.exit(9)},20);`;
+const flag = (name) => `fs.writeFileSync(d+'/${name}','');`;
+function jobRun(gates, { diff = modified("src/a.ts"), stopGate } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), "gates-"));
+  const config = runConfig({ gates: gates.map((gate) => ({ ...gate, env: { DIR: dir } })) }, stopGate ? { stopGate } : {});
+  return { dir, has: (name) => existsSync(join(dir, name)), plan: planFor(diff, config) };
+}
+const realGates = (plan, over = {}) => projectGates(plan, { values: {}, browserCheck: () => null, tickMs: 20, ...over });
+async function gone(pid) {
+  for (let i = 0; i < 200; i++) {
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      if (error.code === "ESRCH") return true;
+    }
+    await new Promise((done) => setTimeout(done, 50));
+  }
+  return false;
+}
+
+test("gates run side by side: two jobs that each wait for the other's flag both pass", { timeout: 60_000 }, async () => {
+  const run = jobRun([
+    { label: "a", run: node(flag("a") + waitFor("b", "process.exit(0)")) },
+    { label: "b", run: node(flag("b") + waitFor("a", "process.exit(0)")) },
+  ]);
+  assert.equal(await realGates(run.plan), null, "one after the other, the first would never see the second's flag");
+});
+
+test("an after gate starts once its gate passed, and never when it failed", { timeout: 60_000 }, async () => {
+  const passing = jobRun([
+    { label: "typecheck", run: node(`process.exit(fs.existsSync(d+'/built')?0:3)`), after: "build" },
+    { label: "build", run: node(`setTimeout(()=>{${flag("built")}},300)`) },
+  ]);
+  assert.equal(await realGates(passing.plan), null);
+  const failing = jobRun([
+    { label: "build", run: node(`setTimeout(()=>process.exit(1),200)`) },
+    { label: "typecheck", run: node(flag("ran")), after: "build" },
+  ]);
+  assert.equal((await realGates(failing.plan)).gate, "build");
+  assert.equal(failing.has("ran"), false);
+  // A skipped gate holds nobody up.
+  const skippedBuild = jobRun([
+    { label: "build", run: node("process.exit(1)"), when: "^nothing/" },
+    { label: "typecheck", run: node(flag("ran")), after: "build" },
+  ]);
+  assert.equal(await realGates(skippedBuild.plan), null);
+  assert.equal(skippedBuild.has("ran"), true);
+});
+
+test("alone gates run one at a time after the whole group, each after its strays are stopped", { timeout: 60_000 }, async () => {
+  const run = jobRun([
+    { label: "suite", run: node(`if(!fs.existsSync(d+'/lint'))process.exit(4);setTimeout(()=>{${flag("suite")}},300)`), alone: true },
+    { label: "lint", run: node(`setTimeout(()=>{${flag("lint")}},300)`) },
+    { label: "e2e", run: node(`process.exit(fs.existsSync(d+'/suite')?0:5)`), alone: true },
+  ]);
+  const strays = [];
+  assert.equal(await realGates(run.plan, { stopStray: (when) => strays.push(when) }), null);
+  assert.deepEqual(strays, ["before the suite gate", "before the e2e gate"]);
+});
+
+test("the first failure stops the rest: each job's process tree is killed and waited for, and a waiting job never starts", { timeout: 60_000 }, async () => {
+  const run = jobRun([
+    { label: "suite", run: node(`fs.writeFileSync(d+'/pid',String(process.pid));setInterval(()=>{},1000)`) },
+    { label: "lint", run: node(waitFor("pid", "process.exit(1)")) },
+    { label: "e2e", run: node(flag("ran")), after: "suite" },
+  ]);
+  const failed = await realGates(run.plan);
+  assert.equal(failed.gate, "lint");
+  assert.equal(await gone(Number(readFileSync(join(run.dir, "pid"), "utf8"))), true, "the long job's node process is gone");
+  assert.equal(run.has("ran"), false);
+});
+
+// Off Windows a job leads its own process group, so the terminal's Ctrl-C no longer reaches it: the
+// runner's exit must kill every job still open, or a suite outlives the night holding its ports.
+test("a gate job still open when the runner exits is killed with it", { timeout: 60_000 }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), "gates-"));
+  const job = node(`fs.writeFileSync(d+'/pid',String(process.pid));setInterval(()=>{},1000)`);
+  const runner = [
+    `const { startJob } = await import(${JSON.stringify(pathToFileURL(join(HERE, "run.mjs")).href)});`,
+    `startJob(${JSON.stringify(job)}, { DIR: ${JSON.stringify(dir)} });`,
+    `const fs = await import("node:fs");`,
+    `const i = setInterval(() => { if (fs.existsSync(${JSON.stringify(join(dir, "pid"))})) { clearInterval(i); process.exit(0); } }, 20);`,
+  ].join("\n");
+  const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith("PHASE_RUN")));
+  const exited = spawnSync(process.execPath, ["--input-type=module", "-e", runner], { env, encoding: "utf8", timeout: 30_000 });
+  assert.equal(exited.status, 0, exited.stderr);
+  assert.equal(await gone(Number(readFileSync(join(dir, "pid"), "utf8"))), true, "the job's node process died with the runner");
+});
+
+test("two jobs failing in the same tick are both reported, each output under its gate", { timeout: 60_000 }, async () => {
+  const run = jobRun([
+    { label: "lint", run: node(flag("l") + waitFor("t", "console.log('lint said no');process.exit(1)")) },
+    { label: "typecheck", run: node(flag("t") + waitFor("l", "console.log('tsc said no');process.exit(2)")) },
+  ]);
+  const failed = await realGates(run.plan, { tickMs: 3000 });
+  assert.equal(failed.gate, "lint, typecheck");
+  assert.match(failed.output, /── lint ──\nlint said no[\s\S]*── typecheck ──\ntsc said no/);
+});
+
+test("the suite skip end to end: a docs-only diff never starts the gate, a mixed or empty one does", { timeout: 60_000 }, async () => {
+  const stopGate = { checks: [{ name: "tests", label: "Tests", run: "npm test", receipt: true, unread: ["docs/**"] }] };
+  const suite = [{ label: "suite", run: node(flag("ran")), unreadOf: "tests" }];
+  for (const [diff, ran] of [[modified("docs/a.md"), false], [modified("docs/a.md", "src/a.ts"), true], ["", true]]) {
+    const run = jobRun(suite, { diff, stopGate });
+    assert.equal(await realGates(run.plan), null);
+    assert.equal(run.has("ran"), ran, JSON.stringify(diff));
+  }
+});
+
+test("the {cache} folder is emptied before the gates run, and the gates are given its path", { timeout: 60_000 }, async () => {
+  const cache = join(mkdtempSync(join(tmpdir(), "gate-cache-")), "cache");
+  mkdirSync(join(cache, "old"), { recursive: true });
+  writeFileSync(join(cache, "old", "eslintcache"), "stale");
+  const dir = mkdtempSync(join(tmpdir(), "gates-"));
+  const config = runConfig({ gates: [{ label: "lint", run: node(`process.exit(fs.readdirSync(process.env.CACHE).length)`), env: { DIR: dir, CACHE: "{cache}" } }] });
+  assert.equal(await realGates(planFor(modified("src/a.ts"), config), { values: { cache } }), null);
+  assert.equal(existsSync(join(cache, "old")), false);
+});
+
+// The migrations' apply, with a fake shell standing in: what ran, in what order, with what.
 function fakeShell(failing = []) {
   const ran = [];
   const run = (line, env) => {
@@ -391,53 +626,6 @@ function fakeShell(failing = []) {
   };
   return { ran, run };
 }
-
-const GATES = runConfig({
-  qa: { name: "cast", url: "postgresql://pg@localhost/cast" },
-  gates: [
-    { label: "lint", run: "npm run lint" },
-    { label: "build", run: "npm run build", when: "^src/", env: { DATABASE_URL: "{qaUrl}" }, freePorts: true },
-    { label: "tests", run: "npm test -- --changed {base}", alone: true },
-  ],
-}).gates;
-
-test("the project's gates run in order, each with its env and {base} filled in", async () => {
-  const shell = fakeShell();
-  const jobs = [];
-  const failed = await projectGates(GATES, {
-    changed: ["src/a.ts"],
-    values: { base: "abc123", N: 7, qaUrl: "postgresql://pg@localhost/cast" },
-    browserCheck: () => null,
-    run: shell.run,
-    freePorts: async () => jobs.push("freed ports"),
-    stopStray: (when) => jobs.push(`stray ${when}`),
-  });
-  assert.equal(failed, null);
-  assert.deepEqual(shell.ran.map((r) => r.line), ["npm run lint", "npm run build", "npm test -- --changed abc123"]);
-  assert.deepEqual(shell.ran[1].env, { DATABASE_URL: "postgresql://pg@localhost/cast" });
-  assert.deepEqual(jobs, ["freed ports", "stray before the tests gate"]);
-});
-
-test("a gate whose files the ticket did not touch is skipped, and the first failure is returned", async () => {
-  const shell = fakeShell(["lint"]);
-  const failed = await projectGates(GATES, { changed: ["docs/x.md"], values: { base: "b" }, browserCheck: () => null, run: shell.run });
-  assert.deepEqual(failed, { gate: "lint", output: "npm run lint broke" });
-  assert.deepEqual(shell.ran.map((r) => r.line), ["npm run lint"], "nothing after the first failure runs");
-  const docsOnly = fakeShell();
-  await projectGates(GATES, { changed: ["docs/x.md"], values: { base: "b" }, browserCheck: () => null, run: docsOnly.run });
-  assert.deepEqual(docsOnly.ran.map((r) => r.line), ["npm run lint", "npm test -- --changed b"], "no src/ change: no build");
-});
-
-test("the browser-check gate runs where the config places it, and its problem is the failure", async () => {
-  const gates = runConfig({
-    gates: [{ label: "lint", run: "lint" }, { builtin: "browser-check" }, { label: "tests", run: "tests" }],
-    browserCheck: { screenFiles: "^src/", sourceFiles: "^src/", screenshots: "shots/{N}", minimum: 2, redo: "walk it" },
-  }).gates;
-  const shell = fakeShell();
-  const failed = await projectGates(gates, { changed: [], values: {}, browserCheck: () => "shots/7/ holds 0 screenshot(s)", run: shell.run });
-  assert.deepEqual(failed, { gate: "browser check", output: "shots/7/ holds 0 screenshot(s)" });
-  assert.deepEqual(shell.ran.map((r) => r.line), ["lint"]);
-});
 
 const MIGRATIONS = runConfig({
   migrations: {

@@ -26,7 +26,8 @@
 // undecided part is left out. `roadmap` is /roadmap's. `{base}` in a check's `run` is the phase run's base commit. A `note` key is allowed anywhere
 // (JSON has no comments). Every other key is checked, so a typo fails loudly instead of turning a
 // rule off, except inside `phaseRun`, which belongs to the phase runner and is checked by its
-// preflight (template/tools/phase-run/config.mjs). The rules the workflow itself needs (no --no-verify, no trailer, the phase-run
+// preflight (template/tools/phase-run/config.mjs); only a gate's `after` or `unreadOf` that names
+// nothing is refused here too, with the runner's words. The rules the workflow itself needs (no --no-verify, no trailer, the phase-run
 // discipline) stay in guard-shell.mjs; this file holds only one project's habits.
 import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -138,7 +139,27 @@ export function parseWorkflowConfig(data) {
     return { name: checkName(check, where), label: check.label, run: check.run, receipt: check.receipt === true, unread: unreadList(check, where) };
   });
   receiptFiles(checks, "stopGate.checks");
+  // The one look inside `phaseRun`: a gate's `after` or `unreadOf` that names nothing (D13).
+  gateReferences(data.phaseRun?.gates, checks.map((check) => check.name).filter(Boolean), "phaseRun.gates");
   return { rules, checks, wrappers: wrappers.map((w) => w.trim()), ledger };
+}
+
+/**
+ * A gate's `after` names another gate's label, and its `unreadOf` a stop check's `name`. A name that
+ * names nothing is refused by both loaders, word for word (template/tools/phase-run/config.mjs keeps
+ * this same function); any other shape is left to the runner's own checks, so the hooks never break over it.
+ */
+function gateReferences(gates, checkNames, where) {
+  if (!Array.isArray(gates)) return;
+  const labels = gates.filter((gate) => typeof gate?.label === "string").map((gate) => gate.label);
+  gates.forEach((gate, i) => {
+    if (typeof gate?.after === "string" && !labels.includes(gate.after)) {
+      throw new Error(`${where}[${i}].after ${JSON.stringify(gate.after)} names no gate: it must be another gate's label (${labels.join(", ") || "there are none"}).`);
+    }
+    if (typeof gate?.unreadOf === "string" && !checkNames.includes(gate.unreadOf)) {
+      throw new Error(`${where}[${i}].unreadOf ${JSON.stringify(gate.unreadOf)} names no stop check: it must be a stopGate.checks row's "name" (${checkNames.join(", ") || "no row has one"}).`);
+    }
+  });
 }
 
 /**

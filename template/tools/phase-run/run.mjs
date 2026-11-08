@@ -41,12 +41,17 @@ import { LEDGER_PATH, appendRow, ledgerRow, stampVersion } from "./ledger.mjs";
 import { hookTime, loadPrices, sessionCost, stepKind, stepRules, ticketMetrics } from "./metrics.mjs";
 import { finishSnapshot, takeSnapshot } from "./snapshot.mjs";
 import { DEFAULT_RULES as DEFAULT_SIZE, measureTicket as ticketSize } from "./ticket-size.mjs";
+import { unreadMatcher } from "./unread.mjs";
 import * as docConfig from "../doc-config.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, "..", "..");
 const STATE = join(ROOT, ".phase-run");
 const WINDOWS = process.platform === "win32";
+/** The gates' `{cache}`: emptied before each gate run, so no tool trusts a cache a session wrote (D14). */
+const GATE_CACHE = join(STATE, "gate-cache").replaceAll("\\", "/");
+/** How often the gates' parallel group is looked at: a failure stops the rest on the next look. */
+const GATE_TICK_MS = 250;
 
 const PARK_LABEL = { question: "needs-info", failure: "ready-for-human" };
 /** What Claude Code answers a background session in a folder nobody has trusted yet. */
@@ -335,6 +340,67 @@ function killTree(child) {
   if (WINDOWS) exec("taskkill", ["/pid", String(child.pid), "/T", "/F"]);
   else child.kill("SIGKILL");
 }
+
+/**
+ * Starts one gate's command through the shell, as `shell` runs one, but without waiting:
+ * `done` resolves to `{ ok, output }` once it has exited, and `stop()` kills its whole process tree
+ * and waits for it. Off Windows the job leads its own process group, so the kill reaches what the
+ * shell started; on Windows `taskkill /T` walks the tree. A job's own group no longer hears the
+ * terminal's Ctrl-C, so every job still open is killed when the runner exits.
+ */
+function startJob(commandLine, env = {}) {
+  const child = spawn(commandLine, { cwd: ROOT, shell: true, env: { ...process.env, ...env }, detached: !WINDOWS, windowsHide: true });
+  let stdout = "";
+  let stderr = "";
+  let closed = false;
+  child.stdout.on("data", (chunk) => (stdout += chunk));
+  child.stderr.on("data", (chunk) => (stderr += chunk));
+  // Until `close`, something may still hold the job's output open: a shell that exited can leave
+  // a child behind it, so the kill is decided on "closed", never on "exited" (Windows aside, where
+  // a gone pid's tree can't be walked).
+  const kill = () => {
+    if (closed) return;
+    if (WINDOWS) {
+      if (child.exitCode === null && child.signalCode === null) exec("taskkill", ["/pid", String(child.pid), "/T", "/F"]);
+      return;
+    }
+    try {
+      process.kill(-child.pid, "SIGKILL");
+    } catch {
+      // the whole group is gone already
+    }
+  };
+  openJobs.add(kill);
+  if (!jobsKilledOnExit) {
+    jobsKilledOnExit = true;
+    process.on("exit", () => {
+      for (const open of openJobs) open();
+    });
+  }
+  const done = new Promise((resolve) => {
+    child.on("error", (error) => {
+      if (child.pid === undefined) {
+        closed = true; // it never started, so no `close` follows
+        openJobs.delete(kill);
+      }
+      resolve({ ok: false, output: error.message });
+    });
+    child.on("close", (code) => {
+      closed = true;
+      openJobs.delete(kill);
+      resolve({ ok: code === 0, output: `${stdout}\n${stderr}`.replace(/\r\n/g, "\n").trim() });
+    });
+  });
+  const stop = async () => {
+    kill();
+    await done;
+  };
+  return { done, stop };
+}
+
+/** Each gate job not yet closed, by its kill: the runner's exit kills them all. */
+const openJobs = new Set();
+let jobsKilledOnExit = false;
 
 // ------------------------------------------------------------------- GitHub
 
@@ -1303,23 +1369,114 @@ function browserCheckProblem(ticket, changed, startedAt) {
 }
 
 /**
- * The project's gates (phaseRun.gates), in order: the first failure as
- * `{ gate, output }`, or null. A gate whose `when` matches no changed file is
- * skipped. The shell and the side jobs are parameters, so a test can stand in
+ * Every path a `git diff --name-status -M -z` names, once each, in its order. A rename or a copy
+ * (`R087`, `C075`) names two paths, and both count: a doc moved into the source is a source change.
+ */
+function diffPaths(nameStatus) {
+  const fields = nameStatus.split("\0");
+  const paths = [];
+  for (let i = 0; i < fields.length; i++) {
+    const status = fields[i].trim();
+    if (!status) continue;
+    const count = /^[RC]/.test(status) ? 2 : 1;
+    paths.push(...fields.slice(i + 1, i + 1 + count));
+    i += count;
+  }
+  return [...new Set(paths.filter(Boolean))];
+}
+
+/**
+ * Which of the project's gates run on this ticket, and which skip: the one decision function
+ * (#20 adds the tampering verdict to it). `diff` is `git diff --name-status -M -z <base>..HEAD`.
+ * A gate skips on `when` when no changed path matches it, and on `unreadOf` (the suite skip, D13)
+ * when the diff is non-empty and every path is on that stop check's `unread` list, through the
+ * one matcher (unread.mjs). An empty diff never takes the suite skip.
+ */
+function gatePlan({ base, diff, config: { gates, stopChecks = [] } }) {
+  const paths = diffPaths(diff);
+  const unread = new Map(stopChecks.filter((check) => check.name).map((check) => [check.name, unreadMatcher(check.unread)]));
+  const skipOf = (gate) => {
+    if (gate.builtin) return null;
+    if (gate.when && !paths.some((path) => gate.when.test(path))) return "when";
+    if (gate.unreadOf && paths.length > 0 && paths.every(unread.get(gate.unreadOf))) return "unreadOf";
+    return null;
+  };
+  return { base, paths, gates: gates.map((gate) => ({ gate, skip: skipOf(gate) })) };
+}
+
+/**
+ * Runs `gates` side by side (D12): every one without a pending `after` starts at once, and an
+ * `after` gate starts once its gate passed (a gate not in this group, a skipped one, holds nobody
+ * up). Finished jobs are collected each tick; on a failure, every failure of that tick is reported,
+ * the jobs still running are killed and waited for, and the ones not started never start.
+ */
+async function gateGroup(gates, { values, start, tickMs }) {
+  const labels = new Set(gates.map((gate) => gate.label));
+  const passed = new Set();
+  const running = new Map();
+  let waiting = [...gates];
+  const startReady = () => {
+    const ready = (gate) => !gate.after || !labels.has(gate.after) || passed.has(gate.after);
+    for (const gate of waiting.filter(ready)) {
+      const entry = { job: start(fill(gate.run, values), fillEnv(gate.env, values)), result: null };
+      entry.job.done.then((result) => (entry.result = result));
+      running.set(gate, entry);
+    }
+    waiting = waiting.filter((gate) => !ready(gate));
+  };
+  startReady();
+  while (running.size > 0) {
+    await sleep(tickMs);
+    const failures = [];
+    for (const [gate, entry] of running) {
+      if (!entry.result) continue;
+      running.delete(gate);
+      if (entry.result.ok) passed.add(gate.label);
+      else failures.push({ gate: gate.label, output: entry.result.output });
+    }
+    if (failures.length > 0) {
+      await Promise.all([...running.values()].map((entry) => entry.job.stop()));
+      if (failures.length === 1) return failures[0];
+      return {
+        gate: failures.map((failure) => failure.gate).join(", "),
+        output: failures.map((failure) => `── ${failure.gate} ──\n${tail(failure.output, 3000)}`).join("\n\n"),
+      };
+    }
+    startReady();
+  }
+  // The loaders rule this out (gateOrder); a gate left unstarted must still never read as a pass.
+  if (waiting.length > 0) {
+    return { gate: waiting.map((gate) => gate.label).join(", "), output: `Never started: each waits on an \`after\` that never passed (${waiting.map((gate) => `${gate.label} after ${gate.after}`).join(", ")}).` };
+  }
+  return null;
+}
+
+/**
+ * The project's gates (phaseRun.gates), as `gatePlan` decided them: the parallel group first, then
+ * each `alone` gate by itself (strays stopped first), then the browser check, wherever the config
+ * places it. The first failure is returned as `{ gate, output }`, or null. `{cache}` is emptied
+ * before any gate starts. The job starter and the side jobs are parameters, so a test can stand in
  * for them.
  */
-async function projectGates(gates, { changed, values, browserCheck, run = shell, freePorts = freeTicketPorts, stopStray: stop = () => 0 }) {
-  for (const gate of gates) {
-    if (gate.builtin === BROWSER_CHECK) {
-      const problem = browserCheck();
-      if (problem) return { gate: "browser check", output: problem };
-      continue;
-    }
-    if (gate.when && !changed.some((file) => gate.when.test(file))) continue;
+async function projectGates(plan, { values, browserCheck, start = startJob, tickMs = GATE_TICK_MS, freePorts = freeTicketPorts, stopStray: stop = () => 0 }) {
+  if (values.cache) {
+    rmSync(values.cache, { recursive: true, force: true });
+    mkdirSync(values.cache, { recursive: true });
+  }
+  const live = plan.gates.filter(({ gate, skip }) => !gate.builtin && !skip).map(({ gate }) => gate);
+  const group = live.filter((gate) => !gate.alone);
+  if (group.some((gate) => gate.freePorts)) await freePorts();
+  const failed = await gateGroup(group, { values, start, tickMs });
+  if (failed) return failed;
+  for (const gate of live.filter((g) => g.alone)) {
     if (gate.freePorts) await freePorts();
-    if (gate.alone) stop(`before the ${gate.label} gate`);
-    const result = run(fill(gate.run, values), fillEnv(gate.env, values));
-    if (!result.ok) return { gate: gate.label, output: result.output };
+    stop(`before the ${gate.label} gate`);
+    const alone = await gateGroup([gate], { values, start, tickMs });
+    if (alone) return alone;
+  }
+  if (plan.gates.some(({ gate }) => gate.builtin === BROWSER_CHECK)) {
+    const problem = browserCheck();
+    if (problem) return { gate: "browser check", output: problem };
   }
   return null;
 }
@@ -1357,10 +1514,15 @@ async function runGates(ticket, base, options, run, startedAt) {
     return fail("docs", "The commit adds no docs/history/implementation-log/NNN-*.md entry. Every ticket gets one, in full.");
   }
 
-  const changed = git("diff", "--name-only", `${base}..HEAD`).split("\n").filter(Boolean);
-  const failed = await projectGates(config.gates, {
-    changed,
-    values: { base, N: n, qaUrl: qaUrl(config, lookup) },
+  // One rename-aware diff decides every gate's skip and feeds the browser check, so they agree.
+  const plan = gatePlan({ base, diff: git("diff", "--name-status", "-M", "-z", `${base}..HEAD`), config });
+  const changed = plan.paths;
+  for (const { gate, skip } of plan.gates.filter((g) => g.skip)) {
+    const why = skip === "when" ? "no changed file matches its `when`" : `every changed file is on the ${gate.unreadOf} check's unread list (the suite skip)`;
+    log(`#${n}: the ${gate.label} gate is skipped: ${why}.`, { routine: true });
+  }
+  const failed = await projectGates(plan, {
+    values: { base, N: n, qaUrl: qaUrl(config, lookup), cache: GATE_CACHE },
     browserCheck: () => browserCheckProblem(ticket, changed, startedAt),
     stopStray: (when) => stopStray(`${when} for #${n}`),
   });
@@ -2154,6 +2316,7 @@ export {
   SETTLE_MS,
   applyMigrations,
   fetchBlockers,
+  gatePlan,
   gotchasFile,
   holdReason,
   loadResults,
@@ -2171,6 +2334,7 @@ export {
   screenshotsSince,
   sessionEnv,
   sessionSettings,
+  startJob,
   stopCheckRunning,
   stopStray,
   turnOver,

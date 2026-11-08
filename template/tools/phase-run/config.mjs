@@ -11,7 +11,10 @@
 //     "qa": { "name", "url" },                       the database a session works on
 //     "sessionEnv": { NAME: value },                 pinned in every session, so `.env` cannot hand it a live value
 //     "strayProcess": "<regex>",                     a node process under node_modules that must not outlive a session
-//     "gates": [{ "label", "run", "when"?, "env"?, "freePorts"?, "alone"? } | { "builtin": "browser-check" }],
+//     "gates": [{ "label", "run", "when"?, "env"?, "freePorts"?, "alone"?, "after"?, "unreadOf"? } | { "builtin": "browser-check" }],
+//                                                   side by side; `after` waits for that gate's pass,
+//                                                   `alone` runs by itself after the group, `unreadOf`
+//                                                   skips on a diff wholly on that stop check's list
 //     "browserCheck": { "screenFiles", "sourceFiles", "screenshots", "minimum", "redo" },
 //     "migrations": { "added", "target": { "name", "urlFrom", "direct"? }, "apply", "rollBack"?, "destructive"? },
 //     "alwaysInScope": ["<regex>"],                  never "outside the ticket's areas"
@@ -28,7 +31,8 @@
 //
 // Placeholders, each allowed only where it makes sense (a gate cannot reach the migration target):
 // {base} the ticket's base commit, {N} the ticket number, {qaUrl} the QA database's address,
-// {targetUrl} the migration target's address, {name} a migration's name. In `qa.url` only,
+// {targetUrl} the migration target's address, {name} a migration's name, {cache} a folder the runner
+// empties before each gate run (a tool's fresh-cache flag points into it). In `qa.url` only,
 // {loopbackNotUsedBy:VAR} is `localhost` or `127.0.0.1`, whichever the URL in VAR does not use.
 //
 // `rollBack` relies on `apply` printing each migration's name as it starts it, as Prisma does: every
@@ -53,7 +57,7 @@ const KEYS = {
   preflight: ["label", "run", "hint"],
   port: ["port", "what", "freeAfterEachTicket"],
   qa: ["name", "url"],
-  gate: ["label", "run", "when", "env", "freePorts", "alone"],
+  gate: ["label", "run", "when", "env", "freePorts", "alone", "after", "unreadOf"],
   builtin: ["builtin"],
   browserCheck: ["screenFiles", "sourceFiles", "screenshots", "minimum", "redo"],
   migrations: ["added", "target", "apply", "rollBack", "destructive"],
@@ -68,7 +72,7 @@ const KEYS = {
 const ALLOWED = {
   preflight: ["qaUrl"],
   sessionEnv: ["qaUrl"],
-  gate: ["base", "N", "qaUrl"],
+  gate: ["base", "N", "qaUrl", "cache"],
   screenshots: ["N"],
   apply: ["targetUrl", "base"],
   rollBack: ["targetUrl", "name"],
@@ -103,6 +107,22 @@ export function parseRunConfig(data) {
   if (run.qa === undefined && used.includes("{qaUrl}")) {
     throw new Error(`${where} uses {qaUrl}, but there is no ${where}.qa section to give it a value.`);
   }
+  // The hooks check stopGate (hooks/workflow-config.mjs); a bad pattern here only falls back to the plain tail.
+  // `name` and `unread` are checked here too, as the hooks check them: they decide which receipt a
+  // check keeps and what it vouches for.
+  const stopChecks = receiptFiles(
+    list(data?.stopGate?.checks, "stopGate.checks").map((check, i) => ({
+      name: checkName(check, `stopGate.checks[${i}]`),
+      label: String(check.label),
+      run: String(check.run),
+      receipt: check.receipt === true,
+      quiet: quietPair(check.quiet),
+      unread: unreadList(check, `stopGate.checks[${i}]`),
+    })),
+    "stopGate.checks",
+  );
+  gateReferences(run.gates, stopChecks.map((check) => check.name).filter(Boolean), `${where}.gates`);
+  gateOrder(gates, `${where}.gates`);
   return {
     prompt: optionalText(run.prompt, `${where}.prompt`),
     preflight: list(run.preflight, `${where}.preflight`).map((row, i) => {
@@ -126,20 +146,7 @@ export function parseRunConfig(data) {
     permissions: parsePermissions(run.permissions ?? {}, `${where}.permissions`),
     steps: list(run.steps, `${where}.steps`).map((row, i) => parseStep(row, `${where}.steps[${i}]`)),
     ticketSize: run.ticketSize === undefined ? null : list(run.ticketSize, `${where}.ticketSize`).map((row, i) => parseSizeRule(row, `${where}.ticketSize[${i}]`)),
-    // The hooks check stopGate (hooks/workflow-config.mjs); a bad pattern here only falls back to the plain tail.
-    // `name` and `unread` are checked here too, as the hooks check them: they decide which receipt a
-    // check keeps and what it vouches for.
-    stopChecks: receiptFiles(
-      list(data?.stopGate?.checks, "stopGate.checks").map((check, i) => ({
-        name: checkName(check, `stopGate.checks[${i}]`),
-        label: String(check.label),
-        run: String(check.run),
-        receipt: check.receipt === true,
-        quiet: quietPair(check.quiet),
-        unread: unreadList(check, `stopGate.checks[${i}]`),
-      })),
-      "stopGate.checks",
-    ),
+    stopChecks,
     ledger: parseLedger(data?.ledger),
   };
 }
@@ -253,7 +260,50 @@ function parseGate(gate, at) {
     env: envBlock(gate.env, `${at}.env`, ALLOWED.gate),
     freePorts: flag(gate.freePorts, `${at}.freePorts`),
     alone: flag(gate.alone, `${at}.alone`),
+    after: optionalText(gate.after, `${at}.after`),
+    unreadOf: optionalText(gate.unreadOf, `${at}.unreadOf`),
   };
+}
+
+/**
+ * A gate's `after` names another gate's label, and its `unreadOf` a stop check's `name`. A name that
+ * names nothing is refused by both loaders, word for word (hooks/workflow-config.mjs keeps this same
+ * function); any other shape is left to the runner's own checks, so the hooks never break over it.
+ */
+function gateReferences(gates, checkNames, where) {
+  if (!Array.isArray(gates)) return;
+  const labels = gates.filter((gate) => typeof gate?.label === "string").map((gate) => gate.label);
+  gates.forEach((gate, i) => {
+    if (typeof gate?.after === "string" && !labels.includes(gate.after)) {
+      throw new Error(`${where}[${i}].after ${JSON.stringify(gate.after)} names no gate: it must be another gate's label (${labels.join(", ") || "there are none"}).`);
+    }
+    if (typeof gate?.unreadOf === "string" && !checkNames.includes(gate.unreadOf)) {
+      throw new Error(`${where}[${i}].unreadOf ${JSON.stringify(gate.unreadOf)} names no stop check: it must be a stopGate.checks row's "name" (${checkNames.join(", ") || "no row has one"}).`);
+    }
+  });
+}
+
+/**
+ * The runner's own rules for `after` (D12): it links two gates of the parallel group, by a label only
+ * one gate has, and never in a circle. Each would otherwise leave a gate waiting forever.
+ */
+function gateOrder(gates, where) {
+  const byLabel = new Map();
+  for (const gate of gates) if (gate.label) byLabel.set(gate.label, [...(byLabel.get(gate.label) ?? []), gate]);
+  gates.forEach((gate, i) => {
+    if (!gate.after) return;
+    const at = `${where}[${i}].after`;
+    if (gate.alone) throw new Error(`${at} belongs on a gate of the parallel group: an "alone" gate already runs after all of it.`);
+    const named = byLabel.get(gate.after);
+    if (named.length > 1) throw new Error(`${at} ${JSON.stringify(gate.after)} names a label two gates share: give each its own label.`);
+    if (named[0].alone) throw new Error(`${at} ${JSON.stringify(gate.after)} names an "alone" gate, which runs after the whole parallel group: this gate would never start.`);
+    const path = [gate.label];
+    for (let next = named[0]; next; next = next.after ? byLabel.get(next.after)[0] : null) {
+      path.push(next.label);
+      if (next === gate) throw new Error(`${at} ${JSON.stringify(gate.after)} waits on itself: ${path.join(" → ")}.`);
+      if (path.length > gates.length + 1) break;
+    }
+  });
 }
 
 function parseQa(qa, at) {
