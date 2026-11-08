@@ -24,4 +24,5 @@ plain. The index below is generated.
 - `#21` trim, `template/tools/phase-run/trim.mjs` `readTrim` / `trimEntries` / `withTrim`, `run.mjs` `trimmedSettings` / `printArgs` / `backgroundArgs`
 - `#22` setup's tool rows, `scripts/setup.mjs` `roleMatcher` / `unreadWarnings`, `template/tools/phase-run/unread-scan.mjs` `unreadScan` / `pathOf`
 - `#25` one run, one Brigade version, `template/tools/phase-run/brigade.mjs` `brigadeCatalog` / `withAutoUpdateOff` / `installedBrigade` / `versionStop`, `run.mjs` `sessionSettings` / `main`, `snapshot.mjs` `takeSnapshot`
+- `#23` the compose scan, `scripts/setup.mjs` `parseCompose` / `composeLines` / `COMPOSE_FILES`, `detect` `compose`, `refresh`'s `compose`
 <!-- generated:end gotchas -->

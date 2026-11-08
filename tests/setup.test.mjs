@@ -4,14 +4,14 @@
 // Run: node --test tests/*.test.mjs
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 
 import { parseWorkflowConfig } from "../hooks/workflow-config.mjs";
-import { ARCHIVE, apply, autoModeLines, buildPlan, detect, dockerStatus, parseStackTable, plan, proposeWorkflow, refresh, stackDisagreements, suggestPrototypeDir, update } from "../scripts/setup.mjs";
+import { ARCHIVE, apply, autoModeLines, buildPlan, composeLines, detect, dockerStatus, parseCompose, parseStackTable, plan, proposeWorkflow, refresh, stackDisagreements, suggestPrototypeDir, update } from "../scripts/setup.mjs";
 import { MIGRATIONS } from "../scripts/migrations.mjs";
 import { STAMP, compareVersions } from "../scripts/versions.mjs";
 import { PLUGIN, repo, write } from "./helpers.mjs";
@@ -139,6 +139,101 @@ test("detect lists the Node test files in a top-level test/ or tests/ folder, on
   const plain = mkdtempSync(join(tmpdir(), "brigade-nodetests-plain-"));
   write(plain, { "test/a.test.cjs": "", "test/notes.md": "" });
   assert.deepEqual(detect(plain).nodeTests, ["test/*.test.cjs"]);
+});
+
+/** A compose file with a database service, and the keys the scan skips. */
+const COMPOSE_DB = [
+  "# The test database.",
+  "services:",
+  "  db:",
+  "    image: postgres:16 # the version the app runs",
+  "    ports:",
+  '      - "5432:5432"',
+  "    environment:",
+  "      POSTGRES_PASSWORD: postgres",
+  "volumes:",
+  "  pgdata:",
+  "",
+].join("\n");
+
+test("detect lists the root's compose files, each with its services' names, images and published ports (D20)", () => {
+  assert.deepEqual(detect(repo("brigade-compose-none-").dir).compose, [], "no compose file: an empty list");
+
+  const one = repo("brigade-compose-one-", { "docker-compose.yml": COMPOSE_DB, "docker/compose.yml": COMPOSE_DB }).dir;
+  assert.deepEqual(detect(one).compose, [
+    { file: "docker-compose.yml", services: [{ name: "db", image: "postgres:16", ports: [5432] }], lines: ["db: postgres:16, 5432"], skipped: ["db.environment", "volumes"] },
+  ], "one file with a database service; a compose file below the root is not read");
+
+  // Two files: each is listed, in the order `docker compose` picks one (the first is the one it runs).
+  const two = repo("brigade-compose-two-", {
+    "docker-compose.yml": COMPOSE_DB.replace(/\n/g, "\r\n"),
+    "compose.yaml": "services:\n  cache:\n    image: redis:7\n",
+  }).dir;
+  assert.deepEqual(detect(two).compose.map((c) => [c.file, c.lines]), [
+    ["compose.yaml", ["cache: redis:7"]],
+    ["docker-compose.yml", ["db: postgres:16, 5432"]],
+  ]);
+
+  // A file it can't read is reported, never thrown.
+  const bad = mkdtempSync(join(tmpdir(), "brigade-compose-bad-"));
+  write(bad, { "compose.yml": "services:\n\tdb:\n\t\timage: postgres:16\n" });
+  const [unread] = detect(bad).compose;
+  assert.equal(unread.file, "compose.yml");
+  assert.match(unread.error, /^could not read: line 2: /);
+  assert.equal(unread.services, undefined);
+  // One that can't even be opened (a folder by that name) is reported the same way.
+  const folder = mkdtempSync(join(tmpdir(), "brigade-compose-folder-"));
+  mkdirSync(join(folder, "compose.yaml"));
+  assert.match(detect(folder).compose[0].error, /^could not read: /);
+});
+
+test("the compose scan reads only the services' names, images and published ports, and says what it skipped", () => {
+  const text = [
+    "version: '3.8'",
+    "x-common: &common",
+    "  restart: always",
+    "services:",
+    "  db:",
+    '    image: "postgres:16-alpine"',
+    "    ports:",
+    "    - 127.0.0.1:5433:5432/tcp",
+    "    - '6543'",
+    "    - ${PG_PORT:-5432}:5432",
+    "  web:",
+    "    build: .",
+    "    command: |",
+    "      node server.js # a block of text: never read",
+    "    ports: ['3000:3000', \"9229:9229\"]",
+    "  proxy:",
+    "    image: nginx",
+    "    ports:",
+    "      - target: 80",
+    '        published: "8080"',
+    "      - target: 443",
+    "",
+  ].join("\n");
+  assert.deepEqual(parseCompose(text), {
+    services: [
+      { name: "db", image: "postgres:16-alpine", ports: [5433] },
+      { name: "web", image: null, ports: [3000, 9229] },
+      { name: "proxy", image: "nginx", ports: [8080] },
+    ],
+    skipped: ["version", "x-common", "db.ports 6543 (no fixed host port)", "db.ports ${PG_PORT:-5432}:5432 (no fixed host port)", "web.build", "web.command", "proxy.ports target: 443 (no fixed host port)"],
+  });
+  assert.deepEqual(composeLines(parseCompose(text)), ["db: postgres:16-alpine, 5433", "web: no image, 3000, 9229", "proxy: nginx, 8080"]);
+
+  // What it can't read is an error with its line, for detect to report.
+  for (const [bad, why] of [
+    ["volumes:\n  data:\n", /no services: block/],
+    ["services: {db: {image: postgres}}\n", /line 1: services: is not a block/],
+    ["services:\n  db:\n    image: 'postgres\n", /line 3: an unclosed quote/],
+    ["services:\n  - db\n", /line 2: db is not a service/],
+    ["  services:\n", /line 1: indented/],
+  ]) {
+    assert.throws(() => parseCompose(bad), why, bad);
+  }
+  assert.deepEqual(parseCompose("services:\n"), { services: [], skipped: [] }, "an empty services: block is no error");
+  assert.deepEqual(parseCompose("---\nservices:\n  db:\n    image: postgres:16\n").services, [{ name: "db", image: "postgres:16", ports: [] }], "a leading document marker is no key");
 });
 
 test("a repo without package.json gets its Node tests proposed as the tests row, never a bare node --test", () => {
@@ -379,6 +474,20 @@ test("a refresh adds what the stack suggests, removes or changes only what the o
   assert.deepEqual(result.applied, ["stack"]);
   assert.equal(JSON.parse(read(dir, ".claude/workflow.json")).stack.storage, "Cloudflare R2");
   assert.match(read(dir, "CLAUDE.md"), /- \*\*Storage:\*\* Cloudflare R2/, "the Stack block follows");
+});
+
+test("a refresh reports a compose file the project gained, for the skill's testDatabase step, and writes nothing for it (D20)", () => {
+  const { dir } = existing();
+  apply(dir, runPlan(dir, { mode: "merge" }));
+  assert.deepEqual(refresh(dir).compose, [], "no compose file yet");
+  write(dir, { "compose.yaml": COMPOSE_DB });
+  const before = read(dir, ".claude/workflow.json");
+  const seen = refresh(dir);
+  assert.deepEqual(seen.compose.map((c) => [c.file, c.lines]), [["compose.yaml", ["db: postgres:16, 5432"]]]);
+  assert.ok(!seen.items.some((i) => /compose|preflight|ports/.test(i.id)), "the preflight row and the port are the skill's to propose, never an item");
+  refresh(dir, { apply: true });
+  assert.equal(read(dir, ".claude/workflow.json"), before, "the config is not touched for it");
+  assert.equal(read(dir, "compose.yaml"), COMPOSE_DB, "the compose file is never rewritten");
 });
 
 test("a refresh looks inside the tests row: a missing receipt or unread list is added, a project's own list never touched", () => {

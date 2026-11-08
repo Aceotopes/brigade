@@ -9,6 +9,19 @@ Each commit's entry goes on top, in the shape of `docs/_templates/devlog-entry.m
 message cites it (`devlog #N`). At each phase end, `node tools/doc-rotate.mjs` moves the closed
 entries into `docs/history/devlog/`.
 
+## #18 · feat · setup reuses an existing compose file
+
+**Built:**
+- `detect().compose`: the root's compose files, each service's name, image and published ports
+  (`db: postgres:16, 5432`), or "could not read" with the line; never thrown.
+- `parseCompose`: no dependency, reads only `services:` names, `image:` and `ports:`, lists the rest
+  in `skipped`. `refresh`'s report carries `compose`, writing nothing for it.
+- Setup skill §3 and §8: a found file is reused, never a second one; the preflight row
+  `docker compose up -d --wait`; the port in `phaseRun.qa`, never `phaseRun.ports` (old line fixed).
+**Verified:** setup-seam tests on scratch dirs (no file, one, two, unreadable), the parser's port
+forms and errors, refresh on a gained file; full suite. Backend only.
+**Next:** #24, the finish ticket's live night. **Record:** implementation log 013, adr/0001 (amended).
+
 ## #17 · feat · one run, one Brigade version
 
 **Built:**

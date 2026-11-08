@@ -2,7 +2,7 @@
 // is this stack right, may I write this); this script does what must be the same every time, and is
 // tested (tests/setup.test.mjs).
 //
-//   node scripts/setup.mjs detect <dir>                          what is there: git, stack, docs, a stamp
+//   node scripts/setup.mjs detect <dir>                          what is there: git, stack, docs, compose files, a stamp
 //   node scripts/setup.mjs propose <dir>                         the .claude/workflow.json its stack suggests
 //   node scripts/setup.mjs plan <dir> --answers <f> --out <f> [--preview <d>]
 //                                                                what setup would do, summed up; --preview writes the
@@ -18,7 +18,8 @@
 //                                                                bring the config in line with the stack (--stack: the new
 //                                                                one); --apply writes the additions and the accepted ids;
 //                                                                --only-accepted, the accepted ids alone; its `warnings`
-//                                                                are the unread list's honesty warnings
+//                                                                are the unread list's honesty warnings, its `compose`
+//                                                                the root's compose files (detect's)
 //   node scripts/setup.mjs docker                                is Docker installed, and running
 //   node scripts/setup.mjs automode --settings <f> --lines <f> [--apply]   the project's autoMode lines
 //   node scripts/setup.mjs labels                                the GitHub labels the workflow reads
@@ -297,6 +298,8 @@ export function detect(dir) {
     stackFromFiles,
     stackDisagreements: stackDisagreements(declared?.stack, stackFromFiles),
     prototypeDir: suggestPrototypeDir(deps, (d) => existsSync(join(dir, d))),
+    // The root's compose files and their services (D20): setup reuses one, never writes a second.
+    compose: composeFiles(dir),
     docs,
     agentFiles: ["CLAUDE.md", "AGENTS.md", ...GLOSSARY_NAMES].filter((f) => existsSync(join(dir, f))),
     // One folder down (a docs/CLAUDE.md): a project's rules, which Claude reads only on demand.
@@ -448,6 +451,149 @@ export function dockerStatus(run = spawnSync) {
   const info = run("docker", ["info", "--format", "{{.ServerVersion}}"], { encoding: "utf8" });
   const running = !info.error && info.status === 0;
   return { installed: true, running, version: String(running ? info.stdout : version.stdout).trim(), help };
+}
+
+// ------------------------------------------------------------------ an existing compose file (D20)
+
+/** The compose files at a repo's root, in the order `docker compose` picks one: the first is the one it runs. */
+export const COMPOSE_FILES = ["compose.yaml", "compose.yml", "docker-compose.yml", "docker-compose.yaml"];
+
+const indentOf = (line) => line.text.match(/^ */)[0].length;
+const listItem = (line) => /^\s*-(\s|$)/.test(line.text);
+
+/** A line's text without its comment, trimmed; throws on a quote it never closes. */
+function uncomment(line) {
+  const text = line.text;
+  let quote = null;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (quote) {
+      if (c === quote) quote = null;
+    } else if ((c === '"' || c === "'") && (i === 0 || /[\s[,]/.test(text[i - 1]))) quote = c;
+    else if (c === "#" && /\s/.test(text[i - 1] ?? " ")) return text.slice(0, i).trim();
+  }
+  if (quote) throw new Error(`line ${line.n}: an unclosed quote`);
+  return text.trim();
+}
+
+const unquote = (value) => value.replace(/^"(.*)"$|^'(.*)'$/, (_, a, b) => a ?? b);
+
+/** `key: value` (or `key:`) as `{ key, value }`, the value uncommented and unquoted; null for any other line. */
+function keyLine(line) {
+  const match = uncomment(line).match(/^("[^"]*"|'[^']*'|[^\s"'#-][^:]*?)\s*:(?:\s+(.*))?$/);
+  return match ? { key: unquote(match[1]), value: unquote((match[2] ?? "").trim()) } : null;
+}
+
+/**
+ * A block's entries: each line at the block's own indent, with the deeper lines under it. A list item
+ * at a key's own indent (`ports:` then `- "5432:5432"` under it, unindented) belongs to that key.
+ */
+function entries(block) {
+  const out = [];
+  const at = block.length ? indentOf(block[0]) : 0;
+  for (const line of block) {
+    const depth = indentOf(line);
+    if (depth < at) throw new Error(`line ${line.n}: indented less than the lines above it`);
+    if (depth > at || (listItem(line) && out.length && !listItem(out.at(-1).line))) out.at(-1).body.push(line);
+    else out.push({ line, body: [] });
+  }
+  return out;
+}
+
+/** The host port a published port maps (`5432:5432`, `127.0.0.1:5433:5432/tcp`), or null when it has no fixed one. */
+function hostPort(spec) {
+  const parts = String(spec).replace(/\/(tcp|udp|sctp)$/i, "").split(":");
+  const host = parts.length > 1 ? parts[parts.length - 2] : "";
+  return /^\d+$/.test(host) && Number(host) >= 1 && Number(host) <= 65535 ? Number(host) : null;
+}
+
+/** A service's `ports:`, as host ports, and the entries it could not turn into one. */
+function servicePorts(name, entry, skipped) {
+  const own = keyLine(entry.line).value;
+  const specs = [];
+  if (own) {
+    const flow = own.match(/^\[(.*)\]$/);
+    if (!flow) throw new Error(`line ${entry.line.n}: ${name}.ports is not a list`);
+    specs.push(...flow[1].split(",").map((s) => unquote(s.trim())).filter(Boolean).map((spec) => ({ spec, port: hostPort(spec) })));
+  } else {
+    for (const item of entries(entry.body)) {
+      if (!listItem(item.line)) throw new Error(`line ${item.line.n}: ${name}.ports is not a list`);
+      const first = { n: item.line.n, text: item.line.text.replace(/^(\s*)-\s*/, "$1  ") };
+      const long = keyLine(first);
+      if (long && !/^\d/.test(long.key)) {
+        // The long syntax: `- target: 5432` with `published: "5433"` under it.
+        const keys = [long, ...entries(item.body).map((e) => keyLine(e.line)).filter(Boolean)];
+        const published = keys.find((k) => k.key === "published")?.value;
+        specs.push({ spec: `${long.key}: ${long.value}`, port: published === undefined ? null : hostPort(`${published}:0`) });
+      } else {
+        const spec = unquote(uncomment(first));
+        specs.push({ spec, port: hostPort(spec) });
+      }
+    }
+  }
+  for (const { spec, port } of specs.filter((s) => s.port === null)) skipped.push(`${name}.ports ${spec} (no fixed host port)`);
+  return specs.map((s) => s.port).filter((port) => port !== null);
+}
+
+/**
+ * The `services:` of a compose file, no YAML library: each service's name, `image:` and the host ports
+ * its `ports:` publish. Everything else is listed in `skipped` by name (`db.environment`, `volumes`),
+ * and a port with no fixed host port by its entry. Throws, with the line, on what it can't read: a tab
+ * in the indentation, no `services:` block, a one-line `services:`, an unclosed quote.
+ */
+export function parseCompose(text) {
+  const lines = lf(text)
+    .split("\n")
+    .map((t, i) => ({ n: i + 1, text: t }))
+    .filter((line) => !/^\s*(#.*)?$/.test(line.text));
+  // A document marker before the first key (`---`), as YAML allows: not a key.
+  if (lines.length && /^---\s*(#.*)?$/.test(lines[0].text)) lines.shift();
+  const tab = lines.find((line) => /^ *\t/.test(line.text));
+  if (tab) throw new Error(`line ${tab.n}: a tab in the indentation`);
+  if (lines.length && indentOf(lines[0])) throw new Error(`line ${lines[0].n}: indented, with nothing above it`);
+  const skipped = [];
+  let services = null;
+  for (const { line, body } of entries(lines)) {
+    const top = keyLine(line);
+    if (!top) throw new Error(`line ${line.n}: not a key`);
+    if (top.key !== "services") skipped.push(top.key);
+    else if (top.value) throw new Error(`line ${line.n}: services: is not a block`);
+    else services = composeServices(body, skipped);
+  }
+  if (!services) throw new Error("no services: block");
+  return { services, skipped };
+}
+
+/** The services under `services:`, each `{ name, image, ports }`; what it skips goes on `skipped`. */
+function composeServices(block, skipped) {
+  return entries(block).map(({ line, body }) => {
+    const head = keyLine(line);
+    if (!head || head.value) throw new Error(`line ${line.n}: ${head?.key ?? uncomment(line).replace(/^-\s*/, "")} is not a service`);
+    const service = { name: head.key, image: null, ports: [] };
+    for (const entry of entries(body)) {
+      const field = keyLine(entry.line);
+      if (!field) throw new Error(`line ${entry.line.n}: not a key`);
+      if (field.key === "image") service.image = field.value || null;
+      else if (field.key === "ports") service.ports = servicePorts(head.key, entry, skipped);
+      else skipped.push(`${head.key}.${field.key}`);
+    }
+    return service;
+  });
+}
+
+/** Each service as one line, for the owner: `db: postgres:16, 5432`. */
+export const composeLines = ({ services }) => services.map((s) => `${s.name}: ${[s.image ?? "no image", ...s.ports].join(", ")}`);
+
+/** The root's compose files (COMPOSE_FILES), each read by `parseCompose`, or `{ file, error }`: never thrown. */
+function composeFiles(dir) {
+  return COMPOSE_FILES.filter((file) => existsSync(join(dir, file))).map((file) => {
+    try {
+      const parsed = parseCompose(readText(join(dir, file)));
+      return { file, services: parsed.services, lines: composeLines(parsed), skipped: parsed.skipped };
+    } catch (error) {
+      return { file, error: `could not read: ${error.message}` };
+    }
+  });
 }
 
 /** The template's doc-config.mjs, pointed at the project's code folders and (merge) its existing docs. */
@@ -1050,7 +1196,9 @@ export function refresh(dir, { stack, apply = false, accept = [], onlyAccepted =
   }
 
   // The unread list's honesty (D19), on the project's config as it is: warnings only, never an item.
-  const report = { stack: chosen, items: items.map(({ id, op, summary }) => ({ id, op, summary })), warnings: unreadWarnings(dir, current, det), applied: [], written: [] };
+  // The root's compose files (D20), for the skill's testDatabase step on a project that gained one:
+  // the preflight row and the database's address are the skill's to propose, never an item here.
+  const report = { stack: chosen, items: items.map(({ id, op, summary }) => ({ id, op, summary })), warnings: unreadWarnings(dir, current, det), compose: det.compose, applied: [], written: [] };
   if (!apply) return report;
   const { config, files } = build();
   if (JSON.stringify(config) !== JSON.stringify(current)) files.set(".claude/workflow.json", `${JSON.stringify(config, null, 2)}\n`);

@@ -81,9 +81,25 @@ plugin): you write the config each part needs, from the owner's answers and
 - **packageManager**: the `guard.wrappers` and allow rules `propose` gave (check them against it).
 - **database**: a QA database for sessions (`phaseRun.qa`, never the real one) and, only if the owner
   names a shared development database, `phaseRun.migrations` with its target.
-- **testDatabase**: if it runs in Docker, `docker-compose.yml` for it (the image, a port, a volume)
-  and a `phaseRun.preflight` row, `docker compose up -d --wait`, with the hint "Is Docker running?";
-  its port in `phaseRun.ports`. Then §6's Docker check.
+- **testDatabase**: detect's `compose` lists the root's compose files (`compose.yaml`,
+  `compose.yml`, `docker-compose.yml`, `docker-compose.yaml`, the first being the one
+  `docker compose` runs), each service as a line (`db: postgres:16, 5432`), or `error` ("could not
+  read: …", with the line: Brigade's small reader's limit, not Docker's).
+  - **A compose file found**, read or not: show its lines and its `skipped` (or its error), and ask
+    which service is the test database (a file it could not read: ask for the service and its port
+    by hand). An override file beside it (`compose.override.yaml`) is merged by `docker compose` but
+    not read here: if there is one, ask whether it changes the database's port. None of
+    them is: the owner adds one to their own file. Reuse the file: **never write a second one**, and
+    never edit it. Propose a `phaseRun.preflight` row,
+    `docker compose up -d --wait`, with the hint "Is Docker running? Or another project's container
+    holds the port: stop it, or give this one another port in its compose file." The service's
+    port goes in the address sessions use (`phaseRun.qa`'s `url`, or the `sessionEnv` variable
+    that holds it), **never in `phaseRun.ports`**: that list must be free before a run, and the
+    runner checks it right after preflight starts the database, so it would refuse every run.
+  - **None**: ask where the test database runs, as before. If in Docker, write
+    `docker-compose.yml` for it (the image, a port, a volume) and the same preflight row and
+    address.
+  Either way, then §6's Docker check.
 - **storage**: keep sessions off the real bucket: `phaseRun.sessionEnv` pins its variables to a test
   bucket or a dummy value.
 - **framework**: the prototype folder (above), and whether the build is a gate.
@@ -227,7 +243,10 @@ On a project already set up (§1.3), when the owner picks the refresh:
 3. Run it again with `--apply` and `--accept <the ids the owner said yes to>`. It writes, regenerates
    the indexes (the Stack block in `CLAUDE.md` follows), and stages.
 4. Walk §3's checklist for the parts that changed (a new database: its QA database; a new test
-   database in Docker: compose and the Docker check), and its project's-own-tools items for any key
+   database in Docker: compose and the Docker check). The report's `compose` is detect's: a project
+   that gained a compose file, with no `docker compose up` row in `phaseRun.preflight` yet, gets
+   §3's testDatabase step for it (the file reused, never a second; the port in `phaseRun.qa`, never
+   `phaseRun.ports`). Then its project's-own-tools items for any key
    the config still lacks (a name, `{base}`, tampering, `when` and `after`, `{cache}`, an `unread`
    list, each hygiene piece): one yes each, a hand-written row kept as it is. Then `verify`.
 5. Remind the owner to record why in a dated addendum at the top of the discovery doc it came from

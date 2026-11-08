@@ -42,6 +42,13 @@ migration in `scripts/migrations.mjs`.
   `unreadOf` on the suite gate. Each is a yes of its own, written by `setup.mjs refresh --apply
   --only-accepted --accept <ids>`; a hand-written row gets none. No migration runs: a 0.5.x
   `workflow.json` loads unchanged.
+- **Setup reuses an existing compose file.** `detect` lists the repo root's compose files
+  (`compose.yaml`, `compose.yml`, `docker-compose.yml`, `docker-compose.yaml`) with each service's
+  name, image and published ports (`db: postgres:16, 5432`), or "could not read" with the line. No
+  YAML dependency: it reads only `services:` and lists what it skipped. Setup, and refresh for a
+  project that gained one, propose the preflight row `docker compose up -d --wait` and put the
+  database's port in its address for sessions (`phaseRun.qa`), never in `phaseRun.ports`, and never
+  write a second compose file.
 
 ## 0.5.2 — 2026-11-04
 No config format change. The first version built by a phase run on Brigade itself.

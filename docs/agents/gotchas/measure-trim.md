@@ -195,3 +195,17 @@ listed in the gotchas index, `docs/agents/gotchas/README.md`.
 - Fixtures under `template/` name no real catalog or owner (`market`, `owner/brigade`), and a
   template doc names no project file in backticks: `tests/no-project-specifics.test.mjs` and the
   template's day-one doc-check refuse both.
+
+**`#23` — the compose scan, `scripts/setup.mjs` `parseCompose` / `composeLines` / `COMPOSE_FILES`, `detect` `compose`, `refresh`'s `compose` (built 2026-11-08):**
+- A compose database's port never goes in `phaseRun.ports`: the runner checks that list right after
+  preflight starts the container, so it would refuse every run. It goes in the database's address
+  (`phaseRun.qa`, `sessionEnv`); the preflight hint covers another project's container on the port.
+- `parseCompose` is no YAML parser: it reads `services:` names, `image:` and `ports:`, and throws
+  with a line on any shape it can't place (tabs, a flow-map `services:`, an unclosed quote).
+  `detect` turns the throw into `error: "could not read: …"`; never let it escape detect.
+- A port with no fixed host port (`"6543"`, `${PG_PORT:-5432}:5432`, a long form without
+  `published`) is listed in `skipped`, never guessed. pinned: `tests/setup.test.mjs`.
+- `COMPOSE_FILES` is in `docker compose`'s own pick order (`compose.yaml` first). An override file
+  beside it (`compose.override.yaml`) is merged by Docker but never read here: the skill asks.
+- Refresh only reports `compose`; the preflight row and the address are the skill's to propose,
+  never an item (the stack's rows stay stack-shaped, ADR 0001).
