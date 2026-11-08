@@ -11,17 +11,17 @@ Brigade 0.6.1 is released: 0.6.0 ("measure and trim", spec #11, merged in #26) p
 phase-run guide's override example. This repo runs it: the plugin is 0.6.1 at project scope, and
 `/update-workflow` re-copied `tools/phase-run/` and the guide. Its config drops the tests row's
 `unread` list (the doc tests read `docs/`) and adds a `phaseRun.tampering` section for
-`node:test`. The runner's own version read returns 0.6.1 from `claude plugin list --json`.
+`node:test`. The runner's own version read returns 0.6.1 from `claude plugin list --json`. The
+stop check's row is named `tests`, and spec #11 is closed. No next phase is planned here.
 
 ## Next step
 
-1. Start a fresh Claude Code session here, so 0.6.1's hooks are the ones running.
-2. Then add `"name": "tests"` to the stop check's row in `.claude/workflow.json`. A 0.5.2 hook
-   refuses that key, so it waits for the restart.
-3. The next phase's first night is the first real 0.6.0 night: it proves the runner's own snapshot,
-   gates side by side and the tampering gate live.
+1. Set up Block23GymV2 and run its first night: the first real 0.6.x night, and the first with a
+   Docker test database. It proves the runner's own snapshot, gates side by side, the tampering
+   gate and setup's compose-file reuse live.
+2. Bring what that night shows back here as the next spec, then fill the roadmap's tables and
+   publish its first page.
 
 ## Waiting on the owner
 
-- Closing spec #11 by hand; its tickets are closed.
 - Block23GymV2's setup, the first real project with a Docker test database.

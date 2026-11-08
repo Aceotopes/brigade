@@ -7,6 +7,7 @@
   "stopGate": {
     "checks": [
       {
+        "name": "tests",
         "label": "The plugin's and the template's tests",
         "run": "node --test tests/*.test.mjs template/tools/doc-tools.test.mjs template/tools/phase-run/run.test.mjs template/tools/phase-run/measure.test.mjs",
         "receipt": true

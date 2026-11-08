@@ -9,6 +9,15 @@ Each commit's entry goes on top, in the shape of `docs/_templates/devlog-entry.m
 message cites it (`devlog #N`). At each phase end, `node tools/doc-rotate.mjs` moves the closed
 entries into `docs/history/devlog/`.
 
+## #22 · chore · the tests row gets its name
+
+**Built:** the stop check's row in `.claude/workflow.json` is named `tests`, so its receipt has a
+file of its own. It waited for a session running 0.6.1's hooks, since 0.5.2's refuse the key.
+Spec #11 closed by hand; all its tickets were closed.
+**Verified:** 0.6.1's `loadWorkflowConfig` reads the row with its name; the full test command
+327/327; `setup.mjs verify` all ok; doc-check clean.
+**Next:** the first real 0.6.x night, on the next project set up. **Record:** this entry only.
+
 ## #21 · chore · update the workflow to 0.6.1
 
 **Built:** `/update-workflow` from 0.5.2 to 0.6.1: ten runner files and the phase-run guide
