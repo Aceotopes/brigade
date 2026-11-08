@@ -22,4 +22,5 @@ plain. The index below is generated.
 - `#18` update's offers, `scripts/setup.mjs` `ROW_OFFERS` / `rowOffers` / `refresh` `onlyAccepted`, `update` `offers`
 - `#20` the tampering gate, `template/tools/phase-run/tampering.mjs` `tamperingVerdict` / `patchFiles` / `namesPath`, `config.mjs` and `hooks/workflow-config.mjs` `tamperingRules`
 - `#21` trim, `template/tools/phase-run/trim.mjs` `readTrim` / `trimEntries` / `withTrim`, `run.mjs` `trimmedSettings` / `printArgs` / `backgroundArgs`
+- `#22` setup's tool rows, `scripts/setup.mjs` `roleMatcher` / `unreadWarnings`, `template/tools/phase-run/unread-scan.mjs` `unreadScan` / `pathOf`
 <!-- generated:end gotchas -->

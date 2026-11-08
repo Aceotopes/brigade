@@ -10,6 +10,7 @@ what was built, why it works that way, and how to say it out loud. The index bel
 <!-- generated:start implementation-log -->
 ### Current phase
 
+- [011](011-setup-tool-rows.md) · `#22` · 2026-11-08 · Setup asks for tool rows
 - [010](010-trim-keep-list.md) · `#21` · 2026-11-08 · Trim, with a project keep list
 - [009](009-tampering-gate.md) · `#20` · 2026-11-08 · The tampering gate
 - [008](008-update-offers-rows.md) · `#18` · 2026-11-08 · `/update-workflow` offers 0.6.0's rows

@@ -9,6 +9,21 @@ Each commit's entry goes on top, in the shape of `docs/_templates/devlog-entry.m
 message cites it (`devlog #N`). At each phase end, `node tools/doc-rotate.mjs` moves the closed
 entries into `docs/history/devlog/`.
 
+## #16 · feat · setup asks for tool rows
+
+**Built:**
+- `/setup-workflow` §3 and §8, and `/update-workflow`'s new step 6: the project's-own-tools
+  checklist (names, `{base}`, tampering, `when`/`after`, `{cache}`, `unread`, lint/typecheck hygiene).
+- The phase-run guide's worked examples (Vitest, Next.js, ESLint, tsc), never defaults.
+- `unread-scan.mjs`: test files' path strings on the tests row's `unread` list; `verify` and
+  `refresh` print them as warnings, never a failure.
+- `roleMatcher`: a row is its role by exact `run`, or, named (a gate by label), by that command with
+  flags after it; a stack change stays visible. `proposeWorkflow`'s output pinned.
+**Verified:** setup-seam tests for a hit, a clean repo, no tampering section, verify's `warn`, an
+edited named row, a nameless one, a pnpm-to-npm switch, a `unit` tests row, the pin; the example
+through both loaders; full suite. Backend only.
+**Next:** #23, the compose scan. **Record:** implementation log 011.
+
 ## #15 · feat · trim, with a project keep list
 
 **Built:**

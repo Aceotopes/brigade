@@ -92,6 +92,30 @@ plugin): you write the config each part needs, from the owner's answers and
   src`), never a bare `node --test`, which also finds Brigade's `tools/*.test.mjs` and runs them in
   every gate.
 
+**Then the project's own tools** (D17, D18). `propose` writes no tool-specific keys, so ask about
+each, and write what the owner's tools really support: the guide's "What your config sets" has one
+project's rows as worked examples, never defaults. Check a flag in the tool's own docs or `--help`
+before writing it.
+- **names**: a stop check that gets its own receipt also gets a `name` (`typecheck`, `lint`,
+  `tests`). A name is lowercase (`^[a-z0-9][a-z0-9_-]*$`), unique, and never `test`. Rows without a
+  name share one receipt file, so one `unread` list. A flag goes after the suggested command
+  (`pnpm lint --cache`, not a rewritten one), so refresh still knows the named row.
+- **the test runner's changed-only command**, with `{base}` (Vitest's `--changed {base}`, say), on
+  the tests stop check; the suite gate keeps the whole suite unless the owner says otherwise. A
+  runner without one runs the suite. A check with `{base}` is left out of `checks.yml` (CI has no
+  base commit), so CI then needs its own suite step.
+- **tampering** (`phaseRun.tampering`): the test files' globs (`testFiles`), the runner's skip and
+  focus markers as patterns (`markers`), its assertion call (`assertions`, with `maxNetRemoved`),
+  `guarded` (the test config, `.claude/workflow.json`), and an `override.heading`. No section, no gate.
+- **the build**: which paths feed it (the build gate's `when`), and whether typecheck reads its
+  output (the typecheck gate's `after: "build"`). A gate given `after` also gets the waited-on
+  gate's `when` and `unreadOf`, so the two skip together.
+- **fresh caches and unread lists**: each tool's fresh-cache flag pointing into `{cache}` (gates
+  only), and each stop check's `unread` list (typecheck and lint rarely read `**/*.md`).
+- **lint and typecheck hygiene**, in the project's own configs, each a yes: the linter ignores what
+  git ignores; typecheck leaves out scratch folders like `.phase-run`; an empty catch needs a
+  reason; tool scripts are checked for undefined names; the lint cache is gitignored.
+
 Write the answers to `.git/brigade/answers.json`:
 `{ "mode", "name", "summary", "workflow", "frontend"?, "prototypeDir"?, "pathRoots"?, "liveDocs"? }`.
 
@@ -166,7 +190,9 @@ Ask before each; the owner may skip any.
 
 1. `node "${CLAUDE_PLUGIN_ROOT}/scripts/setup.mjs" verify <dir>`: doc-check, the template's two test
    suites, and the config through both loaders. A failure: fix it (in the config, or a doc's line),
-   never by loosening a check.
+   never by loosening a check. A `warn` line is the unread list's honesty scan (D19): each path a
+   test file (`phaseRun.tampering.testFiles`) names that the tests row's `unread` list leaves out.
+   Say each one; if the tests do read that path, narrow the list on the owner's yes. It never fails.
 2. Show `git status --short` and the drafted commit message:
    `chore: adopt the workflow (<mode> mode) — devlog #1`. Overwrite mode is on `adopt-workflow`: the
    owner merges it as any branch.
@@ -192,10 +218,18 @@ On a project already set up (§1.3), when the owner picks the refresh:
    - `offer`: keys a newer release gives a row the stack suggests (a check's `name`, its own
      `receipt` and `unread` list, a gate's `unreadOf`), one item per row. Asked and written the same
      way as `change`.
+   - A row is matched by its exact `run`, or, when it has a name (a stop check's `name`, a gate's
+     `label`), by the suggested command with flags added after it: a named row that gained a cache
+     flag is still its row, never added back plain or offered for removal. A nameless stop check is
+     matched by its `run` alone, and a command the stack no longer suggests (another package
+     manager) is a stranger whatever its name.
+   - `warnings`: the unread list's honesty scan, as in §7. Say each; none is an item.
 3. Run it again with `--apply` and `--accept <the ids the owner said yes to>`. It writes, regenerates
    the indexes (the Stack block in `CLAUDE.md` follows), and stages.
 4. Walk §3's checklist for the parts that changed (a new database: its QA database; a new test
-   database in Docker: compose and the Docker check), then `verify`.
+   database in Docker: compose and the Docker check), and its project's-own-tools items for any key
+   the config still lacks (a name, `{base}`, tampering, `when` and `after`, `{cache}`, an `unread`
+   list, each hygiene piece): one yes each, a hand-written row kept as it is. Then `verify`.
 5. Remind the owner to record why in a dated addendum at the top of the discovery doc it came from
    ("> **Addendum YYYY-MM-DD:** storage is Cloudflare R2. **Changes:** Requirements and stack."),
    and draft `chore: refresh the config from the stack — devlog #N`. **Stop** before the commit.

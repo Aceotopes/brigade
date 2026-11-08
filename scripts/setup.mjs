@@ -8,7 +8,8 @@
 //                                                                what setup would do, summed up; --preview writes the
 //                                                                proposed text of each changed or conflicting file under <d>
 //   node scripts/setup.mjs apply <dir> --plan <f>                do it, if the repo is still as planned
-//   node scripts/setup.mjs verify <dir>                          doc-check, the template's tests, both config loaders
+//   node scripts/setup.mjs verify <dir>                          doc-check, the template's tests, both config loaders, and
+//                                                                the unread list's honesty warnings (never a failure)
 //   node scripts/setup.mjs update <dir> [--apply] [--remove] [--auto-update]
 //                                                                re-copy template/ into a set-up project; --auto-update
 //                                                                also turns on auto-update for Brigade's catalog; the
@@ -16,7 +17,8 @@
 //   node scripts/setup.mjs refresh <dir> [--stack <f>] [--apply] [--accept <id,id>] [--only-accepted]
 //                                                                bring the config in line with the stack (--stack: the new
 //                                                                one); --apply writes the additions and the accepted ids;
-//                                                                --only-accepted, the accepted ids alone
+//                                                                --only-accepted, the accepted ids alone; its `warnings`
+//                                                                are the unread list's honesty warnings
 //   node scripts/setup.mjs docker                                is Docker installed, and running
 //   node scripts/setup.mjs automode --settings <f> --lines <f> [--apply]   the project's autoMode lines
 //   node scripts/setup.mjs labels                                the GitHub labels the workflow reads
@@ -34,6 +36,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, s
 import { basename, dirname, join, posix } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import { scanLines, unreadScan } from "../template/tools/phase-run/unread-scan.mjs";
 import { MIGRATIONS } from "./migrations.mjs";
 import { STAMP, catalog, compareVersions, pluginVersion } from "./versions.mjs";
 
@@ -168,6 +171,30 @@ function gitIn(dir) {
   };
 }
 
+/** The project's files: git's tracked and untracked-not-ignored ones, or the walk outside git. */
+function projectFiles(dir) {
+  const git = gitIn(dir);
+  if (git("rev-parse", "--git-dir") === null) return walk(dir);
+  return (git("ls-files", "--cached", "--others", "--exclude-standard") ?? "").split("\n").filter(Boolean);
+}
+
+/**
+ * The unread list's honesty warnings (D19): each path a test file names on the tests row's `unread`
+ * list, or the one line saying `phaseRun.tampering.testFiles` is not set. Never a failure: a scan that
+ * cannot run says so as a warning too. The scan is the plugin's copy, so a project a release behind
+ * gets it before /update-workflow copies it in. The tests row is the stop check in the stack's tests
+ * role (`roleMatcher`), whatever its name; without one, the scan's own `testsRow`.
+ */
+export function unreadWarnings(dir, config, det = detect(dir)) {
+  try {
+    const { stopRole } = roleMatchers(det, config);
+    const row = (config.stopGate?.checks ?? []).find((c) => stopRole(c)?.key === "test" && Array.isArray(c.unread) && c.unread.length);
+    return scanLines(unreadScan({ config, row, files: projectFiles(dir), read: (file) => readText(join(dir, file)) }));
+  } catch (error) {
+    return [`the unread list could not be checked: ${error.message}`];
+  }
+}
+
 /** True when `.claude/settings.json` differs from HEAD only in what a plugin install writes. */
 function installOnlyChange(dir, git) {
   const path = join(dir, ".claude", "settings.json");
@@ -202,9 +229,7 @@ export function detect(dir) {
   const changes = status.split("\n").filter(Boolean);
   const tolerated = isRepo && installOnlyChange(dir, git);
   const dirty = changes.filter((line) => !(tolerated && line.slice(3) === ".claude/settings.json"));
-  const files = isRepo
-    ? (git("ls-files", "--cached", "--others", "--exclude-standard") ?? "").split("\n").filter(Boolean)
-    : walk(dir);
+  const files = projectFiles(dir);
   // Discovery docs come before setup (docs/agents/workflow.md), so a repo holding only them is still new.
   const meaningful = files.filter(
     (f) => !/^(README(\.md)?|LICENSE(\..+)?|\.gitignore|\.gitattributes|\.claude\/settings\.json)$/i.test(f) && !/^docs\/discovery\/[^/]+\.md$/.test(f),
@@ -794,18 +819,46 @@ const OFFER_WHY = {
 };
 
 /**
- * Refresh's offers (D11): for each existing row whose command the stack suggests, the ROW_OFFERS keys
- * it lacks, as one `offer` item. A row with a command of the project's own gets none, a key it already
- * has is never changed, and a name another row already holds is never offered (nor the row's keys
- * that need it).
+ * Which stack role (a `stackChecks` row) a list's row holds (#22): its exact `run`, as in 0.5.x; or,
+ * for a row with a name, the suggested command with flags added after it (`pnpm lint --cache …`),
+ * when no row holds that role by its exact run. A stop check's name is its `name`; a gate's is its
+ * `label`, which `after` points at. So a named row whose command gained a flag (a cache flag,
+ * `{base}`) is still the row it was, a nameless stop check is matched by its run alone, and a row
+ * whose command the stack no longer suggests at all (another package manager) is still a stranger.
+ * Returns row → `{ key, label, run }`, or null.
  */
-function rowOffers(det, current, item, rowIn) {
-  const roleOf = new Map(stackChecks(det).map((check) => [check.run, check.key]));
+function roleMatcher(det, rows, nameOf) {
+  // Longest first, so a command that extends two suggested ones is the longer one's.
+  const suggested = stackChecks(det).sort((a, b) => b.run.length - a.run.length);
+  const byRun = new Map(suggested.map((check) => [check.run, check]));
+  const held = new Set(rows.filter((row) => byRun.has(row.run)).map((row) => byRun.get(row.run).key));
+  return (row) => {
+    if (byRun.has(row.run)) return byRun.get(row.run);
+    if (!nameOf(row) || typeof row.run !== "string") return null;
+    return suggested.find((check) => !held.has(check.key) && row.run.startsWith(`${check.run} `)) ?? null;
+  };
+}
+
+/** The role matchers for the config's stop checks (named by `name`) and gates (by `label`). */
+function roleMatchers(det, config) {
+  return {
+    stopRole: roleMatcher(det, config.stopGate?.checks ?? [], (row) => row.name),
+    gateRole: roleMatcher(det, config.phaseRun?.gates ?? [], (row) => row.label),
+  };
+}
+
+/**
+ * Refresh's offers (D11): for each existing row that holds a stack role (`roleMatcher`), the
+ * ROW_OFFERS keys it lacks, as one `offer` item. A row of the project's own gets none, a key it
+ * already has is never changed, and a name another row already holds is never offered (nor the row's
+ * keys that need it).
+ */
+function rowOffers(current, { stopRole, gateRole }, item, rowIn) {
   const checks = current.stopGate?.checks ?? [];
   const taken = new Set(checks.map((c) => c.name).filter(Boolean));
   // The name a stop check in `role` has, or would get with its offer: null when it has no row or the name is taken.
   const nameOf = (role) => {
-    const row = checks.find((c) => roleOf.get(c.run) === role);
+    const row = checks.find((c) => stopRole(c)?.key === role);
     if (!row) return null;
     if (row.name) return { name: row.name, row, naming: false };
     const name = ROW_OFFERS["stopGate.checks"][role]?.name;
@@ -816,7 +869,7 @@ function rowOffers(det, current, item, rowIn) {
   const why = (keys) => OFFER_WHY[Object.keys(OFFER_WHY).find((key) => key in keys)] ?? "as this release sets it up";
 
   for (const row of checks) {
-    const offer = ROW_OFFERS["stopGate.checks"][roleOf.get(row.run)];
+    const offer = ROW_OFFERS["stopGate.checks"][stopRole(row)?.key];
     if (!offer || (offer.name && !row.name && taken.has(offer.name))) continue;
     const keys = Object.fromEntries(Object.entries(offer).filter(([key]) => row[key] === undefined));
     // A list belongs to the receipt offered with it: beside a row's own receipt (0.4.1's add gives its
@@ -828,7 +881,7 @@ function rowOffers(det, current, item, rowIn) {
     });
   }
   for (const gate of (current.phaseRun?.gates ?? []).filter((g) => g.run)) {
-    const offer = ROW_OFFERS["phaseRun.gates"][roleOf.get(gate.run)];
+    const offer = ROW_OFFERS["phaseRun.gates"][gateRole(gate)?.key];
     if (!offer) continue;
     const keys = {};
     const naming = [];
@@ -886,7 +939,11 @@ export function refresh(dir, { stack, apply = false, accept = [], onlyAccepted =
   }
 
   // The lists the stack suggests rows for: a missing one is added; one it would not suggest is offered for removal.
+  // A project's row counts as the suggested row whose role it holds (`roleMatcher`, `match`), so a row
+  // whose command gained a flag is neither added back plain nor offered for removal.
   const same = (row) => row;
+  const roles = roleMatchers(det, current);
+  const { stopRole, gateRole } = roles;
   const lists = [
     { section: "guard.wrappers", get: (c) => c.guard?.wrappers ?? [], put: (c, v) => (c.guard = { ...(c.guard ?? {}), wrappers: v }), key: same, show: same },
     {
@@ -894,6 +951,7 @@ export function refresh(dir, { stack, apply = false, accept = [], onlyAccepted =
       get: (c) => c.stopGate?.checks ?? [],
       put: (c, v) => (c.stopGate = { ...(c.stopGate ?? {}), checks: v }),
       key: (r) => r.run,
+      match: (r) => stopRole(r)?.run ?? r.run,
       show: (r) => `${r.label}: ${r.run}`,
     },
     {
@@ -901,6 +959,7 @@ export function refresh(dir, { stack, apply = false, accept = [], onlyAccepted =
       get: (c) => c.phaseRun?.gates ?? [],
       put: (c, v) => (c.phaseRun = { ...(c.phaseRun ?? {}), gates: v }),
       key: (r) => r.run ?? r.builtin,
+      match: (r) => gateRole(r)?.run ?? r.run ?? r.builtin,
       show: (r) => `${r.label}: ${r.run}`,
     },
     {
@@ -914,12 +973,13 @@ export function refresh(dir, { stack, apply = false, accept = [], onlyAccepted =
   for (const list of lists) {
     const have = list.get(current);
     const want = list.get(proposed);
-    const haveKeys = new Set(have.map(list.key));
+    const match = list.match ?? list.key;
+    const haveKeys = new Set(have.map(match));
     const wantKeys = new Set(want.map(list.key));
     for (const row of want.filter((r) => !haveKeys.has(list.key(r)))) {
       item(`${list.section}+${list.key(row)}`, "add", `${list.section}: add ${list.show(row)}`, (config) => list.put(config, [...list.get(config), row]));
     }
-    for (const row of have.filter((r) => !r.builtin && !wantKeys.has(list.key(r)))) {
+    for (const row of have.filter((r) => !r.builtin && !wantKeys.has(match(r)))) {
       item(`${list.section}-${list.key(row)}`, "remove", `${list.section}: ${list.show(row)} is not one the stack suggests (kept unless accepted)`, (config) =>
         list.put(config, list.get(config).filter((r) => list.key(r) !== list.key(row))),
       );
@@ -933,7 +993,7 @@ export function refresh(dir, { stack, apply = false, accept = [], onlyAccepted =
   const wantTests = (proposed.stopGate?.checks ?? []).find((c) => c.receipt);
   // The row, unless an accepted removal took it first: then there is nothing to add to.
   const rowIn = (config, run) => config.stopGate?.checks?.find((c) => c.run === run) ?? {};
-  const testsRow = wantTests && !haveChecks.some((c) => c.receipt) ? haveChecks.find((c) => c.run === wantTests.run) : null;
+  const testsRow = wantTests && !haveChecks.some((c) => c.receipt) ? haveChecks.find((c) => (stopRole(c)?.run ?? c.run) === wantTests.run) : null;
   if (testsRow) {
     item(`stopGate.checks.receipt+${testsRow.run}`, "add", `stopGate.checks: ${testsRow.label} gets "receipt": true, so the stop check skips tests already passed`, (config) => {
       rowIn(config, testsRow.run).receipt = true;
@@ -945,7 +1005,7 @@ export function refresh(dir, { stack, apply = false, accept = [], onlyAccepted =
       rowIn(config, row.run).unread = unread;
     });
   }
-  rowOffers(det, current, item, rowIn);
+  rowOffers(current, roles, item, rowIn);
 
   // The design rung, once the project has screens: its prompt file and the prototype folder.
   if (det.frontend.length && !current.phaseRun?.prompt) {
@@ -989,7 +1049,8 @@ export function refresh(dir, { stack, apply = false, accept = [], onlyAccepted =
     item(ciPath, ciNow === null ? "add" : "change", `${ciPath}: ${ciNow === null ? "written" : "rewritten"} from the checks`, (config, files) => files.set(ciPath, ci));
   }
 
-  const report = { stack: chosen, items: items.map(({ id, op, summary }) => ({ id, op, summary })), applied: [], written: [] };
+  // The unread list's honesty (D19), on the project's config as it is: warnings only, never an item.
+  const report = { stack: chosen, items: items.map(({ id, op, summary }) => ({ id, op, summary })), warnings: unreadWarnings(dir, current, det), applied: [], written: [] };
   if (!apply) return report;
   const { config, files } = build();
   if (JSON.stringify(config) !== JSON.stringify(current)) files.set(".claude/workflow.json", `${JSON.stringify(config, null, 2)}\n`);
@@ -1193,6 +1254,15 @@ export async function verify(dir) {
   const { loadRunConfig } = await import(pathToFileURL(join(dir, "tools", "phase-run", "config.mjs")).href);
   const runner = loadRunConfig(dir);
   results.push({ label: "the phase runner's config", ok: !runner.error, output: runner.error ?? "" });
+  // The unread list's honesty (D19): a warning, never a failure.
+  let config = null;
+  try {
+    config = JSON.parse(readText(join(dir, ".claude", "workflow.json")));
+  } catch {
+    // The loaders above already failed on a config that isn't JSON: the scan has nothing to add.
+  }
+  const warnings = config ? unreadWarnings(dir, config) : [];
+  results.push({ label: "the tests' unread list", ok: true, warn: warnings.length > 0, output: warnings.join("\n") });
   return results;
 }
 
@@ -1206,7 +1276,7 @@ async function main() {
     else if (command === "propose") print(proposeWorkflow(detect(target)));
     else if (command === "verify") {
       const results = await verify(target);
-      for (const r of results) console.log(`${r.ok ? "ok  " : "FAIL"}  ${r.label}${r.output ? `\n${r.output}` : ""}`);
+      for (const r of results) console.log(`${r.ok ? (r.warn ? "warn" : "ok  ") : "FAIL"}  ${r.label}${r.output ? `\n${r.output}` : ""}`);
       if (results.some((r) => !r.ok)) process.exitCode = 1;
     } else if (command === "plan") {
       const p = plan(target, JSON.parse(readText(value("--answers"))));

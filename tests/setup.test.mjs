@@ -568,6 +568,142 @@ test("a tests row added back shares the nameless rows' list, never a named row's
   assert.deepEqual(config().stopGate.checks[2].unread, ["docs/**", "*.md"]);
 });
 
+test("propose writes no tool-specific rows: its config for a package.json project is pinned", () => {
+  // Names, receipts beyond the tests row, `after`, `when`, `{cache}` and tampering are checklist items (D17, ADR 0001).
+  const config = proposeWorkflow(detect(existing().dir));
+  assert.deepEqual(Object.keys(config), ["version", "note", "guard", "stopGate", "phaseRun", "stack"]);
+  assert.deepEqual(config.guard, { block: [], wrappers: ["pnpm exec", "pnpm dlx", "pnpm", "npx"] });
+  assert.deepEqual(config.stopGate, {
+    checks: [
+      { label: "Typecheck", run: "pnpm exec tsc --noEmit" },
+      { label: "Lint", run: "pnpm lint" },
+      { label: "Tests", run: "pnpm test", receipt: true, unread: ["docs/**", "*.md"] },
+    ],
+  });
+  assert.deepEqual(config.phaseRun, {
+    gates: [
+      { label: "typecheck", run: "pnpm exec tsc --noEmit" },
+      { label: "lint", run: "pnpm lint" },
+      { label: "build", run: "pnpm build" },
+      { label: "tests", run: "pnpm test", alone: true },
+    ],
+    permissions: { allow: ["Bash(pnpm *)", "PowerShell(pnpm *)"] },
+  });
+});
+
+test("a named row whose command gained a flag is still its row: nothing added back, no removal, its offers reach it; a nameless one matches by its run", async () => {
+  const rows = {
+    checks: [
+      { label: "Typecheck", run: "pnpm exec tsc --noEmit --incremental", name: "typecheck" },
+      { label: "Lint", run: "pnpm lint --cache" },
+      { label: "Tests", run: "pnpm test -- --changed {base}", name: "tests", receipt: true, unread: ["docs/**", "*.md"] },
+    ],
+    gates: [
+      { label: "typecheck", run: "pnpm exec tsc --noEmit" },
+      { label: "lint", run: "pnpm lint --cache --cache-location {cache}/eslintcache" },
+      { label: "build", run: "pnpm build" },
+      { label: "tests", run: "pnpm test -- --changed {base}", alone: true },
+    ],
+  };
+  const { dir, config } = project052(rows);
+  await bothLoaders(dir);
+  const items = refresh(dir).items;
+  const ids = (op) => items.filter((i) => i.op === op).map((i) => i.id);
+  // The nameless Lint row is matched by its exact run alone, as in 0.5.x: the plain row is offered back.
+  assert.deepEqual(ids("add"), ["stopGate.checks+pnpm lint"]);
+  assert.deepEqual(ids("remove"), ["stopGate.checks-pnpm lint --cache"]);
+  // A gate is matched by its label, which is the name `after` points at.
+  const offers = ["stopGate.checks.offer+pnpm exec tsc --noEmit --incremental", "phaseRun.gates.offer+pnpm test -- --changed {base}"];
+  assert.deepEqual(ids("offer"), offers);
+  const summary = (id) => items.find((i) => i.id === id).summary;
+  assert.match(summary(offers[0]), /Typecheck gets "receipt": true, "unread": \["\*\*\/\*\.md"\]/);
+  assert.match(summary(offers[1]), /tests gets "unreadOf": "tests"/);
+  assert.doesNotMatch(summary(offers[1]), /names the/, "the tests row already has its name");
+  assert.deepEqual(update(dir).offers.map((o) => o.id), offers, "update offers the same");
+
+  refresh(dir, { apply: true, onlyAccepted: true, accept: offers });
+  assert.deepEqual(config().stopGate.checks[0], { ...rows.checks[0], receipt: true, unread: ["**/*.md"] });
+  assert.deepEqual(config().stopGate.checks.slice(1), rows.checks.slice(1));
+  assert.deepEqual(config().phaseRun.gates[3], { ...rows.gates[3], unreadOf: "tests" });
+  await bothLoaders(dir);
+  assert.deepEqual(update(dir).offers, []);
+});
+
+test("a name never hides a stack change: a row whose command is no longer the suggested one, flags or not, is a stranger", () => {
+  // Named rows from 0.5.2's stack, then the project moves from pnpm to npm: refresh adds npm's and offers pnpm's for removal.
+  const { dir } = project052(ROWS_052, (c) => {
+    c.stopGate.checks[1] = { ...c.stopGate.checks[1], name: "lint" };
+    c.stopGate.checks[2] = { ...c.stopGate.checks[2], name: "unit", run: "pnpm test -- --changed {base}" };
+  });
+  rmSync(join(dir, "pnpm-lock.yaml"));
+  write(dir, { "package-lock.json": "{}\n" });
+  const items = refresh(dir).items;
+  const ids = (op) => items.filter((i) => i.op === op).map((i) => i.id);
+  for (const id of ["stopGate.checks+npm run lint", "stopGate.checks+npm run test", "phaseRun.gates+npm run lint", "phaseRun.gates+npm run test"]) assert.ok(ids("add").includes(id), id);
+  for (const id of ["stopGate.checks-pnpm lint", "stopGate.checks-pnpm test -- --changed {base}", "phaseRun.gates-pnpm lint", "phaseRun.gates-pnpm test"]) assert.ok(ids("remove").includes(id), id);
+});
+
+test("any name will do: a tests row named unit whose command gained {base} is still the tests row, and the one the scan reads", () => {
+  const { dir } = project052(ROWS_052, (c) => {
+    c.stopGate.checks[2] = { ...c.stopGate.checks[2], name: "unit", run: "pnpm test -- --changed {base}" };
+    c.phaseRun.tampering = { testFiles: ["tests/**/*.test.mjs"] };
+  });
+  write(dir, { "tests/b.test.mjs": 'readFileSync("docs/guide.md");\n' });
+  const { items, warnings } = refresh(dir);
+  assert.ok(!items.some((i) => /pnpm test/.test(i.id) && (i.op === "add" || i.op === "remove")), items.map((i) => i.id).join(", "));
+  assert.ok(items.some((i) => i.id === "phaseRun.gates.offer+pnpm test" && /"unreadOf": "unit"/.test(i.summary)), "the suite gate points at it");
+  assert.equal(warnings.length, 1, warnings.join("\n"));
+  assert.match(warnings[0], /^tests\/b\.test\.mjs:1 names "docs\/guide\.md", on the Tests check's/);
+});
+
+/** The one line the scan prints for a project that names no test files. */
+const NO_TEST_FILES = "set phaseRun.tampering.testFiles to check your unread list";
+const TEST_FILES = { testFiles: ["tests/**/*.test.mjs"] };
+
+test("the unread list's honesty: no tampering section, one line and nothing scanned", () => {
+  const { dir } = project052();
+  write(dir, { "tests/b.test.mjs": 'readFileSync("docs/guide.md");\n' });
+  assert.deepEqual(refresh(dir).warnings, [NO_TEST_FILES]);
+  // A section that lists no test files is the same: nothing to scan.
+  const empty = project052(ROWS_052, (c) => (c.phaseRun.tampering = { guarded: [".claude/workflow.json"] }));
+  assert.deepEqual(refresh(empty.dir).warnings, [NO_TEST_FILES]);
+});
+
+test("the unread list's honesty: a clean repo warns of nothing, whatever a non-test file or another check's list says", async () => {
+  const { dir } = project052(ROWS_052, (c) => {
+    c.stopGate.checks[0] = { ...c.stopGate.checks[0], name: "typecheck", receipt: true, unread: ["**/*.md"] };
+    c.phaseRun.tampering = TEST_FILES;
+  });
+  write(dir, {
+    "tests/a.test.mjs": [
+      'import { x } from "../src/x.mjs";',
+      'const page = "src/app/page.tsx";',
+      'const notes = "src/notes.md";', // on the named Typecheck's list, never the tests row's
+      'const lists = ["docs/**", "*.md"];', // globs, not paths
+      'const url = "https://example.com/docs/a.md";',
+      "const made = `${dir}/docs/x.md`;",
+    ].join("\n"),
+    "scripts/c.mjs": 'const doc = "docs/guide.md";\n', // not a test file
+  });
+  await bothLoaders(dir);
+  assert.deepEqual(refresh(dir).warnings, []);
+});
+
+test("the unread list's honesty: each path a test file names on the tests row's list is a warning, and refresh still goes ahead", () => {
+  const { dir, config } = project052(ROWS_052, (c) => {
+    c.phaseRun.tampering = TEST_FILES;
+    delete c.guard.wrappers;
+  });
+  write(dir, { "tests/sub/b.test.mjs": 'const text = readFileSync("docs/guide.md", "utf8");\nconst top = join(here, "../../README.md");\n' });
+  const warnings = refresh(dir).warnings;
+  assert.equal(warnings.length, 2, warnings.join("\n"));
+  assert.match(warnings[0], /^tests\/sub\/b\.test\.mjs:1 names "docs\/guide\.md", on the Tests check's unread list/);
+  assert.match(warnings[1], /^tests\/sub\/b\.test\.mjs:2 names "README\.md"/, "a ./ or ../ path is read from the test's folder");
+  const applied = refresh(dir, { apply: true });
+  assert.deepEqual(applied.warnings, warnings);
+  assert.deepEqual(config().guard.wrappers, ["pnpm exec", "pnpm dlx", "pnpm", "npx"], "a warning never stops the refresh");
+});
+
 test("an older CLAUDE.md without the Stack section is offered it, and gets it only on a yes", () => {
   const { dir } = existing();
   apply(dir, runPlan(dir, { mode: "merge" }));
@@ -601,9 +737,15 @@ test("the command line: plan previews the changed files, apply writes, verify pa
   assert.match(planned.stdout, /Changed \(shown as a diff before writing\) \(3\):/);
   assert.match(readFileSync(join(scratch, "preview/CLAUDE.md"), "utf8"), /Never push to main\.\n\n## Commands\n/);
   assert.equal(cli("apply", dir, "--plan", join(scratch, "plan.json")).status, 0);
+  // A test file naming a path on the tests row's unread list: verify warns of it, and still passes.
+  const config = JSON.parse(read(dir, ".claude/workflow.json"));
+  config.phaseRun.tampering = { testFiles: ["tests/**/*.test.mjs"] };
+  writeFileSync(join(dir, ".claude/workflow.json"), `${JSON.stringify(config, null, 2)}\n`);
+  write(dir, { "tests/b.test.mjs": 'readFileSync("docs/guide.md");\n' });
   const verified = cli("verify", dir);
   assert.equal(verified.status, 0, verified.stdout);
   assert.match(verified.stdout, /^ok +the phase runner's config$/m);
+  assert.match(verified.stdout, /^warn +the tests' unread list\ntests\/b\.test\.mjs:1 names "docs\/guide\.md"/m);
 });
 
 test("overwrite works on its own branch and archives the old docs, CLAUDE.md and settings instead of deleting them", () => {

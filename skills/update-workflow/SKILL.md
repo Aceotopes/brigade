@@ -46,9 +46,16 @@ touches. A newer release's keys for the config's rows are offered at the end, on
    `node "${CLAUDE_PLUGIN_ROOT}/scripts/setup.mjs" refresh <dir> --apply --only-accepted --accept <the ids>`,
    which writes those rows and nothing else, and stages them. A declined offer is asked again on the
    next update.
-6. `node "${CLAUDE_PLUGIN_ROOT}/scripts/setup.mjs" verify <dir>`. A failure is fixed, never by
-   loosening a check.
-7. Add the devlog entry this commit needs, on top of `docs/history/devlog.md`
+6. Then the project's own tools: walk `/setup-workflow`'s §3 items under "Then the project's own
+   tools" (the plugin's `skills/setup-workflow/SKILL.md`) for each key the config still lacks: a
+   name, the tests' `{base}` command, the tampering rows, the build gate's `when` and `after`, each
+   `{cache}` flag and `unread` list, and each lint and typecheck hygiene piece. One yes each; write
+   the yeses into `.claude/workflow.json` (and the tool's own config for hygiene) by hand, never
+   changing a hand-written row's own values. A flag goes after the row's command, and the row keeps
+   its name, so refresh and the next update still know it.
+7. `node "${CLAUDE_PLUGIN_ROOT}/scripts/setup.mjs" verify <dir>`. A failure is fixed, never by
+   loosening a check. A `warn` line (the unread list's honesty scan) is said, never a failure.
+8. Add the devlog entry this commit needs, on top of `docs/history/devlog.md`
    (`## #N · chore · update the workflow to <to>`, the files that changed and the offers taken), and
    draft the message `chore: update the workflow to <to> — devlog #N`. **Stop**: the owner says when
    to commit.

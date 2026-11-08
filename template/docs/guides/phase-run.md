@@ -1,7 +1,7 @@
 ---
 job: The owner's guide to the unattended phase run: evening and morning checklists, merging, undoing a ticket.
 kind: living
-max-lines: 560
+max-lines: 620
 ---
 # The phase run — the owner's practical guide
 
@@ -195,6 +195,46 @@ The runner knows only the workflow. Everything about your project is in `.claude
 - `phaseRun.prompt`: your project's own instructions to each session (how to build, how to walk a
   screen, how to review it), a markdown file in `docs/agents/` with `## Read`, `## Build`,
   `## Browser check`, `## Review` and `## Fix` sections.
+
+**Worked examples, never defaults.** Setup writes no tool's rows (`propose` gives only what your
+`package.json` scripts name); it asks about your tools, and Claude writes their rows. The project
+Brigade was lifted from, a Next.js app on pnpm with Vitest, ESLint and tsc, has these 0.6.0 rows.
+Check every flag in your own tools' docs before you copy one:
+
+```json
+"stopGate": { "checks": [
+  { "label": "Typecheck", "name": "typecheck", "run": "pnpm typecheck", "receipt": true, "unread": ["**/*.md"] },
+  { "label": "Lint", "name": "lint", "run": "pnpm lint --cache", "receipt": true, "unread": ["**/*.md"] },
+  { "label": "Tests", "name": "tests", "run": "pnpm exec vitest run --changed {base} --passWithNoTests", "receipt": true, "unread": ["docs/**", "*.md"] }
+] },
+"phaseRun": {
+  "gates": [
+    { "label": "build", "run": "pnpm exec next build", "when": "^(src/|public/|package\\.json$|pnpm-lock\\.yaml$|next\\.config\\.|tsconfig)" },
+    { "label": "typecheck", "run": "pnpm typecheck --incremental --tsBuildInfoFile {cache}/tsbuildinfo", "after": "build", "when": "^(src/|public/|package\\.json$|pnpm-lock\\.yaml$|next\\.config\\.|tsconfig)" },
+    { "label": "lint", "run": "pnpm lint --cache --cache-location {cache}/eslintcache", "unreadOf": "lint" },
+    { "label": "tests", "run": "pnpm test", "alone": true, "unreadOf": "tests" }
+  ],
+  "tampering": {
+    "testFiles": ["**/*.test.ts", "**/*.test.tsx"],
+    "markers": [{ "name": "skip", "pattern": "\\b(describe|it|test)\\.(skip|todo)\\(" }, { "name": "focus", "pattern": "\\b(describe|it|test)\\.only\\(" }],
+    "assertions": { "pattern": "\\bexpect\\(", "maxNetRemoved": 0 },
+    "guarded": ["vitest.config.ts", ".claude/workflow.json"],
+    "override": { "heading": "Test override" }
+  }
+}
+```
+
+- **Vitest's `--changed {base}`** runs only the tests the ticket's changes reach, on the stop check;
+  the suite gate still runs them all. A runner with no such flag runs its suite.
+- **The build's `when`** names the paths that feed it, so a docs-only ticket skips it. Next.js
+  writes types the typecheck reads, so typecheck waits for the build (`after`) and copies its
+  `when`, and the two skip together.
+- **The cache flags** point ESLint's and tsc's caches into `{cache}`, which the runner empties
+  before the gates, so no gate trusts a cache a session wrote. Each goes after the script's own
+  command, and the row keeps its name (a gate's is its label), so setup's refresh still knows it.
+- **The tampering rows** are Vitest's: its skip and focus calls, and `expect(` as the assertion.
+  Their `testFiles` is also the list setup's verify scans: a test file naming a path on the tests
+  row's `unread` list is a warning, as the list probably leaves out something the tests read.
 
 A mistake in that section stops the run before it starts (dry runs too), and says what is wrong.
 
