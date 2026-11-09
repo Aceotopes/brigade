@@ -31,7 +31,7 @@
 // docs/adr, docs/research, the discovery rounds) are left as written and are
 // not scanned for phrases or paths. Every path is named in tools/doc-config.mjs.
 import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { join, posix } from "node:path";
+import { isAbsolute, join, posix } from "node:path";
 
 import {
   DEVLOG,
@@ -125,6 +125,7 @@ function loadBaselineNote() {
 function scan() {
   const stale = {};
   const missing = {};
+  const present = [];
   for (const file of liveFiles()) {
     const lines = read(file).split("\n");
     lines.forEach((raw, index) => {
@@ -136,7 +137,10 @@ function scan() {
         const path = match[0];
         // A pattern, not a path: `docs/guides/module-N.md`, `NNN-*.md`, `001-...md`.
         if (/(^|[/_-])N([-_.]|$)|NNN|\.\.\./.test(path)) continue;
-        if (existsSync(join(ROOT, path))) continue;
+        if (existsSync(join(ROOT, path))) {
+          present.push({ file, line: index + 1, text: path, repoPath: path });
+          continue;
+        }
         (missing[file] ??= []).push({ line: index + 1, text: path, repoPath: path });
       }
       // A relative markdown link, read from the file's own folder: the first thing a move breaks.
@@ -145,33 +149,81 @@ function scan() {
         const target = match[1];
         if (/^([a-z][a-z0-9+.-]*:|\/|<)/i.test(target)) continue;
         const repoPath = posix.normalize(posix.join(posix.dirname(file), decodeURI(target)));
-        if (existsSync(join(ROOT, repoPath))) continue;
+        if (existsSync(join(ROOT, repoPath))) {
+          present.push({ file, line: index + 1, text: `](${target})`, repoPath });
+          continue;
+        }
         (missing[file] ??= []).push({ line: index + 1, text: `](${target})`, repoPath });
       }
     });
   }
-  return { stale, missing: withoutIgnored(missing) };
+  return { stale, missing: withoutIgnored(missing), machineOnly: machineOnly(present) };
 }
 
 /**
- * A path git ignores is local-only by design (scripts/ is kept out of the repo): it exists on the
- * machine that wrote the doc and nowhere else, so its absence in a fresh clone or in CI is not drift.
+ * The paths git ignores. By default only by a committed .gitignore, the one kind of rule every
+ * clone and CI read; `personal` adds the rules this machine alone has: its own ignore file
+ * (core.excludesFile, else ~/.config/git/ignore) and this clone's .git/info/exclude. Git names the
+ * rule that decided each path (`-v`), and a `!` rule that decided it means not ignored.
+ */
+function ignoredPaths(paths, { personal = false } = {}) {
+  if (paths.length === 0) return new Set();
+  let out;
+  try {
+    out = git(["check-ignore", "-v", "-z", "--no-index", "--stdin"], `${paths.join("\0")}\0`); // -z: NUL in, NUL out
+  } catch {
+    return new Set(); // check-ignore exits 1 when none of them is ignored
+  }
+  const fields = out.split("\0");
+  const ignored = new Set();
+  for (let i = 0; i + 3 < fields.length; i += 4) {
+    const [source, , pattern, path] = fields.slice(i, i + 4);
+    if (pattern.startsWith("!")) continue;
+    const committed = !isAbsolute(source) && /(^|\/)\.gitignore$/.test(source.replace(/\\/g, "/"));
+    if (personal || committed) ignored.add(path);
+  }
+  return ignored;
+}
+
+/**
+ * A path a committed .gitignore ignores is local-only by design (scripts/ is kept out of the repo):
+ * it exists on the machine that wrote the doc and nowhere else, so its absence in a fresh clone or
+ * in CI is not drift. A path only this machine's own rules cover is not excused: CI has no such
+ * rule, so excusing it here would pass a doc that CI fails.
  */
 function withoutIgnored(missing) {
   const paths = [...new Set(Object.values(missing).flatMap((hits) => hits.map((hit) => hit.repoPath)))];
   if (paths.length === 0) return missing;
-  let ignored = new Set();
-  try {
-    ignored = new Set(git(["check-ignore", "--no-index", "--stdin"], paths.join("\n")).split("\n").filter(Boolean));
-  } catch {
-    ignored = new Set(); // check-ignore exits 1 when none of them is ignored
-  }
+  const ignored = ignoredPaths(paths);
   const kept = {};
   for (const [file, hits] of Object.entries(missing)) {
     const real = hits.filter((hit) => !ignored.has(hit.repoPath));
     if (real.length) kept[file] = real;
   }
   return kept;
+}
+
+/**
+ * A named path that is here only because a rule this machine alone has keeps it out of git:
+ * untracked, and ignored by that rule but by no .gitignore. It passes on this machine and fails in
+ * CI, where it does not exist and no rule excuses it, so it fails here too. The fix is one line in
+ * the repo's .gitignore (or not naming it).
+ */
+function machineOnly(present) {
+  const paths = [...new Set(present.map((hit) => hit.repoPath))];
+  const repo = ignoredPaths(paths);
+  const personalOnly = [...ignoredPaths(paths, { personal: true })].filter((path) => !repo.has(path));
+  if (personalOnly.length === 0) return [];
+  const tracked = new Set(git(["ls-files", "-z", "--", ...personalOnly]).split("\0").filter(Boolean));
+  const local = new Set(personalOnly.filter((path) => !tracked.has(path)));
+  return present
+    .filter((hit) => local.has(hit.repoPath))
+    .map(
+      (hit) =>
+        `${hit.file}:${hit.line} names a file only this machine has: ${hit.text.slice(0, 180)} (an ignore rule only this ` +
+        "machine has keeps it out of git, your personal ignore file or .git/info/exclude, and no .gitignore lists it, so CI " +
+        "fails this line). List it in the repo's .gitignore.",
+    );
 }
 
 /** Every doc's header against its own text: a missing header where one is required, and every budget broken. */
@@ -438,6 +490,7 @@ function main() {
     }
   }
 
+  failures.push(...found.machineOnly);
   failures.push(...headerProblems(new Set(baseline.headers)));
   failures.push(...staleIndexes());
   failures.push(...discoveryRewrites(flag("--head") ? "HEAD~1" : "HEAD"));

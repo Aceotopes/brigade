@@ -15,7 +15,7 @@
 // re-run. The runner's own gates trust no receipt, and are what catch a failure: no gate may ever
 // read this file (run.test.mjs checks the runner's imports never reach it).
 import { spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
@@ -63,7 +63,15 @@ export function treeKeys(root, lists) {
   const staged = join(dir, "index");
   try {
     const real = resolve(root, indexPath);
-    if (existsSync(real)) copyFileSync(real, staged);
+    if (existsSync(real)) {
+      copyFileSync(real, staged);
+      // Keep the index's own modified time on the copy. Git trusts a cached size and time unless the file is as new as
+      // the index ("racy git"), and a fresh time on the copy turned that off: on a coarse clock (Linux, CI) a same-size
+      // edit in the tick the index was written in read as unchanged, so the key named old content. utimes keeps whole
+      // milliseconds, so the copy's time can only fall a little earlier, which makes git re-read more files, never fewer.
+      const { atime, mtime } = statSync(real);
+      utimesSync(staged, atime, mtime);
+    }
     if (git(["add", "-A"], { GIT_INDEX_FILE: staged }).status !== 0) return none;
     const listed = git(["ls-files", "-z"], { GIT_INDEX_FILE: staged });
     if (listed.status !== 0) return none;

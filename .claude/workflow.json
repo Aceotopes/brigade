@@ -18,7 +18,8 @@
     "gates": [
       {
         "label": "plugin tests",
-        "run": "node --test tests/*.test.mjs"
+        "run": "node --test tests/*.test.mjs",
+        "unreadOf": "tests"
       },
       {
         "label": "template doc-tools tests",
