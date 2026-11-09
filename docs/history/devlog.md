@@ -9,6 +9,17 @@ Each commit's entry goes on top, in the shape of `docs/_templates/devlog-entry.m
 message cites it (`devlog #N`). At each phase end, `node tools/doc-rotate.mjs` moves the closed
 entries into `docs/history/devlog/`.
 
+## #27 · docs · 0.7.0's tickets, published
+
+**Built:** #27's 15 tickets, #28–#42, in this repo's ticket shape, each a sub-issue of #27 with
+its "Blocked by" set as native GitHub edges and labelled `ready-for-agent` only. The 13 from the
+spec, plus D10 (the snapshot carries doc-check, #31), which had no ticket, and D18's release night
+(#41). Every code ticket waits for the probe (#28). #28 and #41 are attended, and #42 (the finish)
+is blocked by all 14. The handoff names the probe next, after Block23GymV2's night.
+**Verified:** read back from GitHub: 15 sub-issues, every edge as approved, no placeholder left,
+every ticket number a link; #27 still open; doc-check clean. Nothing built.
+**Next:** Block23GymV2's first night, then #28. **Record:** this entry only.
+
 ## #26 · docs · 0.7.0's spec, published
 
 **Built:** spec #27, "0.7.0, two lanes", from discovery 05 (D1–D19), labelled `ready-for-agent`.
