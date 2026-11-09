@@ -9,6 +9,19 @@ Each commit's entry goes on top, in the shape of `docs/_templates/devlog-entry.m
 message cites it (`devlog #N`). At each phase end, `node tools/doc-rotate.mjs` moves the closed
 entries into `docs/history/devlog/`.
 
+## #30 · feat · the lane table: two lanes as config, checked at preflight
+
+**Built:** #29. The runner's loader reads `phaseRun.lanes` and `phaseRun.hotspots` and refuses a bad
+table, naming the field. Nothing runs a lane yet, and the hooks' loader is unchanged.
+- `parseLanes` / `parseLane`: rows of id, takes, worktree, qa, ports, testDbPrefix and env, at most
+  `MAX_LANES` (2), one `any` row, one QA database each, a `qa` port for a row `qa`, safe prefixes.
+- `parsePorts`: one port-row parser for `phaseRun.ports` and a lane's, with an optional `name`.
+- `parseHotspots`: `token` and `{ path, kind }` rows; `claims` and `landing` take no keys yet.
+- No `lanes` section loads as before: `lanes` and `hotspots` are null.
+**Verified:** 5 new loader-seam tests written first, hooks seam included: config 19/19; the plugin
+and template suites, 0 failures; doc-check clean. The code review's fixes are folded in.
+**Next:** #30, hotspots and unnumbered entries. **Record:** implementation log 015.
+
 ## #29 · docs · the probe: a lane under the installed plugin
 
 **Built:** #28, run attended on Claude Code 2.1.319 with Brigade 0.6.2 installed at project scope in

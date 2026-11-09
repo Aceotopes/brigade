@@ -7,7 +7,8 @@
 //     "prompt": "docs/agents/phase-run-prompt.md",   the project's prose for a session (## Read, ## Build,
 //                                                   ## Browser check, ## Review, ## Fix sections)
 //     "preflight": [{ "label", "run", "hint"? }],    must pass before a run starts
-//     "ports": [{ "port", "what", "freeAfterEachTicket"? }],   must be free at the start
+//     "ports": [{ "port", "what", "freeAfterEachTicket"?, "name"? }],   must be free at the start; a lane's
+//                                                   port named "qa" is its QA server's
 //     "qa": { "name", "url" },                       the database a session works on
 //     "sessionEnv": { NAME: value },                 pinned in every session, so `.env` cannot hand it a live value
 //     "strayProcess": "<regex>",                     a node process under node_modules that must not outlive a session
@@ -29,6 +30,14 @@
 //                                                   its rules are read from the base commit, never the tree
 //     "keep": { "plugins"?: [], "skills"?: [] }      user plugins and skills this project's nights keep,
 //                                                   whatever the machine's trim.json says (trim.mjs, D16)
+//     "lanes": { "rows": [{ "id", "takes", "worktree", "qa"?, "ports"?, "testDbPrefix"?, "env"? }],
+//                "claims"?, "worktreeSetup"?: { "copy"?, "commands"?, "leaves"? }, "landing"? }
+//                                                   0.7.0's lanes, two at most; left out, a one-lane run
+//                                                   as before. A row's values are the project's: none
+//                                                   has a default here. `claims` and `landing` have no
+//                                                   keys yet; the tickets that use them add theirs
+//     "hotspots": { "token"?, "rows": [{ "path", "kind" }] }   the files every commit writes at one spot,
+//                                                   and how Landing settles each (ADR 0006)
 //   }
 //
 // The top-level `ledger` section, `{ "attended"?, "weekStarts"? }` (ledger.mjs), is read here too,
@@ -59,9 +68,16 @@ export const WEEK_DAYS = ["sunday", "monday", "tuesday", "wednesday", "thursday"
 export const DEFAULT_LEDGER = { attended: true, weekStarts: "monday" };
 
 const KEYS = {
-  phaseRun: ["prompt", "preflight", "ports", "qa", "sessionEnv", "strayProcess", "gates", "browserCheck", "migrations", "alwaysInScope", "permissions", "steps", "ticketSize", "tampering", "keep"],
+  phaseRun: ["prompt", "preflight", "ports", "qa", "sessionEnv", "strayProcess", "gates", "browserCheck", "migrations", "alwaysInScope", "permissions", "steps", "ticketSize", "tampering", "keep", "lanes", "hotspots"],
   preflight: ["label", "run", "hint"],
-  port: ["port", "what", "freeAfterEachTicket"],
+  port: ["port", "what", "freeAfterEachTicket", "name"],
+  lanes: ["rows", "claims", "worktreeSetup", "landing"],
+  lane: ["id", "takes", "worktree", "qa", "ports", "testDbPrefix", "env"],
+  worktreeSetup: ["copy", "commands", "leaves"],
+  claims: [],
+  landing: [],
+  hotspots: ["token", "rows"],
+  hotspot: ["path", "kind"],
   qa: ["name", "url"],
   gate: ["label", "run", "when", "env", "freePorts", "alone", "after", "unreadOf"],
   builtin: ["builtin"],
@@ -75,10 +91,18 @@ const KEYS = {
   sizeRule: ["key", "kind", "section", "max", "label"],
 };
 
+/** How many lanes may run at once (D5). The lane code is row-generic: lifting the cap is this line, plus a trial. */
+export const MAX_LANES = 2;
+/** What a lane row may take besides a label: any ticket. At most one row takes it (D6). */
+export const ANY_TICKET = "any";
+/** The kinds of hotspot row (ADR 0006); a file on no row is left to git. What each kind does is Landing's. */
+export const HOTSPOT_KINDS = ["log", "generated", "own-file"];
+
 /** Which placeholders each kind of value may use. */
 const ALLOWED = {
   preflight: ["qaUrl"],
   sessionEnv: ["qaUrl"],
+  laneEnv: [],
   gate: ["base", "N", "qaUrl", "cache"],
   screenshots: ["N"],
   apply: ["targetUrl", "base"],
@@ -130,19 +154,14 @@ export function parseRunConfig(data) {
   );
   gateReferences(run.gates, stopChecks.map((check) => check.name).filter(Boolean), `${where}.gates`);
   gateOrder(gates, `${where}.gates`);
-  return {
+  const config = {
     prompt: optionalText(run.prompt, `${where}.prompt`),
     preflight: list(run.preflight, `${where}.preflight`).map((row, i) => {
       const at = `${where}.preflight[${i}]`;
       keys(row, KEYS.preflight, at);
       return { label: text(row.label, `${at}.label`), run: command(row.run, `${at}.run`, ALLOWED.preflight), hint: optionalText(row.hint, `${at}.hint`) };
     }),
-    ports: list(run.ports, `${where}.ports`).map((row, i) => {
-      const at = `${where}.ports[${i}]`;
-      keys(row, KEYS.port, at);
-      if (!Number.isInteger(row.port) || row.port < 1 || row.port > 65535) throw new Error(`${at}.port must be a port number.`);
-      return { port: row.port, what: text(row.what, `${at}.what`), freeAfterEachTicket: flag(row.freeAfterEachTicket, `${at}.freeAfterEachTicket`) };
-    }),
+    ports: parsePorts(run.ports, `${where}.ports`),
     qa: run.qa === undefined ? null : parseQa(run.qa, `${where}.qa`),
     sessionEnv: envBlock(run.sessionEnv, `${where}.sessionEnv`, ALLOWED.sessionEnv),
     strayProcess: run.strayProcess === undefined ? null : pattern(run.strayProcess, `${where}.strayProcess`),
@@ -158,6 +177,11 @@ export function parseRunConfig(data) {
     keep: parseKeep(run.keep === undefined ? {} : run.keep, `${where}.keep`),
     ledger: parseLedger(data?.ledger),
   };
+  // Last, so a config with no lanes is refused, if at all, as before. A lane row's qa is checked
+  // against phaseRun.qa, loaded above.
+  config.lanes = run.lanes === undefined ? null : parseLanes(run.lanes, `${where}.lanes`, config.qa);
+  config.hotspots = run.hotspots === undefined ? null : parseHotspots(run.hotspots, `${where}.hotspots`);
+  return config;
 }
 
 // tampering.mjs reads the base commit's section through this same function.
@@ -454,6 +478,157 @@ function parseKeep(value, at) {
   return { plugins, skills: names("skills") };
 }
 
+/**
+ * Port rows, in `phaseRun.ports` and a lane row's `ports` alike. A `name` finds a port by its job: a
+ * lane's port named "qa" is its QA server's (PHASE_RUN_QA_PORT), and the rest are only checked free.
+ */
+function parsePorts(value, where) {
+  const named = new Map();
+  return list(value, where).map((row, i) => {
+    const at = `${where}[${i}]`;
+    keys(row, KEYS.port, at);
+    if (!Number.isInteger(row.port) || row.port < 1 || row.port > 65535) throw new Error(`${at}.port must be a port number.`);
+    const port = { port: row.port, what: text(row.what, `${at}.what`), freeAfterEachTicket: flag(row.freeAfterEachTicket, `${at}.freeAfterEachTicket`), name: null };
+    if (row.name !== undefined) {
+      if (typeof row.name !== "string" || !/^[a-z][a-z0-9_-]*$/.test(row.name)) throw new Error(`${at}.name must be a lowercase word (lowercase letters, digits, "-" or "_", starting with a letter), such as "qa" (it is ${JSON.stringify(row.name)}).`);
+      if (named.has(row.name)) throw new Error(`${at}.name "${row.name}" is also ${where}[${named.get(row.name)}]'s: a name finds one port.`);
+      named.set(row.name, i);
+      port.name = row.name;
+    }
+    return port;
+  });
+}
+
+/**
+ * `phaseRun.lanes` (D3–D6): at most MAX_LANES rows, each one lane's own resources. Every value in a
+ * row is the project's, so one a row leaves out stays null: nothing here makes one up. Across rows,
+ * two lanes never share an id, a worktree, a port or a QA database, and only one takes any ticket.
+ * `qa` is phaseRun.qa as loaded (or null), whose url a row's database goes into.
+ */
+function parseLanes(section, where, qa) {
+  keys(section, KEYS.lanes, where);
+  const rows = list(section.rows, `${where}.rows`);
+  if (rows.length === 0) throw new Error(`${where}.rows is empty: list one row per lane, or leave ${where} out.`);
+  if (rows.length > MAX_LANES) {
+    const extra = rows.slice(MAX_LANES).map((_, i) => `rows[${MAX_LANES + i}]`);
+    throw new Error(`${where}.rows has ${rows.length} rows, and at most ${MAX_LANES} lanes run: take out ${extra.join(", ")}.`);
+  }
+  const at = (i) => `${where}.rows[${i}]`;
+  const lanes = rows.map((row, i) => parseLane(row, at(i), qa));
+  // A row's QA database: its own `qa`, else phaseRun.qa's own (its `name`), as lane 1's is.
+  const database = (lane) => lane.qa ?? qa?.name ?? null;
+  const databaseFrom = (j) => (lanes[j].qa === null ? `phaseRun.qa.name, as it has no "qa"` : `${at(j)}.qa`);
+  lanes.forEach((lane, i) => {
+    const earlier = (same) => lanes.findIndex((other, j) => j < i && same(other));
+    let j = earlier((other) => other.id === lane.id);
+    if (j !== -1) throw new Error(`${at(i)}.id "${lane.id}" is also ${at(j)}'s: each lane has its own id.`);
+    j = earlier((other) => other.takes === ANY_TICKET);
+    if (lane.takes === ANY_TICKET && j !== -1) {
+      throw new Error(
+        `${at(i)}.takes is "${ANY_TICKET}", as ${at(j)}.takes is: at most one lane takes any ticket. A second lane that takes any ticket whose Areas don't overlap the other lane's is an upgrade 0.7.0 leaves out of scope, until this rule is lifted on purpose; give this lane a label it takes instead.`,
+      );
+    }
+    j = earlier((other) => other.worktree === lane.worktree);
+    if (j !== -1) throw new Error(`${at(i)}.worktree "${lane.worktree}" is also ${at(j)}'s: each lane builds in its own worktree.`);
+    const name = database(lane);
+    j = name === null ? -1 : earlier((other) => database(other) === name);
+    if (j !== -1) {
+      const clash = lane.qa === null ? `${at(i)} has no "qa", so its QA database is phaseRun.qa.name "${name}", which is also ${at(j)}'s` : `${at(i)}.qa "${name}" is also ${at(j)}'s QA database`;
+      throw new Error(`${clash} (${databaseFrom(j)}): each lane needs its own.`);
+    }
+    // A test database's name starts with the prefix, so one prefix that starts another's ("lane",
+    // "lane2_") would match the other lane's databases too.
+    const prefix = lane.testDbPrefix;
+    j = prefix === null ? -1 : earlier((other) => other.testDbPrefix !== null && (other.testDbPrefix.startsWith(prefix) || prefix.startsWith(other.testDbPrefix)));
+    if (j !== -1) {
+      throw new Error(`${at(i)}.testDbPrefix "${prefix}" overlaps ${at(j)}.testDbPrefix "${lanes[j].testDbPrefix}": one starts the other, so a test database could be either lane's. Give each lane a prefix the other's doesn't start.`);
+    }
+    lane.ports.forEach((port, p) => {
+      for (const [k, other] of lanes.slice(0, i).entries()) {
+        const q = other.ports.findIndex((theirs) => theirs.port === port.port);
+        if (q !== -1) throw new Error(`${at(i)}.ports[${p}].port ${port.port} is also ${at(k)}.ports[${q}]'s: two lanes never bind one port.`);
+      }
+    });
+  });
+  return {
+    rows: lanes,
+    claims: noKeysYet(section.claims, `${where}.claims`, KEYS.claims),
+    worktreeSetup: parseWorktreeSetup(section.worktreeSetup ?? {}, `${where}.worktreeSetup`),
+    landing: noKeysYet(section.landing, `${where}.landing`, KEYS.landing),
+  };
+}
+
+/** One lane row. `takes` is "any" or a label the project picks; `testDbPrefix` may be left out, never set empty. */
+function parseLane(row, at, qa) {
+  keys(row, KEYS.lane, at);
+  const lane = {
+    id: laneId(row.id, `${at}.id`),
+    takes: text(row.takes, `${at}.takes`),
+    worktree: text(row.worktree, `${at}.worktree`),
+    qa: optionalText(row.qa, `${at}.qa`),
+    ports: parsePorts(row.ports, `${at}.ports`),
+    testDbPrefix: row.testDbPrefix === undefined ? null : testDbPrefix(row.testDbPrefix, `${at}.testDbPrefix`),
+    env: envBlock(row.env, `${at}.env`, ALLOWED.laneEnv),
+  };
+  if (lane.qa !== null && !qa) throw new Error(`${at}.qa is set, but there is no phaseRun.qa section whose url it goes into.`);
+  if (lane.qa !== null && !lane.ports.some((port) => port.name === "qa")) {
+    throw new Error(`${at}.qa is set, but ${at}.ports has no port named "qa": the lane's browser check would reach another lane's QA server.`);
+  }
+  return lane;
+}
+
+/** A lane's id names it in `--lane <id>` and its folders: a whole number or a lowercase word, kept as text. */
+function laneId(value, at) {
+  if (Number.isInteger(value) && value >= 1) return String(value);
+  if (typeof value === "string" && /^[a-z0-9][a-z0-9-]*$/.test(value)) return value;
+  throw new Error(`${at} must be a whole number, 1 or more, or a lowercase word (lowercase letters, digits or "-", starting with a letter or digit), such as 2 or "docs": it names the lane in --lane and its folders (it is ${JSON.stringify(value)}).`);
+}
+
+/** A test database's name starts with the prefix, so one that is empty or holds other characters could match every one. */
+function testDbPrefix(value, at) {
+  if (value === "") throw new Error(`${at} is set but empty: leave it out to keep the project's own test-database names, or name this lane's, such as "lane2_".`);
+  if (typeof value !== "string" || !/^[a-z][a-z0-9_]*$/.test(value)) {
+    throw new Error(`${at} ${JSON.stringify(value)} is unsafe: a test database's name starts with it, so it is a lowercase letter, then lowercase letters, digits or "_", such as "lane2_".`);
+  }
+  return value;
+}
+
+/** `worktreeSetup` (D8): untracked files to `copy` in, the `commands` to run, and the files they `leaves`. */
+function parseWorktreeSetup(value, at) {
+  keys(value, KEYS.worktreeSetup, at);
+  const paths = (name, example) => list(value[name], `${at}.${name}`).map((entry, i) => repoPath(entry, `${at}.${name}[${i}]`, example));
+  return {
+    copy: paths("copy", ".env"),
+    commands: list(value.commands, `${at}.commands`).map((line, i) => text(line, `${at}.commands[${i}]`)),
+    leaves: paths("leaves", "node_modules/.bin/tsc"),
+  };
+}
+
+/**
+ * A section whose keys a later ticket defines (only a note for now): its keys are checked against
+ * `allowed` and kept as written, so adding a key to KEYS is all that ticket needs here.
+ */
+function noKeysYet(value, at, allowed) {
+  if (value === undefined) return {};
+  keys(value, allowed, at);
+  return Object.fromEntries(Object.entries(value).filter(([key]) => key !== "note"));
+}
+
+/** `phaseRun.hotspots` (ADR 0006): checked here; what each kind does, and the token's default, are Landing's. */
+function parseHotspots(section, where) {
+  keys(section, KEYS.hotspots, where);
+  if (section.token !== undefined && (typeof section.token !== "string" || !/^\S+$/.test(section.token))) {
+    throw new Error(`${where}.token must be a word with no spaces, such as "NNN" (it is ${JSON.stringify(section.token)}).`);
+  }
+  const rows = list(section.rows, `${where}.rows`).map((row, i) => {
+    const at = `${where}.rows[${i}]`;
+    keys(row, KEYS.hotspot, at);
+    if (!HOTSPOT_KINDS.includes(row.kind)) throw new Error(`${at}.kind must be one of ${HOTSPOT_KINDS.join(", ")} (it is ${JSON.stringify(row.kind)}). A file on no row is left to git.`);
+    return { path: repoPath(row.path, `${at}.path`, "docs/history/devlog.md"), kind: row.kind };
+  });
+  return { token: section.token ?? null, rows };
+}
+
 // ------------------------------------------------------------------ the values
 
 /**
@@ -514,7 +689,19 @@ export function sessionEnv(config, lookup) {
 function keys(value, allowed, at) {
   if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error(`${at} must be an object.`);
   const unknown = Object.keys(value).filter((key) => key !== "note" && !allowed.includes(key));
-  if (unknown.length) throw new Error(`${at} has unknown key(s) ${unknown.join(", ")}; allowed: ${allowed.join(", ")}.`);
+  if (unknown.length) throw new Error(`${at} has unknown key(s) ${unknown.join(", ")}; allowed: ${allowed.join(", ") || "none yet"}.`);
+}
+
+/**
+ * A path as git prints it, from the repo's root: `./x`, `/x` or `../x` would match nothing in it. The
+ * twin of tamperingRules' own `repoPath`, which stays inside it to keep that function word for word
+ * the hooks'.
+ */
+function repoPath(value, at, example) {
+  if (typeof value !== "string" || !value.trim() || value !== value.trim() || /^\.?\//.test(value) || value.split("/").includes("..")) {
+    throw new Error(`${at} must be a path from the repo's root, such as "${example}".`);
+  }
+  return value;
 }
 
 function list(value, at) {

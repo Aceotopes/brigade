@@ -255,6 +255,158 @@ test("the two loaders' tamperingRules are one text, word for word", () => {
   assert.equal(body("template/tools/phase-run/config.mjs"), body("hooks/workflow-config.mjs"));
 });
 
+// 0.7.0 (#29, D3–D6): two lanes are config, `phaseRun.lanes` and `phaseRun.hotspots`, and a port row
+// may carry a `name`. Only the runner's loader checks them; the hooks' loader passes over them, as no
+// hook reads lane config (owner, 2026-11-09). No `lanes` section is today's run.
+const LANES = {
+  rows: [
+    { id: 1, takes: "any", worktree: "../shop-lanes/lane-1", ports: [{ port: 4100, what: "the QA server", name: "qa" }] },
+    {
+      id: 2,
+      takes: "walk",
+      worktree: "../shop-lanes/lane-2",
+      qa: "shop_qa_2",
+      ports: [{ port: 4200, what: "the QA server", name: "qa", freeAfterEachTicket: true }, { port: 4201, what: "the dev server" }],
+      testDbPrefix: "lane2_",
+      env: { CACHE_DB: "2", note: "the cache's database index" },
+    },
+  ],
+  claims: {},
+  worktreeSetup: { copy: [".env", ".claude/settings.local.json"], commands: ["npm ci"], leaves: ["node_modules/.bin/tsc"] },
+  landing: { note: "its keys come with Landing" },
+};
+const HOTSPOTS = {
+  token: "NNN",
+  rows: [
+    { path: "docs/history/devlog.md", kind: "log" },
+    { path: "docs/history/implementation-log/*.md", kind: "log" },
+    { path: "docs/README.md", kind: "generated" },
+    { path: "docs/agents/gotchas/*.md", kind: "own-file" },
+  ],
+};
+const QA = { name: "shop_qa", url: "postgresql://localhost:5432/shop_qa" };
+const withLanes = (lanes, extra = {}) => ({ version: 1, phaseRun: { qa: QA, lanes, ...extra } });
+// The message alone, so a pattern can say the field comes first (assert.throws matches "Error: …").
+const refusal = (load) => {
+  try {
+    load();
+  } catch (thrown) {
+    return thrown.message;
+  }
+  return "(loaded)";
+};
+
+test("the runner's loader reads a two-lane config and its hotspots as written", () => {
+  const config = parseRunConfig(withLanes(LANES, { hotspots: HOTSPOTS }));
+  // Lane 1 leaves qa and testDbPrefix out: they stay unset, with no value made up for them.
+  assert.deepEqual(
+    config.lanes.rows.map((r) => [r.id, r.takes, r.worktree, r.qa, r.testDbPrefix]),
+    [["1", "any", "../shop-lanes/lane-1", null, null], ["2", "walk", "../shop-lanes/lane-2", "shop_qa_2", "lane2_"]],
+  );
+  assert.deepEqual(config.lanes.rows[1].ports, [
+    { port: 4200, what: "the QA server", freeAfterEachTicket: true, name: "qa" },
+    { port: 4201, what: "the dev server", freeAfterEachTicket: false, name: null },
+  ]);
+  assert.deepEqual([config.lanes.rows[0].env, config.lanes.rows[1].env], [{}, { CACHE_DB: "2" }]);
+  assert.deepEqual(config.lanes.worktreeSetup, LANES.worktreeSetup);
+  assert.deepEqual([config.lanes.claims, config.lanes.landing], [{}, {}]);
+  assert.deepEqual(config.hotspots, HOTSPOTS);
+  // Every part but the rows may be left out.
+  const bare = parseRunConfig(withLanes({ rows: LANES.rows })).lanes;
+  assert.deepEqual([bare.claims, bare.worktreeSetup, bare.landing], [{}, { copy: [], commands: [], leaves: [] }, {}]);
+  assert.deepEqual(parseRunConfig({ version: 1, phaseRun: { hotspots: { rows: [] } } }).hotspots, { token: null, rows: [] });
+  // Prefixes that don't start each other load side by side.
+  const prefixes = parseRunConfig(withLanes({ rows: [{ ...LANES.rows[0], testDbPrefix: "lane1_" }, LANES.rows[1]] })).lanes.rows;
+  assert.deepEqual(prefixes.map((r) => r.testDbPrefix), ["lane1_", "lane2_"]);
+  // A port row's name, in phaseRun.ports' own rows too.
+  assert.deepEqual(parseRunConfig({ version: 1, phaseRun: { ports: [{ port: 4100, what: "the QA server", name: "qa" }] } }).ports, [
+    { port: 4100, what: "the QA server", freeAfterEachTicket: false, name: "qa" },
+  ]);
+});
+
+test("a config with no lanes section loads as before: no lanes, no hotspots, no port names", () => {
+  for (const data of [{ version: 1 }, { version: 1, phaseRun: {} }, BLANK, STJ]) {
+    const config = parseRunConfig(data);
+    assert.deepEqual([config.lanes, config.hotspots], [null, null], JSON.stringify(data).slice(0, 60));
+    assert.ok(config.ports.every((p) => p.name === null));
+  }
+});
+
+test("the hooks' loader passes over lanes, hotspots and a port's name, which no hook reads", () => {
+  const data = withLanes(LANES, { hotspots: HOTSPOTS, ports: [{ port: 4100, what: "the QA server", name: "qa" }] });
+  assert.deepEqual(parseWorkflowConfig(data), parseWorkflowConfig({ version: 1 }));
+  // Even a lane table the runner refuses: preflight catches it, and the hooks keep working.
+  const refused = withLanes({ rows: [...LANES.rows, LANES.rows[1]], lock: true }, { hotspots: { rows: [{ path: "x", kind: "merge" }] } });
+  assert.throws(() => parseRunConfig(refused));
+  assert.doesNotThrow(() => parseWorkflowConfig(refused));
+});
+
+test("the runner's loader refuses a bad lane table, naming the field", () => {
+  const [one, two] = LANES.rows;
+  const { qa: _qa, ...twoWithoutQa } = two;
+  const third = { id: 3, takes: "docs", worktree: "../shop-lanes/lane-3", qa: "shop_qa_3", ports: [{ port: 4300, what: "the QA server", name: "qa" }] };
+  const rows = (...list) => ({ rows: list });
+  const cases = [
+    // Two lanes at most (D5).
+    [rows(one, two, third), /^phaseRun\.lanes\.rows has 3 rows, and at most 2 lanes run: take out rows\[2\]\.$/],
+    // At most one row takes any ticket (D6), and the message names the upgrade that would lift it.
+    [rows(one, { ...two, takes: "any" }), /^phaseRun\.lanes\.rows\[1\]\.takes is "any", as phaseRun\.lanes\.rows\[0\]\.takes is: .*Areas don't overlap.* out of scope/],
+    // Each lane its own QA database: lane 1's row qa, or phaseRun.qa's own when lane 1's row has none.
+    [rows(one, { ...two, qa: "shop_qa" }), /^phaseRun\.lanes\.rows\[1\]\.qa "shop_qa" is also phaseRun\.lanes\.rows\[0\]'s QA database \(phaseRun\.qa\.name, as it has no "qa"\): each lane needs its own\.$/],
+    [rows({ ...one, qa: "shop_main" }, { ...two, qa: "shop_main" }), /^phaseRun\.lanes\.rows\[1\]\.qa "shop_main" is also phaseRun\.lanes\.rows\[0\]'s QA database \(phaseRun\.lanes\.rows\[0\]\.qa\)/],
+    [rows(one, twoWithoutQa), /^phaseRun\.lanes\.rows\[1\] has no "qa", so its QA database is phaseRun\.qa\.name "shop_qa", which is also phaseRun\.lanes\.rows\[0\]'s/],
+    // A qa database and no port named qa: its browser check would reach another lane's server.
+    [rows(one, { ...two, ports: [{ port: 4200, what: "the QA server" }] }), /^phaseRun\.lanes\.rows\[1\]\.qa is set, but phaseRun\.lanes\.rows\[1\]\.ports has no port named "qa"/],
+    // testDbPrefix: optional, never empty, never unsafe.
+    [rows(one, { ...two, testDbPrefix: "" }), /^phaseRun\.lanes\.rows\[1\]\.testDbPrefix is set but empty: leave it out/],
+    ...["lane-2", "Lane2_", "2lane", "lane 2", "lane%", 2].map((testDbPrefix) => [rows(one, { ...two, testDbPrefix }), /^phaseRun\.lanes\.rows\[1\]\.testDbPrefix .* is unsafe: /]),
+    // Each lane its own prefix: one that starts the other's would match its databases too.
+    ...[["lane2_", "lane2_"], ["lane", "lane2_"], ["lane2_", "lane"]].map(([a, b]) => [
+      rows({ ...one, testDbPrefix: a }, { ...two, testDbPrefix: b }),
+      /^phaseRun\.lanes\.rows\[1\]\.testDbPrefix "\w+" overlaps phaseRun\.lanes\.rows\[0\]\.testDbPrefix "\w+": one starts the other/,
+    ]),
+    // An unknown key in any new section or row.
+    [{ ...LANES, lock: {} }, /^phaseRun\.lanes has unknown key\(s\) lock; allowed: rows, claims, worktreeSetup, landing\.$/],
+    [rows(one, { ...two, database: "x" }), /^phaseRun\.lanes\.rows\[1\] has unknown key\(s\) database; allowed: id, takes, worktree, qa, ports, testDbPrefix, env\.$/],
+    [rows(one, { ...two, ports: [{ port: 4200, what: "the QA server", label: "qa" }] }), /^phaseRun\.lanes\.rows\[1\]\.ports\[0\] has unknown key\(s\) label; allowed: port, what, freeAfterEachTicket, name\.$/],
+    [{ ...LANES, worktreeSetup: { install: ["npm ci"] } }, /^phaseRun\.lanes\.worktreeSetup has unknown key\(s\) install; allowed: copy, commands, leaves\.$/],
+    [{ ...LANES, claims: { file: "claims.json" } }, /^phaseRun\.lanes\.claims has unknown key\(s\) file; allowed: none yet\.$/],
+    [{ ...LANES, landing: { lock: "x" } }, /^phaseRun\.lanes\.landing has unknown key\(s\) lock; allowed: none yet\.$/],
+    // The rows' own shape.
+    [{ claims: {} }, /^phaseRun\.lanes\.rows is empty: list one row per lane, or leave phaseRun\.lanes out\.$/],
+    [rows(one, { ...two, id: 1 }), /^phaseRun\.lanes\.rows\[1\]\.id "1" is also phaseRun\.lanes\.rows\[0\]'s/],
+    [rows(one, { ...two, id: "Lane 2" }), /^phaseRun\.lanes\.rows\[1\]\.id must be a whole number, 1 or more, or a lowercase word/],
+    [rows(one, { ...two, takes: " " }), /^phaseRun\.lanes\.rows\[1\]\.takes is missing\.$/],
+    [rows(one, { ...two, worktree: one.worktree }), /^phaseRun\.lanes\.rows\[1\]\.worktree "\.\.\/shop-lanes\/lane-1" is also phaseRun\.lanes\.rows\[0\]'s/],
+    [rows(one, { ...two, ports: [{ port: 4100, what: "the QA server", name: "qa" }] }), /^phaseRun\.lanes\.rows\[1\]\.ports\[0\]\.port 4100 is also phaseRun\.lanes\.rows\[0\]\.ports\[0\]'s/],
+    [rows(one, { ...two, ports: [{ port: 4200, what: "a", name: "qa" }, { port: 4201, what: "b", name: "qa" }] }), /^phaseRun\.lanes\.rows\[1\]\.ports\[1\]\.name "qa" is also phaseRun\.lanes\.rows\[1\]\.ports\[0\]'s/],
+    [rows(one, { ...two, env: { CACHE_DB: "{qaUrl}" } }), /^phaseRun\.lanes\.rows\[1\]\.env\.CACHE_DB uses \{qaUrl\}; allowed here: none\.$/],
+    [{ ...LANES, worktreeSetup: { copy: ["../.env"] } }, /^phaseRun\.lanes\.worktreeSetup\.copy\[0\] must be a path from the repo's root/],
+  ];
+  for (const [lanes, error] of cases) {
+    assert.match(refusal(() => parseRunConfig(withLanes(lanes))), error, JSON.stringify(lanes).slice(0, 120));
+  }
+  // A row qa needs phaseRun.qa, whose url it goes into.
+  assert.match(refusal(() => parseRunConfig({ version: 1, phaseRun: { lanes: LANES } })), /^phaseRun\.lanes\.rows\[1\]\.qa is set, but there is no phaseRun\.qa section/);
+  // A port row's name is checked in phaseRun.ports too.
+  assert.match(refusal(() => parseRunConfig({ version: 1, phaseRun: { ports: [{ port: 4100, what: "x", name: "" }] } })), /^phaseRun\.ports\[0\]\.name must be a lowercase word/);
+});
+
+test("the runner's loader refuses a bad hotspots section, naming the field", () => {
+  const cases = [
+    [{ ...HOTSPOTS, numbers: "NNN" }, /^phaseRun\.hotspots has unknown key\(s\) numbers; allowed: token, rows\.$/],
+    [{ rows: [{ path: "docs/history/devlog.md", kind: "log", glob: "x" }] }, /^phaseRun\.hotspots\.rows\[0\] has unknown key\(s\) glob; allowed: path, kind\.$/],
+    [{ rows: [{ path: "docs/history/devlog.md", kind: "merge" }] }, /^phaseRun\.hotspots\.rows\[0\]\.kind must be one of log, generated, own-file \(it is "merge"\)\./],
+    [{ rows: [{ path: "./docs/history/devlog.md", kind: "log" }] }, /^phaseRun\.hotspots\.rows\[0\]\.path must be a path from the repo's root/],
+    [{ token: "" }, /^phaseRun\.hotspots\.token must be a word/],
+    [{ token: "N N" }, /^phaseRun\.hotspots\.token must be a word/],
+    [{ rows: {} }, /^phaseRun\.hotspots\.rows must be a list\.$/],
+  ];
+  for (const [hotspots, error] of cases) {
+    assert.match(refusal(() => parseRunConfig({ version: 1, phaseRun: { hotspots } })), error, JSON.stringify(hotspots));
+  }
+});
+
 test("Steak To Juan's example holds exactly what run.mjs hardcoded", () => {
   const stj = parseRunConfig(STJ);
   const lookup = (name) => ({ NEON_TEST_DATABASE_URL: "postgresql://u:p@localhost:5432/stj_test", NEON_DATABASE_URL: "postgresql://u:p@ep-cool-1-pooler.ap.aws.neon.tech/db" })[name];
