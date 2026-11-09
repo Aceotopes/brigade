@@ -125,6 +125,9 @@ these steps:
     shell guard read only its own part of the config. The decisions are in the
     [0.6.0 discovery doc](discovery/04-brigade-0.6.0.md). 0.6.1 (the next day) fixes the guide's
     test-override example, which named a real folder and broke doc-check in projects that have one.
+    0.6.2 (the same day) makes doc-check count only committed `.gitignore` rules, and keeps git's
+    racy-file re-read in the receipt's index copy: two fixes found by a source project's two-lane
+    work ([0.7.0 discovery doc](discovery/05-brigade-0.7.0.md), D1).
 
 ## Changing the workflow
 

@@ -235,6 +235,33 @@ test("a missing path git ignores is local-only and passes; any other missing pat
   assert.match(node("doc-check.mjs").stderr, /names a file that does not exist: tools\/gone\.mjs/);
 });
 
+test("only a committed .gitignore excuses a path: a rule only this machine has does not, since CI lacks it", () => {
+  const { dir, run, node } = repo();
+  run("config", "core.excludesFile", join(dir, "no-such-ignore-file")); // the test machine's own ignore file stays out
+  writeFileSync(join(dir, ".git", "info", "exclude"), "/scripts/*\n");
+  const roadmap = (body) => `---\njob: Where things stand.\nkind: living\nmax-lines: 20\n---\n# Roadmap\n${body}\n`;
+  // Missing, and ignored only by this clone's exclude file: CI has no such rule, so it fails here too.
+  writeFileSync(join(dir, "docs", "roadmap.md"), roadmap("Run `scripts/gone.mjs`."));
+  assert.match(node("doc-check.mjs").stderr, /names a file that does not exist: scripts\/gone\.mjs/);
+  // Present here, but only because that rule keeps it out of git: a fresh clone lacks it.
+  mkdirSync(join(dir, "scripts"));
+  writeFileSync(join(dir, "scripts", "local.mjs"), "\n");
+  writeFileSync(join(dir, "docs", "roadmap.md"), roadmap("Run `scripts/local.mjs`, see [it](../scripts/local.mjs)."));
+  const result = node("doc-check.mjs");
+  assert.match(result.stderr, /roadmap\.md:7 names a file only this machine has: scripts\/local\.mjs/);
+  assert.match(result.stderr, /names a file only this machine has: \]\(\.\.\/scripts\/local\.mjs\)/);
+  // The same rule in the committed .gitignore: every clone reads it, so both pass.
+  writeFileSync(join(dir, ".gitignore"), "/scripts/*\n");
+  assert.equal(node("doc-check.mjs").status, 0, node("doc-check.mjs").stderr);
+  writeFileSync(join(dir, "docs", "roadmap.md"), roadmap("Run `scripts/gone.mjs`."));
+  assert.equal(node("doc-check.mjs").status, 0, node("doc-check.mjs").stderr);
+  // A tracked file a personal rule matches is in every clone: it passes.
+  writeFileSync(join(dir, ".gitignore"), "");
+  run("add", "-f", "scripts/local.mjs");
+  writeFileSync(join(dir, "docs", "roadmap.md"), roadmap("Run `scripts/local.mjs`."));
+  assert.equal(node("doc-check.mjs").status, 0, node("doc-check.mjs").stderr);
+});
+
 test("only a path under the config's folders, of its file types, is checked", () => {
   const { dir, node } = repo();
   const roadmap = (body) => `---\njob: Where things stand.\nkind: living\nmax-lines: 20\n---\n# Roadmap\n${body}\n`;

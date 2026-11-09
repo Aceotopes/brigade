@@ -8,7 +8,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { once } from "node:events";
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -586,6 +586,22 @@ test("any edit, or a new untracked file, changes the tree key; the real index is
   assert.equal(git("status", "--porcelain").stdout.trim(), "?? new.txt"); // still untracked: nothing was staged
   writeFileSync(join(dir, "a.txt"), "edited\n");
   assert.notEqual(treeKey(dir), withNew);
+});
+
+test("a same-size edit in the clock tick the index was written in still changes the tree key (racy git)", () => {
+  // Git trusts a cached size and time unless the file is as new as the index itself. A copied index with a fresh time
+  // turned that re-read off, so on a coarse clock (Linux, CI) a same-size edit could keep a receipt. Windows git
+  // re-reads such a file anyway, so this goes red only on Linux.
+  const { dir, git } = gitRepo({ "src/a.js": "export const a = 1;\n" });
+  const file = join(dir, "src", "a.js");
+  const tick = new Date("2026-11-07T20:00:00.000Z");
+  utimesSync(file, tick, tick);
+  git("add", "src/a.js"); // the index caches the file's size and this time
+  const before = treeKey(dir);
+  writeFileSync(file, "export const a = 2;\n"); // the same size
+  utimesSync(file, tick, tick); // ...in the same tick as the cached time
+  utimesSync(join(dir, ".git", "index"), tick, tick); // ...and as the index's own write
+  assert.notEqual(treeKey(dir), before);
 });
 
 test("with unread paths, a docs-only edit keeps the tree key; code, a new code file or a nested .md change it", () => {

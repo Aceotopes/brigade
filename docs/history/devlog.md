@@ -9,6 +9,18 @@ Each commit's entry goes on top, in the shape of `docs/_templates/devlog-entry.m
 message cites it (`devlog #N`). At each phase end, `node tools/doc-rotate.mjs` moves the closed
 entries into `docs/history/devlog/`.
 
+## #24 · fix · 0.6.2: doc-check trusts only committed ignores; receipts keep racy git
+
+**Built:** the template's doc-check excuses a missing path only when a committed `.gitignore`
+ignores it (`ignoredPaths`, `check-ignore -v`), and fails a named file that only this machine's
+own rule keeps out of git (`machineOnly`). `treeKeys` keeps the index's own time on its copy, so
+git still re-reads a same-size edit made in the index's tick. Released as 0.6.2: `plugin.json`,
+the CHANGELOG, the README's version, development entry 14. Ported from a source project's fix.
+**Verified:** both new tests failed first (the racy-git one only on Linux, in a `node:22`
+container; Windows git re-reads anyway), then passed on both. Full command 329/329, pinned
+`tools/` 179/179, the two changed suites 94/94 on Linux, doc-check clean.
+**Next:** update the plugin here, then `/update-workflow`. **Record:** discovery 05 D1.
+
 ## #23 · docs · 0.7.0, two lanes: the grill's outcome
 
 **Built:** discovery 05 records the owner's four-round grill on porting a source project's

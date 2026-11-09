@@ -4,6 +4,17 @@ What changed in each version, for `/update-workflow` to show a project before it
 template. Newest first. A version that changes a config file's format says so, and ships its
 migration in `scripts/migrations.mjs`.
 
+## 0.6.2 — 2026-11-09
+No config format change. Update the plugin, then `/update-workflow`.
+- **doc-check counts only committed `.gitignore` rules.** A missing path that only this machine's
+  own rules ignore (its personal ignore file, or `.git/info/exclude`) is no longer excused, and a
+  named file that is here only because such a rule keeps it out of git now fails too, since CI
+  has neither. Before, it passed on the laptop and failed in CI. The fix is one line in the repo's
+  `.gitignore`.
+- **The stop check's receipt keeps git's racy-file re-read.** The receipt's copy of the index now
+  keeps the index's own time. Without it, on a coarse clock (Linux, CI), a same-size edit in the
+  second the index was written read as unchanged, so a receipt could hold over changed code.
+
 ## 0.6.1 — 2026-11-09
 No config format change. Update the plugin, then `/update-workflow`.
 - **The phase-run guide's test-override example names no real folder.** 0.6.0's example used paths
