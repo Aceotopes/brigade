@@ -122,14 +122,16 @@ function worktrees(root) {
  * The lane's worktree, ready for setup: made at `tree` on the lane's branch, cut from the phase
  * branch's tip, or (a second start) reused and reset to that tip, its untracked files cleaned and
  * its ignored ones (an install) kept. A lane branch holding commits the phase branch lacks is an
- * unlanded pass, and a reset would lose it: the start is refused, naming them.
+ * unlanded pass, and a reset would lose it: the start is refused, naming them, unless `kept` is the
+ * lane branch's head, which the restart kept on a hidden ref to land first (landing-lock.mjs
+ * keepUnlanded, #37).
  */
-export function prepareWorktree({ root, tree, branch, ownBranch: lane }) {
+export function prepareWorktree({ root, tree, branch, ownBranch: lane, kept = null }) {
   const tip = git(root, "rev-parse", "--verify", `${branch}^{commit}`);
   const known = run(root, "git", ["rev-parse", "--verify", "--quiet", `refs/heads/${lane}`]).ok;
   if (known) {
     const unlanded = git(root, "log", "--format=%h %s", `${branch}..${lane}`);
-    if (unlanded) {
+    if (unlanded && (kept === null || git(root, "rev-parse", `refs/heads/${lane}`) !== kept)) {
       throw new Error(
         `${lane} holds commits ${branch} does not have, so resetting the lane to the tip would lose them:\n${unlanded}\n` +
           `Land them on ${branch}, or delete ${lane} if they are not wanted, then start the lane again.`,
@@ -148,6 +150,18 @@ export function prepareWorktree({ root, tree, branch, ownBranch: lane }) {
   }
   git(root, "worktree", "add", "-B", lane, tree, tip);
   return { tree, tip, reused: false };
+}
+
+/**
+ * After a landing, landed or parked (#37): the lane's worktree back on its own branch, at the phase
+ * branch's new tip, so its next ticket starts from what landed. Its pass is on the phase branch, or
+ * kept on a parked branch, so the lane's old commit is nobody's to lose (gotcha #33: without this the
+ * new hashes keep refusing the next start). Its ignored files (an install) stay.
+ */
+export function resetWorktree({ tree, ownBranch: lane, tip }) {
+  git(tree, "checkout", "-q", "--force", "-B", lane, tip);
+  git(tree, "clean", "-fdq");
+  return tip;
 }
 
 /**
@@ -254,7 +268,7 @@ export function laneValues(lane, config) {
   };
 }
 
-/** What a lane does with a passing ticket: its commit stays on the lane's branch, unpushed and unmigrated, for Landing (ADR 0008). */
+/** What a lane's session does with a passing ticket: its commit stays on the lane's branch, unpushed and unmigrated, for Landing (ADR 0008), which pushes and migrates. */
 export function afterPass(lane) {
   return lane ? { push: false, migrate: false } : { push: true, migrate: true };
 }

@@ -10,9 +10,9 @@
 //     branch, whose passes are unlanded.
 //   - A lane with an empty frontier **waits** while another live lane may still land a ticket one of
 //     its own waits on, and stops when none can.
-//
-// Releasing a claim once its ticket lands or parks is Landing's (#37): until then a claim lives as
-// long as its lane's process.
+//   - A claim is **released** once its ticket lands or parks (#37, releaseClaim); a parked one is
+//     listed for the night, so the other lane never builds it. Otherwise a claim lives as long as its
+//     lane's process.
 import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -80,47 +80,83 @@ function breakLock(lock, seen, token) {
 }
 
 /**
- * Runs `fn` holding the claim file's lock: `claims.lock`, made by exclusive create, so two lanes
- * never hold it at once. Released however `fn` ends. The lock names its holder's pid. A holder that
- * is gone, or is this process (a take never nests, so its own lock is a leftover), loses it; so does
- * a lock left empty past UNREADABLE_GRACE_MS (its maker died before writing it). A live holder is
- * waited on, `waitMs` by the injected clock, then refused, naming the lock and the holder.
+ * A lock file both lanes share, made by exclusive create: the claim file's (`withClaimLock`) and the
+ * landing lock (landing-lock.mjs). `lockTaker(lock, ...)` gives one `attempt()` at a time, so the
+ * caller decides how to wait (a pause, or an await). An attempt returns:
+ *   { taken: true, broken }    this process holds it now; `broken` the holders it took it from
+ *                              (their parsed text), a crashed one's record included
+ *   { taken: false, holder }   a live holder has it (`holder` its parsed text, or null mid-write)
+ * A holder that is gone, or is this process (a lock never nests, so its own is a leftover), loses
+ * it; so does a lock left empty past UNREADABLE_GRACE_MS (its maker died before writing it).
+ * `body` adds fields to the lock's text; `release()` removes it, only while it is still this one's.
+ */
+export function lockTaker(lock, { pid = process.pid, alive = pidAlive, now = Date.now, body = {} } = {}) {
+  const token = `${pid}-${randomUUID()}`;
+  const broken = [];
+  let unreadableSince = null;
+  const attempt = () => {
+    for (;;) {
+      try {
+        writeFileSync(lock, `${JSON.stringify({ pid, token, at: new Date(now()).toISOString(), ...body })}\n`, { flag: "wx" });
+        return { taken: true, broken };
+      } catch (error) {
+        if (error.code !== "EEXIST") throw error;
+      }
+      const seen = readText(lock);
+      if (seen === null) continue; // released between the create and the read
+      const holder = (() => {
+        try {
+          return JSON.parse(seen);
+        } catch {
+          return null;
+        }
+      })();
+      if (Number.isInteger(holder?.pid) && (holder.pid === pid || !alive(holder.pid))) {
+        breakLock(lock, seen, token);
+        broken.push(holder);
+        continue;
+      }
+      if (!Number.isInteger(holder?.pid)) {
+        // Made, its content not yet written: a holder mid-write, or one that died there.
+        unreadableSince ??= now();
+        if (now() - unreadableSince >= UNREADABLE_GRACE_MS) {
+          breakLock(lock, seen, token);
+          unreadableSince = null;
+          continue;
+        }
+      } else unreadableSince = null;
+      return { taken: false, holder };
+    }
+  };
+  const mine = () => readJson(lock)?.token === token;
+  return {
+    token,
+    attempt,
+    mine,
+    /** Rewrites the held lock's text with `fields` added (the landing lock's detach record). */
+    update: (fields) => {
+      const text = readJson(lock);
+      if (text?.token === token) writeFileSync(lock, `${JSON.stringify({ ...text, ...fields })}\n`);
+    },
+    release: () => {
+      if (mine()) rmSync(lock, { force: true });
+    },
+  };
+}
+
+/**
+ * Runs `fn` holding the claim file's lock: `claims.lock` (lockTaker), so two lanes never hold it at
+ * once. Released however `fn` ends. A live holder is waited on, `waitMs` by the injected clock, then
+ * refused, naming the lock and the holder.
  */
 export function withClaimLock(dir, fn, { pid = process.pid, alive = pidAlive, now = Date.now, pause = pauseFor, waitMs = LOCK_WAIT_MS } = {}) {
   mkdirSync(dir, { recursive: true });
   const lock = join(dir, CLAIMS_LOCK);
-  const token = `${pid}-${randomUUID()}`;
+  const taker = lockTaker(lock, { pid, alive, now });
   const started = now();
-  let unreadableSince = null;
   for (;;) {
-    try {
-      writeFileSync(lock, `${JSON.stringify({ pid, token, at: new Date(now()).toISOString() })}\n`, { flag: "wx" });
-      break;
-    } catch (error) {
-      if (error.code !== "EEXIST") throw error;
-    }
-    const seen = readText(lock);
-    if (seen === null) continue; // released between the create and the read
-    const holder = (() => {
-      try {
-        return JSON.parse(seen);
-      } catch {
-        return null;
-      }
-    })();
-    if (Number.isInteger(holder?.pid) && (holder.pid === pid || !alive(holder.pid))) {
-      breakLock(lock, seen, token);
-      continue;
-    }
-    if (!Number.isInteger(holder?.pid)) {
-      // Made, its content not yet written: a holder mid-write, or one that died there.
-      unreadableSince ??= now();
-      if (now() - unreadableSince >= UNREADABLE_GRACE_MS) {
-        breakLock(lock, seen, token);
-        unreadableSince = null;
-        continue;
-      }
-    } else unreadableSince = null;
+    const { taken, holder } = taker.attempt();
+    if (taken) break;
     if (now() - started >= waitMs) {
       const who = Number.isInteger(holder?.pid) ? `process ${holder.pid}` : "a process that never wrote its pid";
       throw new Error(`The claim file's lock, ${lock}, is held by ${who}, and this lane waited ${Math.round(waitMs / 1000)} s for it. If no lane of this run is taking a claim, delete the lock and start the lane again.`);
@@ -130,13 +166,14 @@ export function withClaimLock(dir, fn, { pid = process.pid, alive = pidAlive, no
   try {
     return fn();
   } finally {
-    if (readJson(lock)?.token === token) rmSync(lock, { force: true });
+    taker.release();
   }
 }
 
 /**
- * The claim file: `claims`, each `{ ticket, lane, pid, at }`, and `waiting`, each `{ lane, pid }`, the
- * lanes that found nothing ready and wait (claimNext). Both empty when there is no file yet.
+ * The claim file: `claims`, each `{ ticket, lane, pid, at }`; `waiting`, each `{ lane, pid }`, the
+ * lanes that found nothing ready and wait (claimNext); and `parked`, each `{ ticket, lane, at }`, the
+ * tickets a lane parked tonight (releaseClaim). All empty when there is no file yet.
  */
 function readState(dir) {
   const path = claimsPath(dir);
@@ -144,7 +181,7 @@ function readState(dir) {
   try {
     text = readFileSync(path, "utf8");
   } catch (error) {
-    if (error.code === "ENOENT") return { claims: [], waiting: [] };
+    if (error.code === "ENOENT") return { claims: [], waiting: [], parked: [] };
     throw error;
   }
   const state = (() => {
@@ -156,7 +193,7 @@ function readState(dir) {
   })();
   // Never read as "nothing is claimed": that would let a ticket be built twice.
   if (!Array.isArray(state.claims)) throw new Error(`${path} can't be read as claims. If no lane is running, delete it and start again.`);
-  return { claims: state.claims, waiting: Array.isArray(state.waiting) ? state.waiting : [] };
+  return { claims: state.claims, waiting: Array.isArray(state.waiting) ? state.waiting : [], parked: Array.isArray(state.parked) ? state.parked : [] };
 }
 
 /** The claims in a branch's run folder, as `{ ticket, lane, pid, at }`; none when there is no file yet. */
@@ -171,19 +208,20 @@ export function liveClaims(claims, alive = pidAlive) {
 
 /**
  * Changes the claim file under the lock. `change(live)` gets its live claims and waiting entries
- * (lapsed ones are dropped from the file) and returns `{ claims?, waiting?, result }`. The file is
- * written whole and renamed into place, so a crash mid-write never leaves half a file.
+ * (lapsed ones are dropped from the file) and the night's parks, and returns `{ claims?, waiting?,
+ * parked?, result }`. The file is written whole and renamed into place, so a crash mid-write never
+ * leaves half a file.
  */
 function changeClaims({ dir, pid = process.pid, alive = pidAlive, now, pause, waitMs }, change) {
   return withClaimLock(
     dir,
     () => {
       const file = readState(dir);
-      const live = { claims: liveClaims(file.claims, alive), waiting: liveClaims(file.waiting, alive) };
-      const { claims = live.claims, waiting = live.waiting, result } = change(live);
+      const live = { claims: liveClaims(file.claims, alive), waiting: liveClaims(file.waiting, alive), parked: file.parked };
+      const { claims = live.claims, waiting = live.waiting, parked = live.parked, result } = change(live);
       const path = claimsPath(dir);
       const part = `${path}.${pid}.part`;
-      writeFileSync(part, `${JSON.stringify({ claims, waiting }, null, 2)}\n`);
+      writeFileSync(part, `${JSON.stringify({ claims, waiting, parked }, null, 2)}\n`);
       renameSync(part, path);
       return result;
     },
@@ -203,6 +241,32 @@ export function takeClaim({ dir, lane, choose, pid = process.pid, at = Date.now(
     const ticket = choose(claims) ?? null;
     return { claims: ticket === null ? claims : [...claims, claimFor({ ticket, lane, pid, at })], result: { ticket, claims } };
   });
+}
+
+/**
+ * Lane `lane` lets go of its claim on `ticket`, under the lock (#37): its ticket landed, or it parked,
+ * at the session or at Landing. A parked one is listed in `parked`, so the other lane, which read the
+ * labels at its own start, never builds it tonight. Another lane's claim is never touched.
+ */
+export function releaseClaim({ dir, ticket, lane, parked = false, pid = process.pid, at = Date.now(), alive = pidAlive, now, pause, waitMs }) {
+  const self = String(lane);
+  return changeClaims({ dir, pid, alive, now, pause, waitMs }, (live) => ({
+    claims: live.claims.filter((claim) => !(claim.ticket === ticket && claim.lane === self)),
+    parked: parked && !live.parked.some((entry) => entry.ticket === ticket) ? [...live.parked, { ticket, lane: self, at: new Date(at).toISOString() }] : live.parked,
+  }));
+}
+
+/** The tickets a lane parked tonight, as `{ ticket, lane, at }`. */
+export function readParked(dir) {
+  return readState(dir).parked;
+}
+
+/**
+ * Empties the night's parks: a lane that starts with no other lane live starts a new night, whose
+ * tickets' labels were just read from GitHub (an answered park is run-ready again).
+ */
+export function clearParked(dir, { pid = process.pid, alive = pidAlive, now, pause, waitMs } = {}) {
+  return changeClaims({ dir, pid, alive, now, pause, waitMs }, () => ({ parked: [] }));
 }
 
 // ------------------------------------------------------------------ the frontier
@@ -270,8 +334,9 @@ export function laneChoice({ tickets, byNumber, hold, done, takes, claims, self,
 }
 
 /**
- * A lane's next ticket, claimed: `choose(claims, idle)` is laneChoice for this lane, read again on
- * each look, `idle` the other lanes waiting. With nothing ready it waits `pollMs` through the
+ * A lane's next ticket, claimed: `choose(claims, idle, parked)` is laneChoice for this lane, read again
+ * on each look, `idle` the other lanes waiting, `parked` the ticket numbers a lane parked tonight
+ * (releaseClaim), for the runner's hold. With nothing ready it waits `pollMs` through the
  * injected `sleep`, calling `onWait(waitOn)`, while some other live lane may still unblock it, and
  * returns `{ ticket: null }` when none can. While it waits, the claim file lists it in `waiting`, in
  * the same write as the look, so the other lane, looking next, never waits on it in turn.
@@ -279,9 +344,9 @@ export function laneChoice({ tickets, byNumber, hold, done, takes, claims, self,
 export async function claimNext({ dir, lane, choose, pid = process.pid, alive = pidAlive, now = Date.now, sleep, pollMs = CLAIM_POLL_MS, onWait = () => {} }) {
   const self = String(lane);
   for (;;) {
-    const { ticket, waitOn } = changeClaims({ dir, pid, alive, now }, ({ claims, waiting }) => {
+    const { ticket, waitOn } = changeClaims({ dir, pid, alive, now }, ({ claims, waiting, parked }) => {
       const others = waiting.filter((entry) => entry.lane !== self);
-      const choice = choose(claims, others.map((entry) => entry.lane));
+      const choice = choose(claims, others.map((entry) => entry.lane), parked.map((entry) => entry.ticket));
       const number = choice.ticket?.number ?? null;
       const waits = number === null && choice.waitOn.length > 0;
       return {

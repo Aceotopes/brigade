@@ -7,8 +7,8 @@
 //                in; the steps out, in D13's order. It composes numberLane (numbering.mjs, ADR 0006).
 //   land         the executor: reads those inputs with git, and carries out the plan's steps in a
 //                scratch worktree detached at the tip, removed on every way out. It never touches a
-//                checkout, so there is nothing to hand back (the lock, undo-detach and the hand-back
-//                are #37's, which calls this under its lock).
+//                checkout: the lock, undo-detach and the hand-back are landing-lock.mjs's, and
+//                run.mjs `landPass` calls this under the lock.
 //
 // The steps: replay (a cherry-pick) -> settle (the generated and own-file rows) -> number (the log
 // rows and the message) -> rebuild (every generated row) -> commit -> re-gate -> browser check (only
@@ -144,8 +144,9 @@ function readLast(repo, tip, hotspots, phase) {
 /**
  * Keeps `commit` on `<branch>-parked-<N>` without overwriting anything: an earlier park's branch
  * holding other work is left alone, and the next free `-2`, `-3`… name is taken. `{ keptOn, output }`.
+ * The runner keeps a restart's unrecorded commit this way too (run.mjs landUnlanded).
  */
-function keepParked(repo, branch, ticket, commit) {
+export function keepParked(repo, branch, ticket, commit) {
   const base = `${branch}-parked-${ticket}`;
   for (let n = 1; n < 100; n++) {
     const name = n === 1 ? base : `${base}-${n}`;

@@ -9,6 +9,18 @@ Each commit's entry goes on top, in the shape of `docs/_templates/devlog-entry.m
 message cites it (`devlog #N`). At each phase end, `node tools/doc-rotate.mjs` moves the closed
 entries into `docs/history/devlog/`.
 
+## #38 · feat · the landing lock: a lane lands its own passes, one at a time
+
+**Built:** #37. A lane lands each pass under one landing lock, and the primary checkout stays good (D13).
+- `landing-lock.mjs`: the lock (an async wait, lapsing with its pid), the undo-detach on every way out, the hand-back, the restart's keep.
+- `run.mjs` `landPass`: Landing with the real gates, run in the lane's worktree; then the result changed in place, the worktree reset to the tip and the claim released.
+- A restart lands its recorded unlanded passes before its first claim; a park is listed, so the other lane never builds it.
+- `.lane/` is always in scope; a run without lanes takes none of these paths.
+**Verified:** 11 tests at the runner seam on throwaway repos (real processes for the races), the first 9
+written first, plus the `.lane/` case; the plugin's and the template's suites pass; doc-check clean;
+the code review's fixes folded in.
+**Next:** #38. **Record:** implementation log 023.
+
 ## #37 · feat · Landing: the plan and the executor
 
 **Built:** #36. Landing puts a lane's passing commit on the phase branch (D13, ADR 0008), tested on throwaway repos.

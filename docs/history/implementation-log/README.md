@@ -10,6 +10,7 @@ what was built, why it works that way, and how to say it out loud. The index bel
 <!-- generated:start implementation-log -->
 ### Current phase
 
+- [023](023-the-landing-lock.md) · `#37` · 2026-11-10 · The landing lock
 - [022](022-landing-the-plan-and-the-executor.md) · `#36` · 2026-11-10 · Landing: the plan and the executor
 - [021](021-the-fingerprint.md) · `#35` · 2026-11-10 · The fingerprint: a browser-check pass records what it judged
 - [020](020-the-claim-and-the-frontier.md) · `#34` · 2026-11-10 · The claim and the frontier: two lanes never build the same ticket

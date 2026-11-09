@@ -229,6 +229,12 @@ test("the shared registries are never out of a ticket's areas, but the audit log
   assert.deepEqual(outsideAreas(["docs/x.md", "CLAUDE.md", "src/a.ts"], ["src/a.ts"]), []);
 });
 
+test("a lane's own .lane/ scratch files are never out of a ticket's areas (#37, D13), with or without the project's list", () => {
+  const files = [".lane/docs/agents/gotchas/two-lanes.md", ".lane/src/notes.md", "src/a.ts", "lane/other.md"];
+  assert.deepEqual(outsideAreas(files, ["src/a.ts"]), ["lane/other.md"], "only the folder itself, not a lookalike");
+  assert.deepEqual(outsideAreas(files, ["src/a.ts"], [/^lane\//]), []);
+});
+
 test("results.json that cannot be read starts empty rather than stopping the run", () => {
   const dir = mkdtempSync(join(tmpdir(), "phase-run-bad-"));
   writeFileSync(join(dir, "results.json"), "{ not json");

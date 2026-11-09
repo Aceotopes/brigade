@@ -8,8 +8,9 @@
 //
 // With --lane, the tickets are built in that lane's own git worktree (phaseRun.lanes, lane.mjs),
 // with its ports, QA database, test prefix and env, and a passing ticket's commit stays on the
-// lane's branch for Landing. Its results and logs go in the primary checkout's
-// `.phase-run/<branch>/lane-<id>/` (ADR 0007).
+// lane's branch, then lands on the phase branch under the landing lock (landing.mjs, landing-lock.mjs):
+// replayed onto the newest tip, re-gated there, and fast-forwarded, or parked. Its results and logs
+// go in the primary checkout's `.phase-run/<branch>/lane-<id>/` (ADR 0007).
 //
 // A ticket's session is a Claude Code background session, so it can be
 // watched while it works: `claude agents` lists them, `claude attach <id>`
@@ -42,8 +43,10 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { BROWSER_CHECK, HOTSPOT_TOKEN, fill, fillEnv, laneQaUrl, loadRunConfig, sessionEnv as pinnedEnv, targetFingerprint, targetUrl } from "./config.mjs";
-import { afterPass, ignoredImports, ignoredImportsProblem, joinBranch, laneLockPath, lanePortProblems, laneRoots, laneRow, laneValues, liveLanes, mayFinishCopy, prepareWorktree, setupWorktree, writeLaneLock } from "./lane.mjs";
-import { builtOn, claimNext, laneChoice, takesTicket } from "./claim.mjs";
+import { afterPass, ignoredImports, ignoredImportsProblem, joinBranch, laneLockPath, lanePortProblems, laneRoots, laneRow, laneValues, liveLanes, mayFinishCopy, prepareWorktree, resetWorktree, setupWorktree, writeLaneLock } from "./lane.mjs";
+import { builtOn, claimNext, clearParked, laneChoice, releaseClaim, takeClaim, takesTicket } from "./claim.mjs";
+import { keepParked, land } from "./landing.mjs";
+import { dropUnlanded, handBack, keepUnlanded, restartSteps, underLandingLock, unlandedCommits, unlandedRef } from "./landing-lock.mjs";
 import { takeFingerprint } from "./fingerprint.mjs";
 import { Screen, notify, ticketMinutes } from "./display.mjs";
 import { brigadeCatalog, readInstalledBrigade, versionStop, withAutoUpdateOff } from "./brigade.mjs";
@@ -53,7 +56,7 @@ import { finishSnapshot, takeSnapshot } from "./snapshot.mjs";
 import { DEFAULT_RULES as DEFAULT_SIZE, measureTicket as ticketSize } from "./ticket-size.mjs";
 import { PATCH_ARGS, tamperingVerdict } from "./tampering.mjs";
 import { projectKeeps, readTrim, trimEntries, trimPath, withTrim } from "./trim.mjs";
-import { scratchFor } from "./numbering.mjs";
+import { LANE_DIR, scratchFor } from "./numbering.mjs";
 import { unreadMatcher } from "./unread.mjs";
 import * as docConfig from "../doc-config.mjs";
 
@@ -561,11 +564,12 @@ async function nextTicket(inScope, byNumber, run) {
     dir: run.claims,
     lane: lane.id,
     sleep,
-    choose: (claims, idle) =>
+    // A ticket a lane parked tonight is held here too: this lane read its labels at its own start (#37).
+    choose: (claims, idle, parked = []) =>
       laneChoice({
         tickets: inScope,
         byNumber,
-        hold: (ticket) => holdReason(ticket, byNumber),
+        hold: (ticket) => (parked.includes(ticket.number) ? "parked tonight, in a lane" : holdReason(ticket, byNumber)),
         done: blockerDone,
         takes: lane.takes,
         claims,
@@ -1883,7 +1887,7 @@ function ticketAreas(body) {
  * its shared registries (the ones nearly every ticket touches, which would
  * otherwise teach the owner to ignore the ⚠ line) as phaseRun.alwaysInScope.
  */
-const ALWAYS_IN_SCOPE = [/^docs\//, /^CLAUDE\.md$/, /^GLOSSARY\.md$/];
+const ALWAYS_IN_SCOPE = [/^docs\//, /^CLAUDE\.md$/, /^GLOSSARY\.md$/, new RegExp(`^${LANE_DIR.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/`)]; // a lane's own-file scratch (numbering.mjs), always (D13)
 
 function outsideAreas(files, areas, alwaysInScope = []) {
   if (!areas) return [];
@@ -2006,7 +2010,8 @@ function ensurePullRequest(run, options) {
   writeFileSync(bodyFile, pullRequestBody(onBranch, options));
   const existing = exec("gh", ["pr", "view", run.branch, "--json", "number,url", "-q", ".url"]);
   if (existing.ok && existing.stdout) {
-    exec("gh", ["pr", "edit", run.branch, "--body-file", bodyFile]);
+    // A lane knows only its own tickets: it never rewrites a body the other lane's landings listed (#38 reads every lane).
+    if (!lane) exec("gh", ["pr", "edit", run.branch, "--body-file", bodyFile]);
     return existing.stdout;
   }
   const title = options.spec ? `Phase run: ${run.branch} (spec #${options.spec})` : `Phase run: ${run.branch} (#${options.only})`;
@@ -2051,14 +2056,214 @@ async function finishBuilt(ticket, base, options, run, session, fingerprint = nu
     ...(fingerprint ? { fingerprint } : {}),
     notes: [],
     session,
-    // Unlanded: the commit is on the lane's branch, and Landing (#36) puts it on the phase branch.
-    ...(lane ? { lane: String(lane.id), laneBranch: run.laneBranch, landed: false } : {}),
+    // Unlanded: the commit is on the lane's branch, and Landing puts it on the phase branch (landPass).
+    ...(lane ? { lane: String(lane.id), laneBranch: run.laneBranch, commit: git("rev-parse", "HEAD"), landed: false } : {}),
   };
   if (push && !push.ok) result.notes.push(`The push failed: ${tail(push.stderr, 400)}`);
   const stamped = recordResult(run, result);
   if (push?.ok) run.pullRequest = ensurePullRequest(run, options);
   log(`#${ticket.number} built: ${hash} (${stat || "no diff"})${lane ? `, kept on ${run.laneBranch} for Landing` : ""}.`, { routine: true });
+  // A lane lands its pass at once (#37). The result is on disk first, unlanded, so a lane that dies
+  // mid-landing leaves exactly what its restart lands (landUnlanded).
+  const outcome = lane ? await landPass(ticket, stamped, stamped.commit, run, options) : "continue";
   ticketFinished(stamped);
+  return outcome;
+}
+
+// ------------------------------------------------------------ landing (a lane)
+
+/**
+ * A lane's pass put on the phase branch (#37, D13, ADR 0008): Landing (landing.mjs) under the
+ * landing lock (landing-lock.mjs), with the run's real gates as its re-gate. `result` is the pass's
+ * recorded result, changed in place and saved: landed (its new hash, its numbers, the push), or
+ * parked on `<branch>-parked-<N>` and posted as a park. Either way the lane's worktree is put back on
+ * the phase branch's tip and its claim released. A lock that is never freed leaves the pass unlanded
+ * on the lane's branch, for its restart, and stops the lane. Returns "continue" or "stop".
+ */
+async function landPass(ticket, result, commit, run, options) {
+  const n = ticket.number;
+  result.notes ??= [];
+  setCurrent({ stage: "landing" });
+  showProgress();
+  await waitForInternet(waitDeadline(options), `before landing #${n}`); // the push needs it; a failed push is noted below
+  log(`#${n}: landing on ${run.branch}.`, { routine: true });
+  const appliedBefore = new Set(run.migrationsApplied); // a park after the migration leaves it on the target
+  let landing;
+  try {
+    const held = await underLandingLock(
+      { dir: run.claims, root: ROOT, branch: run.branch, lane: lane.id, onWait: (holder) => log(`#${n}: waiting for ${holder?.lane ? `lane ${holder.lane}'s` : "another"} landing to finish.`) },
+      () =>
+        land({
+          repo: ROOT,
+          branch: run.branch,
+          ticket: n,
+          commit,
+          hotspots: config.hotspots,
+          phase: run.branch.replace(/^phase-/, ""),
+          rebuild: (dir) => rebuildGenerated(dir),
+          regate: (dir, at) => regateLanded(ticket, at, run),
+          fingerprint: result.fingerprint ?? null,
+          shotsRoot: work,
+          // The check is a session's walk of the screens: the runner can't redo it on the new tip.
+          browserCheck: () => `The runner can't walk the screens itself, so the check was not run again on ${run.branch}'s tip: build #${n} again from there.`,
+          migration: config.migrations ? { added: config.migrations.added, apply: (dir, names) => migrateLanded(names, run) } : null,
+          remote: "origin",
+        }),
+    );
+    landing = held.value;
+    result.notes.push(...held.notes);
+  } catch (error) {
+    landing = { status: "unlanded", detail: error.message };
+  }
+  if (landing.cleanup) result.notes.push(landing.cleanup);
+
+  if (landing.status === "unlanded") {
+    result.notes.push(`Not landed: ${landing.detail} The pass stays on ${run.laneBranch}; the lane's next start lands it first.`);
+    saveResults(run);
+    run.stopped = `#${n} could not be landed: ${landing.detail}`;
+    log(run.stopped);
+    return "stop";
+  }
+  if (landing.status === "landed") {
+    Object.assign(result, { landed: true, laneHash: result.hash, hash: landing.commit.slice(0, 7), commit: landing.commit, numbers: landing.numbers, pushed: landing.pushed });
+    if (landing.browserCheck?.verdict === "carry") result.notes.push(landing.browserCheck.note);
+    if (!landing.pushed) result.notes.push(`Landed, but the push failed: ${tail(landing.pushOutput ?? "", 400)}`);
+    saveResults(run);
+    if (landing.pushed) run.pullRequest = ensurePullRequest(run, options);
+    log(`#${n} landed on ${run.branch}: ${result.hash}, devlog #${landing.numbers.devlog}${landing.pushed ? ", pushed" : ""}.`, { routine: true });
+  } else {
+    const attempt = landing.attempt ? `\n\nThe numbered commit it tried was ${landing.attempt.slice(0, 9)} (on no branch).` : "";
+    const detail = `Landing parked #${n} at its ${landing.step} step, with ${run.branch} unmoved.\n\n${landing.detail}${attempt}`;
+    const leftOnTarget = [...run.migrationsApplied].filter((name) => !appliedBefore.has(name));
+    Object.assign(result, { status: "failed", landed: false, detail, keptOn: landing.keptOn, leftOnTarget, landing: { step: landing.step, attempt: landing.attempt ?? null, branchMoved: landing.branchMoved } });
+    result.notPosted = postPark(ticket, "failure", detail, landing.keptOn, run);
+    saveResults(run);
+    log(`#${n} parked at Landing (${landing.step})${landing.keptOn ? `, kept on ${landing.keptOn}` : ""}.`);
+    // Kept on no parked branch: the lane's branch is its only home, so it is not reset, and the lane stops.
+    if (!landing.keptOn) {
+      run.stopped = `#${n} parked at Landing, and its pass could not be kept on a parked branch: it stays on ${run.laneBranch}, which was left as it is.`;
+      log(run.stopped);
+      return "stop";
+    }
+  }
+  // The pass is on the branch, or kept parked: the lane starts its next ticket from the new tip.
+  let outcome = "continue";
+  try {
+    resetWorktree({ tree: work, ownBranch: run.laneBranch, tip: git("rev-parse", `refs/heads/${run.branch}`) });
+  } catch (error) {
+    run.stopped = `After #${n}'s landing, the lane's worktree could not be put back on ${run.branch}'s tip: ${error.message}`;
+    log(run.stopped);
+    outcome = "stop";
+  }
+  try {
+    releaseClaim({ dir: run.claims, ticket: n, lane: lane.id, parked: landing.status !== "landed" });
+  } catch (error) {
+    log(`#${n}'s claim could not be released (it lapses when this lane exits): ${error.message}`);
+  }
+  return outcome;
+}
+
+/**
+ * Landing's re-gate (ADR 0008): the run's real gates on the landed commit, run in the lane's own
+ * worktree, which holds its install (Landing's scratch tree has only tracked files). The worktree is
+ * checked out at `head`, detached; landPass puts it back on the lane's branch. The real gates, the
+ * tampering verdict included (ADR 0008); only the browser check is left to Landing, which judges it
+ * by its fingerprint. Null on a pass, else `{ gate, output }`.
+ */
+async function regateLanded(ticket, { base, head }, run) {
+  const n = ticket.number;
+  const moved = gitTry("checkout", "-q", "--detach", head);
+  if (!moved.ok) return { gate: "re-gate", output: `The lane's worktree could not be checked out at the landed commit:\n${moved.stderr}` };
+  // The tampering verdict reads its rules at the tip it lands on, never from the landed tree.
+  const plan = gatePlan({
+    base,
+    diff: git("diff", "--name-status", "-M", "-z", `${base}..${head}`),
+    config,
+    ...(config.tampering ? { patch: git(...PATCH_ARGS, `${base}..${head}`), readAt: atCommit, body: ticket.body ?? "", message: git("log", "-1", "--format=%B", head) } : {}),
+  });
+  const failed = await projectGates(plan, {
+    values: { base, N: n, qaUrl: runQaUrl(), cache: gateCache() },
+    browserCheck: () => null,
+    stopStray: (when) => stopStray(`${when} for #${n}'s landing`),
+  });
+  if (failed) return failed;
+  const docs = docCheck(run.runner, work, ["--head"]);
+  return docs.ok ? null : { gate: "doc-check", output: `${docs.stdout}\n${docs.stderr}` };
+}
+
+/** Landing's migration, the re-gate's last step: the landed commit's new migrations, applied from the lane's worktree at it. */
+function migrateLanded(names, run) {
+  const pending = names.filter((name) => !run.migrationsApplied.has(name));
+  if (pending.length === 0) return null;
+  log(`Applying ${pending.join(", ")} to ${targetName()}, the landing's last gate.`);
+  const applied = applyMigrations(pending, run.migrationsApplied, { migrations: config.migrations, values: { targetUrl: migrationTargetUrl, base: git("rev-parse", "HEAD^") } });
+  return applied.ok ? null : { gate: `migration on ${targetName()}`, output: applied.output };
+}
+
+/**
+ * Landing's rebuild of the generated rows, on the numbered tree: the doc indexes, as a session writes
+ * them (`node tools/doc-index.mjs`). No hotspot row names a command of its own.
+ */
+function rebuildGenerated(dir) {
+  if (!existsSync(join(dir, "tools", "doc-index.mjs"))) return { gate: "rebuild", output: "The landed tree has no tools/doc-index.mjs to rebuild its generated files with." };
+  const built = exec("node", [join("tools", "doc-index.mjs")], { cwd: dir });
+  return built.ok ? null : { gate: "rebuild", output: `${built.stdout}\n${built.stderr}` };
+}
+
+/**
+ * A restarted lane's unlanded passes, landed before it claims new work (D13): the commits its branch
+ * held, kept past the worktree's reset (keepUnlanded), oldest first, each given its action by
+ * landing-lock.mjs `restartSteps`. A recorded pass is landed as any pass is, under a claim taken
+ * first: while this lane was down its claim lapsed, and the other lane may be building it again. One
+ * never recorded as a pass is kept on a parked branch, never landed; one the last start landed or
+ * parked but died before recording has its result finished. The keep is dropped only once every
+ * commit is on the phase branch or a parked branch. "continue" or "stop".
+ */
+async function landUnlanded(byNumber, run, options) {
+  const self = String(lane.id);
+  const found = unlandedCommits({ root: ROOT, branch: run.branch, laneBranch: run.laneBranch });
+  let kept = true; // every commit is somewhere other than the keep
+  const keep = (commit, n, why) => {
+    const parked = keepParked(ROOT, run.branch, n ?? "unknown", commit);
+    if (!parked.keptOn) kept = false;
+    log(`${commit.slice(0, 7)}${n ? ` (#${n})` : ""} ${why}, so it was not landed${parked.keptOn ? `; it is kept on ${parked.keptOn}` : `, and could not be kept on a parked branch (${parked.output}); it stays on ${unlandedRef(run.laneBranch)}`}.`);
+    return parked.keptOn;
+  };
+  for (const { commit, ticket: n, action, result, keptOn } of restartSteps({ found, results: run.all, lane: self })) {
+    const ticket = byNumber.get(n) ?? { number: n, title: result?.title ?? `#${n}`, labels: [], body: "" };
+    if (action === "skip") continue;
+    if (action === "keep") {
+      keep(commit, n, `was on ${run.laneBranch} with no recorded pass`);
+      continue;
+    }
+    if (action === "record-landed") {
+      const landedAs = gitTry("log", "-1", "--format=%H", "-i", "-E", `--grep=Closes #${n}([^0-9]|$)`, run.branch).stdout;
+      Object.assign(result, { landed: true, laneHash: result.hash, hash: landedAs.slice(0, 7), commit: landedAs });
+      (result.notes ??= []).push("Landed by the lane's last start, which stopped before it recorded the landing (its numbers and push are not known).");
+      saveResults(run);
+      continue;
+    }
+    if (action === "record-parked") {
+      const detail = `Landing parked #${n} on the lane's last start, which stopped before it posted the park. ${run.branch} is unmoved; the pass is kept as it passed.`;
+      Object.assign(result, { status: "failed", landed: false, detail, keptOn, leftOnTarget: [] });
+      result.notPosted = postPark(ticket, "failure", detail, keptOn, run);
+      saveResults(run);
+      continue;
+    }
+    // "land": claimed first, unless the other lane holds the ticket now.
+    const claim = takeClaim({ dir: run.claims, lane: self, choose: (claims) => (claims.some((c) => c.ticket === n && c.lane !== self) ? null : n) });
+    if (claim.ticket === null) {
+      const other = claim.claims.find((c) => c.ticket === n)?.lane;
+      const on = keep(commit, n, `is being built again by lane ${other}, which claimed it while this lane was down`);
+      Object.assign(result, { status: "failed", landed: false, keptOn: on, detail: `Lane ${other} claimed and built #${n} again while lane ${self} was down, so this lane's pass was not landed${on ? `; it is kept on ${on}` : ""}.` });
+      saveResults(run);
+      continue;
+    }
+    log(`#${n}: a pass the lane's last start never landed (${commit.slice(0, 7)}); landing it before any new ticket.`);
+    if ((await landPass(ticket, result, commit, run, options)) === "stop") return "stop";
+  }
+  if (kept) dropUnlanded({ root: ROOT, laneBranch: run.laneBranch });
+  return "continue";
 }
 
 /** A ticket is over: its row goes into the table, the live row moves on, and a failure or a park says so on the desktop. */
@@ -2087,7 +2292,38 @@ async function park(ticket, base, kind, detail, run, session) {
     git("reset", "--hard", base);
   }
   await freeTicketPorts();
+  const notPosted = postPark(ticket, kind, detail, keptOn, run);
+  // The claim goes, and the park is listed: the other lane read this ticket's labels at its own start (#37).
+  if (lane) {
+    try {
+      releaseClaim({ dir: run.claims, ticket: n, lane: lane.id, parked: true });
+    } catch (error) {
+      log(`#${n}'s claim could not be released (it lapses when this lane exits): ${error.message}`);
+    }
+  }
 
+  // Applied to the target, but its file went with the reset: the target holds what the branch does not.
+  const leftOnTarget = [...run.migrationsApplied].filter((name) => migrationFiles.has(name) && !existsSync(join(work, migrationFiles.get(name))));
+  const stamped = recordResult(run, {
+    number: n,
+    title: ticket.title,
+    status: kind === "question" ? "parked" : "failed",
+    detail,
+    keptOn,
+    leftOnTarget,
+    notPosted,
+    session,
+  });
+  log(`#${n} ${kind === "question" ? "parked (needs the owner)" : "failed"}${keptOn ? `, kept on ${keptOn}` : ""}.`, { routine: true });
+  ticketFinished(stamped);
+}
+
+/**
+ * A park told on GitHub: the issue's comment and its label (`kind`, "question" or "failure"), and the
+ * ticket set aside for this run. Returns true when either call did not get through (`notPosted`).
+ */
+function postPark(ticket, kind, detail, keptOn, run) {
+  const n = ticket.number;
   const heading = kind === "question" ? "The phase run parked this ticket: it needs your decision." : "The phase run could not finish this ticket.";
   const body = [
     heading,
@@ -2105,21 +2341,7 @@ async function park(ticket, base, kind, detail, run, session) {
   const labelled = exec("gh", ["issue", "edit", String(n), "--add-label", PARK_LABEL[kind], "--remove-label", READY_LABEL]).ok;
   // Set aside for this run either way; GitHub only knows if the two calls got through.
   ticket.labels = [...ticket.labels.filter((label) => label !== READY_LABEL), PARK_LABEL[kind]];
-
-  // Applied to the target, but its file went with the reset: the target holds what the branch does not.
-  const leftOnTarget = [...run.migrationsApplied].filter((name) => migrationFiles.has(name) && !existsSync(join(work, migrationFiles.get(name))));
-  const stamped = recordResult(run, {
-    number: n,
-    title: ticket.title,
-    status: kind === "question" ? "parked" : "failed",
-    detail,
-    keptOn,
-    leftOnTarget,
-    notPosted: !(commented && labelled),
-    session,
-  });
-  log(`#${n} ${kind === "question" ? "parked (needs the owner)" : "failed"}${keptOn ? `, kept on ${keptOn}` : ""}.`, { routine: true });
-  ticketFinished(stamped);
+  return !(commented && labelled);
 }
 
 /**
@@ -2272,8 +2494,7 @@ async function runTicket(ticket, options, run) {
     gatesMs += Date.now() - gatesFrom;
     if (gates.ok) {
       await freeTicketPorts();
-      await finishBuilt(ticket, base, options, run, measured(facts), gates.fingerprint);
-      return "continue";
+      return await finishBuilt(ticket, base, options, run, measured(facts), gates.fingerprint);
     }
     if (round >= options.fixRounds) {
       await park(
@@ -2529,6 +2750,14 @@ async function main() {
   else writeFileSync(lock, `pid ${process.pid}, started ${new Date().toISOString()}, branch ${branch}\n`);
   const release = () => rmSync(lock, { force: true });
   process.on("exit", release);
+  // The hand-back (D13): the last lane out, its own lock gone first, leaves the primary checkout on
+  // the phase branch's tip, however it exits. While another lane runs, the checkout is left alone.
+  if (lane) {
+    process.on("exit", () => {
+      const back = handBack({ root: ROOT, state: STATE, branch, lane: lane.id });
+      log(`Hand-back: ${back.why}`, { routine: back.handedBack });
+    });
+  }
   process.on("exit", () => screen?.clearLive()); // a run stopped mid-ticket leaves no half-drawn live row
   // A background session outlives this script (it belongs to Claude Code's
   // background service), so a run that ends for any reason stops its own.
@@ -2587,7 +2816,11 @@ async function main() {
   let made = null;
   if (lane) {
     try {
-      made = prepareWorktree({ root: ROOT, tree: roots.tree, branch, ownBranch: roots.branch });
+      // A lane with no other lane live starts a new night: the last night's parks are cleared.
+      if (mayFinishCopy(STATE, { id: lane.id, branch })) clearParked(run.claims);
+      // A restart's unlanded passes are kept on a hidden ref, so the reset to the tip loses none (#37).
+      const { kept } = keepUnlanded({ root: ROOT, branch, laneBranch: roots.branch });
+      made = prepareWorktree({ root: ROOT, tree: roots.tree, branch, ownBranch: roots.branch, kept });
     } catch (error) {
       die(`Lane ${lane.id} can't start: ${error.message}`);
     }
@@ -2659,6 +2892,17 @@ async function main() {
   showProgress();
 
   let outcome = "continue";
+  // A restarted lane lands its own unlanded passes before it claims new work (D13).
+  if (lane) {
+    try {
+      outcome = await landUnlanded(byNumber, run, options);
+    } catch (error) {
+      run.stopped = `The lane's unlanded passes could not be landed: ${error.message}`;
+      log(run.stopped);
+      outcome = "stop";
+    }
+    writeFileSync(appliedFile, JSON.stringify([...run.migrationsApplied], null, 2)); // a landing may have migrated
+  }
   while (outcome === "continue" && run.results.length < options.max) {
     let next;
     try {
