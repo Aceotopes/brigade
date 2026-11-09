@@ -32,3 +32,9 @@ listed in the gotchas index, `docs/agents/gotchas/README.md`.
 - `PHASE_RUN_ROOT` redirects doc tools only when `PHASE_RUN_RUNNER` names their folder; never widen it to "whenever set", or a test's fixture doc-check checks the real repo. pinned: the same test.
 - The runner's process has no `PHASE_RUN`: a refusal doc-check must make at the gate keys on its `IN_RUN` (`PHASE_RUN` or `IN_COPY`). pinned: `template/tools/phase-run/run.test.mjs` (the budget raise).
 - `doc-config.mjs` is copied but not compared on a restart (config a ticket may edit); every other doc tool is. The manifest's `docCheck` lets the hook block a copy that lost its doc-check. pinned: the same test, `tests/guard-shell.test.mjs`.
+
+**`#32` — the lane declaration, `template/tools/phase-run/ticket-size.mjs` `laneProblems`, `skills/ticket-check/SKILL.md`, the ticket template (built 2026-11-09):**
+- `ticket-size.mjs` never imports `config.mjs` at the top: config imports its `RULE_KINDS`. Values it needs from config (`ANY_TICKET`) are passed in, from `main()`'s lazy import. pinned: `template/tools/phase-run/measure.test.mjs` (the lane tests pass `anyTicket`).
+- A refused `## Lane` exits 1; a size or own-file warning exits 0. `/ticket-check` keeps `run-ready` off on the 1. pinned: none (`main()` calls `gh`).
+- `## Lane` is matched exactly (`## Lanes` is another section), and the label decides, never the Areas. pinned: the same test.
+- The two `ticket-template.md` copies are kept identical, and the template's sits at 105 of 108 lines (90% of its budget, `tests/template.test.mjs`): a further line there needs one taken out.

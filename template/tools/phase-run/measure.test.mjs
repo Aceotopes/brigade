@@ -21,7 +21,7 @@ import { appendRow, latestPerSession, ledgerCsv, ledgerRow, ledgerText, readLedg
 import { readReceipt, receiptGroups, receiptHolds, receiptPath, treeKey, treeKeys } from "./receipt.mjs";
 import { promptValues, report } from "./run.mjs";
 import { quietOutput } from "./stop-tests.mjs";
-import { DEFAULT_RULES, measureTicket } from "./ticket-size.mjs";
+import { DEFAULT_RULES, laneProblems, measureTicket } from "./ticket-size.mjs";
 import { unreadMatcher } from "./unread.mjs";
 import { findTicketSession, subagentsOf } from "./wait-subagents.mjs";
 import { answers } from "./wait-url.mjs";
@@ -456,6 +456,83 @@ test("a ticket's size: checkboxes and bullets under their section, and words", (
   assert.ok(measures.every((m) => !m.over));
   assert.equal(measureTicket(body, [{ key: "areas", kind: "bullets", section: "Areas", max: 1, label: "Areas entries" }])[0].over, true);
   assert.throws(() => measureTicket(body, [{ kind: "lines", max: 1 }]), /unknown rule kind/);
+});
+
+// The lane declaration (D6): a `## Lane` holds only on a ticket carrying the label its row takes.
+const LANES = { rows: [{ id: "1", takes: "any" }, { id: "2", takes: "docs-lane" }] };
+const OWN = { token: null, rows: [{ path: "docs/history/devlog.md", kind: "log" }, { path: "docs/agents/gotchas/{phase}.md", kind: "own-file" }] };
+const ticketBody = ({ lane = null, areas = ["- `src/lib/`"] } = {}) =>
+  ["## What to build", "", "Words.", "", ...(lane === null ? [] : ["## Lane", "", lane, ""]), "## Areas", "", ...areas, "", "## Blocked by", "", "- None"].join("\n");
+const lanes = (ticket, setup = {}) => laneProblems(ticket, { lanes: LANES, hotspots: null, anyTicket: "any", ...setup });
+
+test("a ticket with ## Lane and the label its row takes passes; without the label it is refused, naming the label", () => {
+  const body = ticketBody({ lane: "- 2: docs only, no overlap with lane 1" });
+  assert.deepEqual(lanes({ body, labels: ["backend", "docs-lane"] }), { refusals: [], warnings: [] });
+  const { refusals } = lanes({ body, labels: ["backend"] });
+  assert.equal(refusals.length, 1);
+  assert.match(refusals[0], /lane 2/);
+  assert.match(refusals[0], /"docs-lane"/);
+  // The lane id may be written `2`, "Lane 2" or bare.
+  for (const lane of ["`2`", "Lane 2", "2"]) assert.deepEqual(lanes({ body: ticketBody({ lane }), labels: ["docs-lane"] }).refusals, [], lane);
+});
+
+test("a ## Lane naming a lane no row has is refused, and so is one in a project with no lanes", () => {
+  const unknown = lanes({ body: ticketBody({ lane: "- 3" }), labels: ["docs-lane"] }).refusals;
+  assert.equal(unknown.length, 1);
+  assert.match(unknown[0], /lane 3/);
+  assert.match(unknown[0], /1, 2/);
+  const none = lanes({ body: ticketBody({ lane: "- 2" }), labels: ["docs-lane"] }, { lanes: null }).refusals;
+  assert.equal(none.length, 1);
+  assert.match(none[0], /no phaseRun\.lanes/);
+  const empty = lanes({ body: ticketBody({ lane: "<!-- which lane -->" }), labels: [] }).refusals;
+  assert.equal(empty.length, 1);
+  assert.match(empty[0], /names no lane/);
+});
+
+test("a ## Lane naming the lane that takes any ticket needs no label", () => {
+  assert.deepEqual(lanes({ body: ticketBody({ lane: "- 1" }), labels: [] }), { refusals: [], warnings: [] });
+});
+
+test("a ticket with no ## Lane is never refused, whatever its labels and the lanes", () => {
+  for (const setup of [{}, { lanes: null }]) {
+    assert.deepEqual(lanes({ body: ticketBody(), labels: [] }, setup), { refusals: [], warnings: [] });
+    assert.deepEqual(lanes({ body: ticketBody(), labels: ["docs-lane"] }, setup), { refusals: [], warnings: [] });
+  }
+  // `## Lanes` is some other section, not a lane declaration.
+  assert.deepEqual(lanes({ body: ticketBody().replace("## Areas", "## Lanes\n\n- 3\n\n## Areas"), labels: [] }).refusals, []);
+});
+
+test("Areas naming an own-file folder but none of its files get a warning, never a refusal", () => {
+  const folder = lanes({ body: ticketBody({ areas: ["- `docs/agents/gotchas/`", "- `src/lib/`"] }), labels: [] }, { hotspots: OWN });
+  assert.deepEqual(folder.refusals, []);
+  assert.equal(folder.warnings.length, 1);
+  assert.match(folder.warnings[0], /docs\/agents\/gotchas\//);
+  assert.match(folder.warnings[0], /docs\/agents\/gotchas\/\{phase\}\.md/);
+  // With one of its files named too, or with a lane declared and its label carried, the same rule.
+  const named = ["- `docs/agents/gotchas/`", "- `docs/agents/gotchas/two-lanes.md`"];
+  assert.deepEqual(lanes({ body: ticketBody({ areas: named }), labels: [] }, { hotspots: OWN }), { refusals: [], warnings: [] });
+  assert.equal(lanes({ body: ticketBody({ lane: "- 2", areas: ["- docs/agents/gotchas"] }), labels: ["docs-lane"] }, { hotspots: OWN }).warnings.length, 1);
+  // The file alone, a folder above it, a log row's folder, or no hotspots at all: nothing to warn on.
+  for (const areas of [["- `docs/agents/gotchas/two-lanes.md`"], ["- `docs/agents/`"], ["- `docs/history/`"]]) {
+    assert.deepEqual(lanes({ body: ticketBody({ areas }), labels: [] }, { hotspots: OWN }).warnings, [], areas[0]);
+  }
+  assert.deepEqual(lanes({ body: ticketBody({ areas: ["- `docs/agents/gotchas/`"] }), labels: [] }).warnings, []);
+  // A row that is itself a folder, or a pattern: its folder is the row's own, or the pattern's.
+  const shapes = { token: null, rows: [{ path: "docs/notes", kind: "own-file" }, { path: "docs/blocks/*.md", kind: "own-file" }] };
+  const both = lanes({ body: ticketBody({ areas: ["- `docs/notes/`", "- `docs/blocks/`", "- `docs/blocks/a.md`"] }), labels: [] }, { hotspots: shapes }).warnings;
+  assert.equal(both.length, 1);
+  assert.match(both[0], /docs\/notes\//);
+  // A folder row with a dot in its name is a folder; a `{phase}` above the file names the phase's folder; `*` bullets count.
+  const dotted = { token: null, rows: [{ path: "docs/v1.2", kind: "own-file" }] };
+  assert.equal(lanes({ body: ticketBody({ areas: ["* `docs/v1.2/`"] }), labels: [] }, { hotspots: dotted }).warnings.length, 1);
+  const odd = { token: null, rows: [{ path: "docs/{phase}/notes.md", kind: "own-file" }] };
+  const warned = (areas) => lanes({ body: ticketBody({ areas }), labels: [] }, { hotspots: odd }).warnings;
+  assert.match(warned(["- `docs/two-lanes/`"])[0], /docs\/two-lanes\//);
+  assert.deepEqual(warned(["- `docs/two-lanes/`", "* `docs/two-lanes/notes.md`"]), []);
+});
+
+test("an unknown lane's refusal says how to fix it", () => {
+  assert.match(lanes({ body: ticketBody({ lane: "- 3" }), labels: [] }).refusals[0], /name one of them, or take the section out/);
 });
 
 // ------------------------------------------------------------------ display

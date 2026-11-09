@@ -25,7 +25,9 @@ Argument: the spec's issue number. With none, ask for it.
    against the size budget (`phaseRun.ticketSize` in `.claude/workflow.json`, else Brigade's
    defaults). A ticket over a limit may be two sessions' work, and a long session costs more per
    step. A warning is a lead, not a verdict: weigh it under "a ticket too large for one session"
-   below, and name any you would split in the batch.
+   below, and name any you would split in the batch. The same script checks each ticket's lane
+   declaration against `phaseRun.lanes` (§2, "A lane declaration that does not hold") and exits 1
+   when it refuses one.
 
 A phase of a dozen tickets is a lot to hold. Read ticket by ticket and write findings down as you
 go; do not ask anything until every ticket has been read.
@@ -53,6 +55,13 @@ go; do not ask anything until every ticket has been read.
 
   Also report a state the brief lists that no ticket builds (empty, error, a long name, the other
   role).
+- **A lane declaration that does not hold.** A `## Lane` section is accepted only on a ticket that
+  carries the label its lane's row `takes` (a row that takes `any` needs none); it is refused when
+  the label is missing or the lane is one no row has. The label is what is read, never the Areas.
+  A ticket with no `## Lane` is never refused. A refusal is mechanical: report it, and either add the
+  label or take the section out, as the owner picks. On any ticket, lane or not, the script also
+  warns when its Areas name an own-file hotspot's folder (`phaseRun.hotspots`) but none of its
+  files: name the file.
 - **A wrong edge.** A ticket that needs another's work but is not blocked by it, or is blocked by
   one it does not need; a ticket missing from the spec's sub-issues; a cycle.
 - **A manual step nobody listed** under "Run by hand" (a secret, a script, a real-phone check).
@@ -95,6 +104,7 @@ Add `run-ready` to every ticket with no open question left
 
 - a ticket whose question the owner deferred (say so in a comment on the issue);
 - a `frontend` ticket the design rung has not cleared (§2): name what is missing in a comment;
+- a ticket whose `## Lane` the script refuses, until its label or the section is fixed;
 - the finish ticket, which is built attended.
 
 ## 6. Report
