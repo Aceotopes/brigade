@@ -25,3 +25,10 @@ listed in the gotchas index, `docs/agents/gotchas/README.md`.
 - Two counters, one token: a log's file name, its `# #NNN` title and a bare `NNN` take the log's number. pinned: the same test.
 - `NUMBER_TOKEN` and `HOTSPOT_TOKEN` cannot import each other once installed; `laneToken` refuses a lane token doc-check won't accept. pinned: the same test.
 - `numberLane` imports only from `tools/phase-run/`: the runner copy holds nothing else until #31.
+
+**`#31` — the snapshot carries doc-check, `template/tools/phase-run/snapshot.mjs` `docTools` / `runnerCode`, `template/tools/doc-lib.mjs` `TOOLS_ROOT` / `checkedRoot`, `run.mjs` `docCheck`, `hooks/guard-shell.mjs` (built 2026-11-09):**
+- The copy now holds `tools/doc-check.mjs`'s import closure and its baseline; runner code may import those from the copy, and nothing else of `tools/`. pinned: `template/tools/phase-run/run.test.mjs`.
+- doc-lib has two roots: the baseline is read beside the file (`TOOLS_ROOT`), the docs and git from `ROOT`. A new doc-tool path must pick the right one. pinned: `template/tools/doc-tools.test.mjs` (`withCopy`).
+- `PHASE_RUN_ROOT` redirects doc tools only when `PHASE_RUN_RUNNER` names their folder; never widen it to "whenever set", or a test's fixture doc-check checks the real repo. pinned: the same test.
+- The runner's process has no `PHASE_RUN`: a refusal doc-check must make at the gate keys on its `IN_RUN` (`PHASE_RUN` or `IN_COPY`). pinned: `template/tools/phase-run/run.test.mjs` (the budget raise).
+- `doc-config.mjs` is copied but not compared on a restart (config a ticket may edit); every other doc tool is. The manifest's `docCheck` lets the hook block a copy that lost its doc-check. pinned: the same test, `tests/guard-shell.test.mjs`.

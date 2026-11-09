@@ -3,26 +3,34 @@
 // the run's folder, `.phase-run/<branch>/runner/`, laid out as the repo is, so the hooks and the
 // session's check command read the copy exactly as they would read the repo. Each ticket's
 // settings point at it (PHASE_RUN_RUNNER), so nothing written mid-night (a shell write, the
-// owner's edit) changes the rules for later tickets.
+// owner's edit) changes the rules for later tickets. Since 0.7.0 (D10) the copy also holds
+// `tools/doc-check.mjs`, every doc tool it imports and `tools/doc-check-baseline.json`, so the docs
+// are judged by the copy too.
 //
-//   manifest.json  { takenAt, commit, runId, brigade, finished }
+//   manifest.json  { takenAt, commit, runId, brigade, docCheck, finished }
 //
 // `brigade` is the Brigade version installed when the copy was taken (brigade.mjs): the plugin's
 // hooks judge the night beside the copy.
 //
 // A run that died restarts on its unfinished copy, so the night is still judged by one runner. The
-// restart is refused, naming the files, when the live runner's code (`.mjs`, not its tests) has
+// restart is refused, naming the files, when the live runner's code (`.mjs`, not its tests, and the
+// doc tools; never the configs or the baseline, which the copy keeps on purpose) has
 // changed since, or when another Brigade version is installed now: the owner then chooses, by
 // finishing on the old code (or version) or deleting the copy. A run
 // that reaches its report marks the copy finished, and the next run takes a fresh one.
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join, relative } from "node:path";
+import { dirname, join, posix, relative } from "node:path";
 
 /** The copy's folder inside the run's (`.phase-run/<branch>/`). */
 export const SNAPSHOT_FOLDER = "runner";
 /** What is copied, from the repo's root: the runner's folder and its config. */
 const RUNNER_FOLDER = join("tools", "phase-run");
 const CONFIG = join(".claude", "workflow.json");
+/** doc-check (D10): the copy also takes it, every doc tool it imports, and its baseline. */
+const DOC_CHECK = "tools/doc-check.mjs";
+const BASELINE = join("tools", "doc-check-baseline.json");
+/** The docs' config: copied with the doc tools, but kept on a restart like workflow.json, since a ticket may edit it. */
+const DOC_CONFIG = "tools/doc-config.mjs";
 /** A project with no config gets this in its copy: no rules, the same as no file, but present. */
 const NO_CONFIG = '{ "version": 1, "note": "The project had no .claude/workflow.json when this run started." }\n';
 const MANIFEST = "manifest.json";
@@ -40,9 +48,31 @@ export function readManifest(dir) {
   }
 }
 
-/** The runner's code under `root`: its `.mjs` files, its tests left out, as repo paths with `/`. */
+/**
+ * doc-check and every doc tool it imports, however deep (D10), as repo paths with `/`: what judges
+ * the docs, so the copy holds it. Empty for a project without doc-check. Read from its relative
+ * imports, so a tool a project's doc-check gains is copied too, and one it drops is not.
+ */
+export function docTools(root) {
+  const found = new Set();
+  const visit = (rel) => {
+    if (found.has(rel) || !existsSync(join(root, rel))) return;
+    found.add(rel);
+    const source = readFileSync(join(root, rel), "utf8");
+    // A named import, a bare one (for its side effects), and a dynamic one.
+    for (const [, a, b, c] of source.matchAll(/\bfrom\s*["'](\.{1,2}\/[^"']+)["']|\bimport\s*["'](\.{1,2}\/[^"']+)["']|\bimport\s*\(\s*["'](\.{1,2}\/[^"']+)["']\s*\)/g)) {
+      const next = posix.join(posix.dirname(rel), a ?? b ?? c);
+      if (!next.startsWith("../")) visit(next); // never out of the repo
+    }
+  };
+  visit(DOC_CHECK);
+  return [...found].sort();
+}
+
+/** The runner's code under `root`: its `.mjs` files, its tests left out, and the doc tools but their config, as repo paths with `/`. */
 function runnerCode(root) {
   const out = new Map();
+  for (const rel of docTools(root)) if (rel !== DOC_CONFIG) out.set(rel, readFileSync(join(root, rel)));
   const walk = (dir) => {
     if (!existsSync(dir)) return;
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -100,7 +130,15 @@ export function takeSnapshot({ root, runDir, runId, commit, at, brigade = null }
   mkdirSync(dirname(join(dir, CONFIG)), { recursive: true });
   if (existsSync(join(root, CONFIG))) cpSync(join(root, CONFIG), join(dir, CONFIG));
   else writeFileSync(join(dir, CONFIG), NO_CONFIG);
-  const fresh = { takenAt: new Date(at).toISOString(), commit, runId, brigade, finished: false };
+  // The docs are judged by the copy too: a night can't change the rules its own docs are checked by.
+  const tools = docTools(root);
+  for (const rel of [...tools, ...(existsSync(join(root, BASELINE)) ? [BASELINE] : [])]) {
+    mkdirSync(dirname(join(dir, rel)), { recursive: true });
+    cpSync(join(root, rel), join(dir, rel));
+  }
+  // `docCheck` tells the commit hook a copy that lost its doc-check (an error) from one an older
+  // runner took without one (the live doc-check checks, as before).
+  const fresh = { takenAt: new Date(at).toISOString(), commit, runId, brigade, docCheck: tools.length > 0, finished: false };
   writeManifest(dir, fresh);
   return { dir, manifest: fresh, reused: false };
 }

@@ -3,10 +3,25 @@
 // Pure where it can be, so tools/doc-tools.test.mjs can test it without a repo.
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-export const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+/** Where the doc tools and their baseline sit: the repo, or inside a phase run the run's copy of them (ADR 0005, D10). */
+export const TOOLS_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+
+/**
+ * The tree the doc tools check: their own, unless they are the run's copy (PHASE_RUN_RUNNER names
+ * the folder they sit in), whose tree is PHASE_RUN_ROOT. Only the copy is pointed elsewhere, so an
+ * inherited PHASE_RUN_ROOT never sends another folder's doc tools (a test's) to the repo.
+ */
+export function checkedRoot(toolsRoot, env = process.env) {
+  const runner = env.PHASE_RUN_RUNNER && env.PHASE_RUN_ROOT ? resolve(env.PHASE_RUN_ROOT, env.PHASE_RUN_RUNNER) : null;
+  return runner !== null && relative(runner, toolsRoot) === "" ? resolve(env.PHASE_RUN_ROOT) : toolsRoot;
+}
+
+export const ROOT = checkedRoot(TOOLS_ROOT);
+/** True when these doc tools are the run's copy, judging the repo from outside it. */
+export const IN_COPY = ROOT !== TOOLS_ROOT;
 
 /** True when the module is the script node was started with, not an import. */
 export function isMain(metaUrl) {

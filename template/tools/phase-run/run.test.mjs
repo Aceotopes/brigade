@@ -11,7 +11,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { BROWSER_CHECK, fill, loadRunConfig, parseRunConfig, qaUrl, sessionEnv, targetFingerprint, targetUrl } from "./config.mjs";
 import { brigadeCatalog, installedBrigade, parsePluginList, readInstalledBrigade, versionStop } from "./brigade.mjs";
 import { readLedger } from "./ledger.mjs";
-import { QUIET_MS, SETTLE_MS, applyMigrations, backgroundArgs, folderTrusted, gatePlan, gotchasFile, holdReason, loadResults, outsideAreas, printArgs, projectGates, promptValues, pullRequestBody, recordResult, render, report, runSession, runVariables, runnerFile, screenshotsSince, sessionSettings, trimmedSettings, turnOver } from "./run.mjs";
+import { QUIET_MS, SETTLE_MS, applyMigrations, backgroundArgs, docCheck, folderTrusted, gatePlan, gotchasFile, holdReason, loadResults, outsideAreas, printArgs, projectGates, promptValues, pullRequestBody, recordResult, render, report, runSession, runVariables, runnerFile, screenshotsSince, sessionSettings, trimmedSettings, turnOver } from "./run.mjs";
 import { finishSnapshot, readManifest, runnerChanges, takeSnapshot } from "./snapshot.mjs";
 import { PATCH_ARGS } from "./tampering.mjs";
 import { TRIM_FLAGS, readTrim, trimPath } from "./trim.mjs";
@@ -972,6 +972,15 @@ function snapshotProject() {
   put("tools/phase-run/run.test.mjs", "// its tests\n");
   put("tools/phase-run/ticket-prompt.md", "the prompt\n");
   put(".claude/workflow.json", '{ "version": 1 }\n');
+  // The doc tools (#31): doc-check, what it imports (some of it through another tool), and its baseline.
+  put("tools/doc-check.mjs", 'import { a } from "./doc-lib.mjs";\nimport * as config from "./doc-config.mjs";\nimport "./doc-side.mjs";\n');
+  put("tools/doc-side.mjs", "// imported for its side effect\n");
+  put("tools/doc-lib.mjs", 'export { b } from "./roadmap-format.mjs";\n');
+  put("tools/doc-config.mjs", "// the doc config\n");
+  put("tools/roadmap-format.mjs", "// the roadmap's format\n");
+  put("tools/doc-rotate.mjs", 'import { a } from "./doc-lib.mjs";\n');
+  put("tools/doc-tools.test.mjs", "// the doc tools' tests\n");
+  put("tools/doc-check-baseline.json", '{ "stale": {}, "missing": {} }\n');
   const runDir = join(root, ".phase-run", "phase-x");
   const take = (runId, at = AT, brigade = "0.6.0") => takeSnapshot({ root, runDir, runId, commit: "abc123", at, brigade });
   return { root, runDir, put, take };
@@ -982,7 +991,7 @@ test("at run start the copy is taken: the runner folder and the config, with its
   const copy = take("run-1");
   assert.equal(copy.dir, join(runDir, "runner"));
   assert.equal(copy.reused, false);
-  assert.deepEqual(copy.manifest, { takenAt: new Date(AT).toISOString(), commit: "abc123", runId: "run-1", brigade: "0.6.0", finished: false });
+  assert.deepEqual(copy.manifest, { takenAt: new Date(AT).toISOString(), commit: "abc123", runId: "run-1", brigade: "0.6.0", docCheck: true, finished: false });
   assert.deepEqual(readManifest(copy.dir), copy.manifest);
   assert.equal(readFileSync(join(copy.dir, "tools/phase-run/run.mjs"), "utf8"), "// the runner\n");
   assert.equal(readFileSync(join(copy.dir, "tools/phase-run/ticket-prompt.md"), "utf8"), "the prompt\n");
@@ -1025,7 +1034,7 @@ test("a finished run marks its copy finished, and the next run takes a fresh one
   writeFileSync(join(first.dir, "tools/phase-run/left-over.mjs"), "// only in the old copy\n");
   const next = take("run-2", AT + 86_400_000);
   assert.equal(next.reused, false);
-  assert.deepEqual(next.manifest, { takenAt: new Date(AT + 86_400_000).toISOString(), commit: "abc123", runId: "run-2", brigade: "0.6.0", finished: false });
+  assert.deepEqual(next.manifest, { takenAt: new Date(AT + 86_400_000).toISOString(), commit: "abc123", runId: "run-2", brigade: "0.6.0", docCheck: true, finished: false });
   assert.equal(readFileSync(join(next.dir, "tools/phase-run/run.mjs"), "utf8"), "// the next release\n");
   assert.equal(existsSync(join(next.dir, "tools/phase-run/left-over.mjs")), false, "nothing of the old copy is left");
 });
@@ -1049,6 +1058,121 @@ test("each ticket's env points the hooks at the copy and the copy at the repo", 
   const settings = sessionSettings({}, { allow: [], deny: [] }, { branch: "phase-2", env, background: true, prompt: null });
   assert.equal(settings.env.PHASE_RUN_RUNNER, "/repo/.phase-run/phase-2/runner");
   for (const rule of ["Edit(./tools/phase-run/**)", "Edit(./.claude/workflow.json)", "Edit(./.phase-run/phase-2/**)"]) assert.ok(settings.permissions.deny.includes(rule), rule);
+});
+
+// D10 (#31): the copy carries doc-check too, so a night can't change the rules its own docs are checked by.
+
+test("the copy holds doc-check, every doc tool it imports, and its baseline, and nothing else of tools/", () => {
+  const { take } = snapshotProject();
+  const copy = take("run-1");
+  for (const name of ["doc-check.mjs", "doc-lib.mjs", "doc-config.mjs", "roadmap-format.mjs", "doc-side.mjs", "doc-check-baseline.json"]) {
+    assert.equal(readFileSync(join(copy.dir, "tools", name), "utf8"), readFileSync(join(copy.dir, "..", "..", "..", "tools", name), "utf8"), name);
+  }
+  assert.equal(existsSync(join(copy.dir, "tools/doc-rotate.mjs")), false, "doc-check does not import it");
+  assert.equal(existsSync(join(copy.dir, "tools/doc-tools.test.mjs")), false);
+});
+
+test("a restart keeps the copy's doc-check, baseline and doc config: a doc tool's change refuses it, the configs' do not", () => {
+  const { root, put, take } = snapshotProject();
+  take("run-1");
+  put("tools/doc-check-baseline.json", '{ "stale": { "docs/x.md": ["accepted mid-night"] }, "missing": {} }\n');
+  put("tools/doc-config.mjs", "// a ticket added a doc path mid-night\n");
+  const again = take("run-2");
+  assert.equal(again.reused, true);
+  assert.equal(readFileSync(join(again.dir, "tools/doc-check-baseline.json"), "utf8"), '{ "stale": {}, "missing": {} }\n', "the copy keeps the baseline it was taken with");
+  assert.equal(readFileSync(join(again.dir, "tools/doc-config.mjs"), "utf8"), "// the doc config\n", "and the doc config");
+  put("tools/roadmap-format.mjs", "// changed mid-night\n");
+  put("tools/doc-tools.test.mjs", "// a test change is not doc-check's code\n");
+  assert.deepEqual(runnerChanges(root, again.dir), ["tools/roadmap-format.mjs"]);
+  assert.throws(() => take("run-3"), /tools\/roadmap-format\.mjs/);
+});
+
+test("a copy taken before #31 has no doc tools: its restart is refused, naming them", () => {
+  const { root, take } = snapshotProject();
+  const copy = take("run-1");
+  for (const name of ["doc-check.mjs", "doc-lib.mjs", "doc-config.mjs", "roadmap-format.mjs"]) rmSync(join(copy.dir, "tools", name));
+  assert.deepEqual(runnerChanges(root, copy.dir), ["tools/doc-check.mjs", "tools/doc-lib.mjs", "tools/doc-side.mjs", "tools/roadmap-format.mjs"]);
+  assert.throws(() => take("run-2"), /tools\/doc-check\.mjs, tools\/doc-lib\.mjs/);
+});
+
+/** A project with the real doc tools, its docs clean and committed, and its run's copy taken. */
+function docsProject() {
+  const { root, runDir, put } = snapshotProject();
+  for (const name of ["doc-check.mjs", "doc-index.mjs", "doc-lib.mjs", "roadmap-format.mjs"]) put(`tools/${name}`, readFileSync(join(HERE, "..", name), "utf8"));
+  rmSync(join(root, "tools/doc-rotate.mjs"));
+  put(
+    "tools/doc-config.mjs",
+    [
+      'export const DEVLOG = "docs/devlog.md";',
+      'export const DEVLOG_ARCHIVE = "docs/devlog";',
+      'export const PHASES = "docs/devlog/phases.json";',
+      'export const LIVE_DOCS = ["docs/roadmap.md"];',
+      "export const STATUS_DOCS = /^docs\\/roadmap\\.md$/;",
+      'export const PATH_ROOTS = ["docs", "tools"];',
+      'export const PATH_EXTENSIONS = ["md", "mjs"];',
+      'export const HEADER_REQUIRED = ["docs"];',
+      "export const HEADER_EXEMPT = [];",
+      "export const GENERATED = [];",
+      'export const DEVLOG_TYPES = ["chore"];',
+      "export const DEVLOG_TAGGED_FROM = 1;",
+      "",
+    ].join("\n"),
+  );
+  put("docs/roadmap.md", "---\njob: Where things stand.\nkind: living\nmax-lines: 20\n---\n# Roadmap\n");
+  put("docs/devlog.md", "---\njob: The timeline.\nkind: log\nmax-entry-lines: 15\n---\n# Devlog\n\n## #1 · chore · start\n- the repo\n\n---\n");
+  put(".gitignore", ".phase-run/\n");
+  const git = (...args) => spawnSync("git", args, { cwd: root, encoding: "utf8" });
+  git("init", "-q");
+  git("config", "user.email", "t@example.com");
+  git("config", "user.name", "T");
+  git("add", "-A");
+  git("commit", "-q", "-m", "chore: start — devlog #1");
+  const copy = takeSnapshot({ root, runDir, runId: "run-1", commit: "abc123", at: AT, brigade: "0.7.0" });
+  const outsideRun = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^PHASE_RUN/.test(key)));
+  return { root, put, copy: copy.dir, check: (runner, ...args) => docCheck(runner, root, args, outsideRun) };
+}
+
+test("inside a run the gates' doc-check is the copy's: a live doc-check or baseline changed mid-night changes no verdict", () => {
+  const { root, put, copy, check } = docsProject();
+  assert.equal(check(copy).ok, true, check(copy).stderr);
+  put("tools/doc-check.mjs", 'console.error("the live doc-check, broken mid-night"); process.exit(1);\n');
+  assert.equal(check(copy).ok, true, "the copy judges, not the live file");
+  assert.match(check(null).stderr, /broken mid-night/, "with no copy (outside a run), the live doc-check, as today");
+  // The copy reads the repo's docs, against its own baseline: a phrase the live baseline took mid-night still fails.
+  put("docs/roadmap.md", "---\njob: Where things stand.\nkind: living\nmax-lines: 20\n---\n# Roadmap\nnot yet pushed\n");
+  put("tools/doc-check-baseline.json", JSON.stringify({ stale: { "docs/roadmap.md": ["not yet pushed"] }, missing: {} }));
+  const verdict = check(copy);
+  assert.equal(verdict.ok, false);
+  assert.match(verdict.stderr, /docs\/roadmap\.md:7 reads as stale: not yet pushed/);
+});
+
+test("the copy's doc-check refuses a budget raise at the gate, though the runner's process has no PHASE_RUN", () => {
+  const { put, copy, check } = docsProject();
+  put("docs/roadmap.md", "---\njob: Where things stand.\nkind: living\nmax-lines: 30\n---\n# Roadmap\n");
+  const gate = check(copy);
+  assert.equal(gate.ok, false);
+  assert.match(gate.stderr, /max-lines raised from 20 to 30\. A phase run never raises a budget/);
+  const attended = check(null);
+  assert.equal(attended.ok, true, attended.stderr);
+  assert.match(attended.stdout, /Raising a budget is the owner's call/, "outside a run, a note, as today");
+});
+
+test("inside a run --update-baseline is refused, naming why, and the copy's baseline is untouched", () => {
+  const { copy, check } = docsProject();
+  const before = readFileSync(join(copy, "tools/doc-check-baseline.json"), "utf8");
+  for (const flag of ["--update-baseline", "--adopt"]) {
+    const refused = check(copy, flag);
+    assert.equal(refused.ok, false, flag);
+    assert.match(refused.stderr, /never updated inside a phase run[\s\S]*the baseline the run's copy took at run start/, flag);
+  }
+  assert.equal(readFileSync(join(copy, "tools/doc-check-baseline.json"), "utf8"), before);
+});
+
+test("the gate and the report run doc-check through docCheck, never the live path", () => {
+  const source = readFileSync(join(HERE, "run.mjs"), "utf8");
+  assert.doesNotMatch(source, /exec\("node", \["tools\/doc-check\.mjs"/);
+  assert.match(source, /docCheck\(run\.runner, ROOT, \["--head"\]\)/);
+  assert.match(source, /docCheck\(run\.runner, ROOT, \["--report"\]\)/);
 });
 
 // D16 (#21): trim. A per-machine list switches off what the owner's nights don't need, and a

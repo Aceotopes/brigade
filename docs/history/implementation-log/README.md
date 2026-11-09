@@ -10,6 +10,7 @@ what was built, why it works that way, and how to say it out loud. The index bel
 <!-- generated:start implementation-log -->
 ### Current phase
 
+- [017](017-snapshot-doc-check.md) · `#31` · 2026-11-09 · The snapshot carries doc-check: a night's docs are judged by its run's copy
 - [016](016-unnumbered-entries.md) · `#30` · 2026-11-09 · Hotspots and unnumbered entries: a lane writes NNN, a pure step numbers it
 - [015](015-lane-table.md) · `#29` · 2026-11-09 · The lane table: two lanes as config, checked at preflight
 

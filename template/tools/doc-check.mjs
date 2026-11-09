@@ -14,6 +14,10 @@
 //
 // A change that raises a doc's budget is printed; inside a phase run it is refused.
 //
+// Inside a phase run the gates run the run's copy of this file, its imports and its baseline
+// (`.phase-run/<branch>/runner/tools/`, ADR 0005, D10), pointed at the repo by PHASE_RUN_ROOT
+// (doc-lib.mjs `checkedRoot`): the docs are the repo's, the rules the copy's.
+//
 // Inside a lane (PHASE_RUN_LANE set), the token doc-config names (NUMBER_TOKEN, `NNN`) stands
 // where a number goes: a devlog heading `## #NNN · …`, a log `NNN-<slug>.md`, a message's
 // `devlog #NNN`. Landing numbers them (ADR 0006). Outside a lane each is refused, by name.
@@ -51,9 +55,13 @@ import {
 import * as docConfig from "./doc-config.mjs";
 import { staleIndexes } from "./doc-index.mjs";
 import { parseRoadmap } from "./roadmap-format.mjs";
-import { ROOT, budgetProblems, citedDevlogNumbers, devlogEntries, escapeRegExp, git, isMain, parseFrontmatter, read } from "./doc-lib.mjs";
+import { IN_COPY, ROOT, TOOLS_ROOT, budgetProblems, citedDevlogNumbers, devlogEntries, escapeRegExp, git, isMain, parseFrontmatter, read } from "./doc-lib.mjs";
 
-const BASELINE_PATH = join(ROOT, "tools", "doc-check-baseline.json");
+// Beside this file: the repo's, or inside a run the copy's, which the run took at its start (D10).
+const BASELINE_PATH = join(TOOLS_ROOT, "tools", "doc-check-baseline.json");
+// Inside a phase run: a session's (PHASE_RUN), or the run's copy, which the runner's own gate runs
+// without PHASE_RUN. What a run refuses (a baseline write, a budget raise) keys on this.
+const IN_RUN = process.env.PHASE_RUN === "1" || IN_COPY;
 /** Optional, since 0.3.0: a config written before then has no DISCOVERY_DIR and gets the default. */
 const DISCOVERY_DIR = docConfig.DISCOVERY_DIR ?? "docs/discovery";
 /** Optional, since 0.3.0: where the prototypes live, or null for a project with none yet. */
@@ -493,8 +501,11 @@ function main() {
 
   const adopt = flag("--adopt");
   if (adopt || flag("--update-baseline")) {
-    if (process.env.PHASE_RUN === "1") {
-      console.error("doc-check: the baseline is never updated inside a phase run. Fix the line instead.");
+    if (IN_RUN) {
+      console.error(
+        "doc-check: the baseline is never updated inside a phase run: the night's docs are judged by the baseline the run's copy took at run start " +
+          "(ADR 0005), so a night cannot change the rules its own docs are checked by. Fix the line instead.",
+      );
       process.exit(1);
     }
     const next = { note: loadBaselineNote(), stale: {}, missing: {} };
@@ -539,7 +550,7 @@ function main() {
   if (existsSync(join(ROOT, ROADMAP))) failures.push(...parseRoadmap(read(ROADMAP)).problems.map((problem) => `${ROADMAP}:${problem}`));
 
   const raises = budgetRaises(flag("--head") ? "HEAD~1" : "HEAD");
-  if (process.env.PHASE_RUN === "1") {
+  if (IN_RUN) {
     for (const raise of raises) failures.push(`${raise} A phase run never raises a budget: trim the doc instead.`);
   } else {
     for (const raise of raises) console.log(`  note: ${raise} Raising a budget is the owner's call.`);

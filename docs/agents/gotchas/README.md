@@ -30,4 +30,5 @@ plain. The index below is generated.
 **[Gotchas — Phase two-lanes: Brigade 0.7.0, two lanes](two-lanes.md)**
 - `#29` the lane table, `template/tools/phase-run/config.mjs` `parseLanes` / `parseLane` / `parsePorts` / `parseHotspots`
 - `#30` hotspots and unnumbered entries, `template/tools/phase-run/numbering.mjs` `numberLane` / `scratchFor`, `template/tools/doc-check.mjs` `unnumberedProblems`, `run.mjs` `laneNumbers` / `runVariables`
+- `#31` the snapshot carries doc-check, `template/tools/phase-run/snapshot.mjs` `docTools` / `runnerCode`, `template/tools/doc-lib.mjs` `TOOLS_ROOT` / `checkedRoot`, `run.mjs` `docCheck`, `hooks/guard-shell.mjs`
 <!-- generated:end gotchas -->

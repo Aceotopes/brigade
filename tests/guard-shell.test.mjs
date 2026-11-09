@@ -39,6 +39,41 @@ test("the project is CLAUDE_PROJECT_DIR: its own doc-check runs before a commit 
   assert.match(result.stderr, /Blocked by Brigade's guard-shell hook: doc-check failed[\s\S]*doc-check stub ran/);
 });
 
+// D10 (#31): inside a run the commit's doc-check is the copy's, as the runner's gate is.
+test("inside a run the pre-commit doc-check is the run's copy's, pointed at the project; attended, the live one", () => {
+  const passing = 'import { relative } from "node:path";\nif (relative(process.cwd(), process.env.PHASE_RUN_ROOT) !== "") { console.error("not run in the project"); process.exit(1); }\n';
+  const { dir, git } = repo("brigade-project-", { ...FAILING_DOC_CHECK, [`${COPY}/.claude/workflow.json`]: '{ "version": 1 }\n', [`${COPY}/tools/doc-check.mjs`]: passing });
+  git("checkout", "-q", "-b", "phase-x");
+  // No PHASE_RUN_ROOT given: the hook itself points the copy at the project.
+  const env = { PHASE_RUN: "1", PHASE_RUN_RUNNER: join(dir, COPY) };
+  const inRun = guard(dir, 'git commit -m "feat: x"', { env });
+  assert.equal(inRun.status, 0, inRun.stderr);
+  assert.match(guard(dir, 'git commit -m "feat: x"').stderr, /doc-check stub ran/, "attended: the live tree's doc-check");
+});
+
+test("a run's copy taken without doc-check (an older runner) leaves the commit to the live one", () => {
+  const { dir, git } = repo("brigade-project-", { ...FAILING_DOC_CHECK, [`${COPY}/.claude/workflow.json`]: '{ "version": 1 }\n' });
+  git("checkout", "-q", "-b", "phase-x");
+  const env = { PHASE_RUN: "1", PHASE_RUN_RUNNER: join(dir, COPY), PHASE_RUN_ROOT: dir };
+  assert.match(guard(dir, 'git commit -m "feat: x"', { env }).stderr, /doc-check stub ran/);
+});
+
+test("a run's copy that took a doc-check and lost it blocks the commit; the live one never judges instead", () => {
+  const passing = { "tools/doc-check.mjs": "process.exit(0);\n" };
+  const { dir, git } = repo("brigade-project-", { ...passing, [`${COPY}/.claude/workflow.json`]: '{ "version": 1 }\n', [`${COPY}/manifest.json`]: '{ "docCheck": true, "finished": false }\n' });
+  git("checkout", "-q", "-b", "phase-x");
+  const result = guard(dir, 'git commit -m "feat: x"', { env: { PHASE_RUN: "1", PHASE_RUN_RUNNER: join(dir, COPY), PHASE_RUN_ROOT: dir } });
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /has lost its tools\/doc-check\.mjs/);
+});
+
+test("inside a run the guard refuses a baseline update, naming why", () => {
+  const { dir } = repo();
+  const result = guard(dir, ["node tools/doc-check.mjs", "--update-baseline"].join(" "), { env: { PHASE_RUN: "1" } });
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /judged by the baseline the run's copy took at run start/);
+});
+
 test("a project without the doc tools is not blocked for the missing check", () => {
   const { dir } = repo();
   assert.equal(guard(dir, 'git commit -m "feat: x"').status, 0);

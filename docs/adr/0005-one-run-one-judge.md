@@ -1,7 +1,12 @@
 ---
-status: accepted
+status: amended
 ---
 # One phase run is judged by one frozen copy of the runner and one Brigade version
+
+> **Amended 2026-11-09 (#31, D10):** the copy also takes `tools/doc-check.mjs`, every doc tool it
+> imports and `tools/doc-check-baseline.json`. Inside a run the gates and the commit hook run the
+> copy's doc-check against the repo, and `--update-baseline` is refused. A restart compares the doc
+> tools as runner code; the baseline and `tools/doc-config.mjs`, like the config, stay the copy's.
 
 A phase run is many sessions, started hours apart, and everything that judges them used to be
 read live:

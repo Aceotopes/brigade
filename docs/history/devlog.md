@@ -9,6 +9,19 @@ Each commit's entry goes on top, in the shape of `docs/_templates/devlog-entry.m
 message cites it (`devlog #N`). At each phase end, `node tools/doc-rotate.mjs` moves the closed
 entries into `docs/history/devlog/`.
 
+## #32 · feat · the snapshot carries doc-check: a night's docs are judged by its run's copy
+
+**Built:** #31. The runner copy takes doc-check, every doc tool it imports, and its baseline (D10,
+ADR 0005 amended). Inside a run, what judges the docs is the copy's; the docs are the repo's.
+- `snapshot.mjs` `docTools`: walks doc-check's imports. A restart compares them as runner code;
+  the baseline and doc-config, like workflow.json, stay the copy's.
+- `doc-lib.mjs` `TOOLS_ROOT` / `checkedRoot`: the copy checks `PHASE_RUN_ROOT`; nothing else is redirected.
+- `run.mjs` `docCheck`: the `--head` gate and `--report` run the copy; so does the commit hook.
+- From the copy, a baseline write is refused naming why, and a budget raise fails the gate too.
+**Verified:** 14 tests at the runner, doc-tools and hook seams; the plugin's and the template's
+suites pass; doc-check clean. The code review's fixes are folded in.
+**Next:** #32. **Record:** implementation log 017.
+
 ## #31 · feat · hotspots and unnumbered entries: a lane writes NNN, a pure step numbers it
 
 **Built:** #30. A lane may write `NNN` where a number goes, and a pure function numbers it from the

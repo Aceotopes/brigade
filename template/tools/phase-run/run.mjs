@@ -1041,6 +1041,17 @@ function runnerFile(runner, name) {
   return runner ? join(runner, "tools", "phase-run", name) : join(HERE, name);
 }
 
+/**
+ * doc-check as the runner runs it (D10): the run's copy's, with its imports and its baseline,
+ * pointed at the repo it checks (`root`, doc-lib.mjs `checkedRoot`), so a change to the live doc
+ * tools mid-night changes no later ticket's verdict. With no copy yet (a dry run), the live one, as
+ * before. `env` is the environment it runs in, this process's unless a test gives another.
+ */
+function docCheck(runner, root, args, env = process.env) {
+  if (!runner) return exec("node", [join("tools", "doc-check.mjs"), ...args], { cwd: root, env });
+  return exec("node", [join(runner, "tools", "doc-check.mjs"), ...args], { cwd: root, env: { ...env, PHASE_RUN_RUNNER: runner, PHASE_RUN_ROOT: root } });
+}
+
 function writeSessionSettings(run, number, env, { background = true } = {}) {
   const base = JSON.parse(readFileSync(runnerFile(run.runner, "settings.json"), "utf8"));
   const settings = sessionSettings(base, config.permissions, { branch: run.branch, env, background, prompt: config.prompt, catalog: run.catalog });
@@ -1667,7 +1678,7 @@ async function runGates(ticket, base, options, run, startedAt) {
   });
   if (failed) return fail(failed.gate, failed.output);
 
-  const docs = exec("node", ["tools/doc-check.mjs", "--head"]);
+  const docs = docCheck(run.runner, ROOT, ["--head"]);
   if (!docs.ok) return fail("doc-check", `${docs.stdout}\n${docs.stderr}`);
 
   // Last on purpose: nothing reaches the migration target until everything else is green.
@@ -2471,7 +2482,7 @@ async function main() {
     .filter(({ ticket }) => !run.results.some((r) => r.number === ticket.number))
     .map(({ ticket, reason }) => `#${ticket.number} ${ticket.title}: ${beyond(ticket) ? AFTER_UNTIL : (reason ?? "ready, not reached this run")}`);
 
-  const health = exec("node", ["tools/doc-check.mjs", "--report"]);
+  const health = docCheck(run.runner, ROOT, ["--report"]);
   run.docHealth = health.ok ? health.stdout : null;
   // A night that pushed nothing still reports on an earlier night's pull request.
   if (!run.pullRequest) {
@@ -2498,6 +2509,7 @@ export {
   SETTLE_MS,
   applyMigrations,
   backgroundArgs,
+  docCheck,
   fetchBlockers,
   gatePlan,
   gotchasFile,

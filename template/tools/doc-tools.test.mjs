@@ -559,3 +559,50 @@ test("a lane's entry still needs its type tag; an older doc-config without the t
   unnumbered("party");
   assert.match(lane("--message", "x — devlog #NNN").stderr, /type "party"/);
 });
+
+// D10 (#31): inside a run doc-check runs from the run's copy of tools/, and checks the repo.
+
+/** The repo's doc tools copied to its run's copy, `.phase-run/phase-x/runner/tools/`, and a way to run that copy. */
+function withCopy() {
+  const project = repo();
+  const copy = join(project.dir, ".phase-run", "phase-x", "runner");
+  mkdirSync(join(copy, "tools"), { recursive: true });
+  for (const name of ["doc-check.mjs", "doc-index.mjs", "doc-lib.mjs", "roadmap-format.mjs", "doc-config.mjs"]) copyFileSync(join(project.dir, "tools", name), join(copy, "tools", name));
+  writeFileSync(join(copy, "tools", "doc-check-baseline.json"), JSON.stringify({ stale: { "docs/roadmap.md": ["not yet pushed"] }, missing: {} }));
+  const env = { ...process.env, PHASE_RUN: "1", PHASE_RUN_RUNNER: copy, PHASE_RUN_ROOT: project.dir };
+  const fromCopy = (args = [], childEnv = env) => spawnSync(process.execPath, [join(copy, "tools", "doc-check.mjs"), ...args], { cwd: project.dir, encoding: "utf8", env: childEnv });
+  return { ...project, copy, env, fromCopy };
+}
+
+const STALE_ROADMAP = "---\njob: Where things stand.\nkind: living\nmax-lines: 20\n---\n# Roadmap\nnot yet pushed\n";
+
+test("run from the copy, doc-check reads the repo's docs against the copy's baseline", () => {
+  const { dir, node, fromCopy } = withCopy();
+  writeFileSync(join(dir, "docs", "roadmap.md"), `${STALE_ROADMAP}uncommitted\n`);
+  const check = fromCopy();
+  assert.equal(check.status, 1);
+  assert.match(check.stderr, /docs\/roadmap\.md:8 reads as stale: uncommitted/, "it read the repo's roadmap");
+  assert.doesNotMatch(check.stderr, /roadmap\.md:7/, "the copy's baseline took line 7's phrase");
+  assert.match(node("doc-check.mjs").stderr, /docs\/roadmap\.md:7 reads as stale/, "the repo's own baseline never took it");
+});
+
+test("an inherited PHASE_RUN_ROOT never points a doc-check outside the run's copy at another tree", () => {
+  const { dir, env } = withCopy();
+  const other = repo();
+  writeFileSync(join(other.dir, "docs", "roadmap.md"), STALE_ROADMAP);
+  // The other repo's own doc-check, in a session whose run points at the first repo and its copy:
+  const check = spawnSync(process.execPath, ["tools/doc-check.mjs"], { cwd: other.dir, encoding: "utf8", env: { ...env, PHASE_RUN_ROOT: dir } });
+  assert.match(check.stderr, /docs\/roadmap\.md:7 reads as stale/, "it checked its own tree, not the one PHASE_RUN_ROOT names");
+});
+
+test("run from the copy, the baseline is never written, even without PHASE_RUN, and the refusal names why", () => {
+  const { copy, env, fromCopy } = withCopy();
+  const before = readFileSync(join(copy, "tools", "doc-check-baseline.json"), "utf8");
+  const { PHASE_RUN: _, ...withoutPhaseRun } = env;
+  for (const childEnv of [env, withoutPhaseRun]) {
+    const refused = fromCopy(["--update-baseline"], childEnv);
+    assert.equal(refused.status, 1, "the runner's own gate has no PHASE_RUN; the copy still refuses");
+    assert.match(refused.stderr, /never updated inside a phase run: the night's docs are judged by the baseline the run's copy took at run start/);
+  }
+  assert.equal(readFileSync(join(copy, "tools", "doc-check-baseline.json"), "utf8"), before);
+});
