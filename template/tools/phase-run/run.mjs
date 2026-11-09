@@ -42,7 +42,8 @@ import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { BROWSER_CHECK, HOTSPOT_TOKEN, fill, fillEnv, laneQaUrl, loadRunConfig, sessionEnv as pinnedEnv, targetFingerprint, targetUrl } from "./config.mjs";
-import { afterPass, ignoredImports, ignoredImportsProblem, joinBranch, laneLockPath, lanePortProblems, laneRoots, laneRow, laneValues, mayFinishCopy, prepareWorktree, setupWorktree, writeLaneLock } from "./lane.mjs";
+import { afterPass, ignoredImports, ignoredImportsProblem, joinBranch, laneLockPath, lanePortProblems, laneRoots, laneRow, laneValues, liveLanes, mayFinishCopy, prepareWorktree, setupWorktree, writeLaneLock } from "./lane.mjs";
+import { builtOn, claimNext, laneChoice, takesTicket } from "./claim.mjs";
 import { Screen, notify, ticketMinutes } from "./display.mjs";
 import { brigadeCatalog, readInstalledBrigade, versionStop, withAutoUpdateOff } from "./brigade.mjs";
 import { LEDGER_PATH, appendRow, ledgerRow, stampVersion } from "./ledger.mjs";
@@ -487,12 +488,17 @@ async function fetchBlockers(number) {
 // ------------------------------------------------------------------ tickets
 
 /**
+ * Where "built" is read (claim.mjs builtOn): HEAD, the checked-out phase branch, in a one-lane run,
+ * as before; the phase branch itself in a lane, whose HEAD is its own branch of unlanded passes.
+ */
+let builtRef = "HEAD";
+
+/**
  * Issues stay open until the pull request merges, so on a phase branch
  * "done" is: closed, or a commit on this branch carries `Closes #N`.
  */
 function builtOnBranch(number) {
-  const result = gitTry("log", "main..HEAD", "-i", "-E", `--grep=Closes #${number}([^0-9]|$)`, "--format=%h");
-  return result.ok && result.stdout !== "";
+  return builtOn(gitTry, builtRef, number);
 }
 
 function isDone(ticket) {
@@ -525,10 +531,55 @@ function holdReason(ticket, byNumber) {
   }
   for (const blocker of ticket.blockers) {
     const known = byNumber.get(blocker.number);
-    const done = known ? isDone(known) : blocker.state === "closed" || builtOnBranch(blocker.number);
+    const done = known ? isDone(known) : blockerDone(blocker);
     if (!done) return `waiting on #${blocker.number}`;
   }
   return null;
+}
+
+/** A blocker outside the run's tickets, as `{ number, state }`: closed, or built on the branch. */
+function blockerDone(blocker) {
+  return blocker.state === "closed" || builtOnBranch(blocker.number);
+}
+
+/**
+ * The next ticket to build, or none. A one-lane run takes the first ready ticket in order, as
+ * before. A lane takes the first of its frontier under a claim both lanes share (claim.mjs, #34):
+ * ready, a ticket its row takes, and claimed by no live lane. With none, it waits while another
+ * live lane may still land a ticket one of its own waits on, and stops when none can.
+ */
+async function nextTicket(inScope, byNumber, run) {
+  if (!lane) return inScope.find((ticket) => holdReason(ticket, byNumber) === null);
+  // The other lanes of this branch still running, as their rows: what each may still take.
+  const others = () => {
+    const live = liveLanes(STATE).filter((other) => other.branch === run.branch && other.lane !== String(lane.id));
+    return config.lanes.rows.filter((row) => live.some((other) => other.lane === String(row.id)));
+  };
+  let said = "";
+  const { ticket } = await claimNext({
+    dir: run.claims,
+    lane: lane.id,
+    sleep,
+    choose: (claims, idle) =>
+      laneChoice({
+        tickets: inScope,
+        byNumber,
+        hold: (ticket) => holdReason(ticket, byNumber),
+        done: blockerDone,
+        takes: lane.takes,
+        claims,
+        self: lane.id,
+        others: others(),
+        idle,
+      }),
+    onWait: (waitOn) => {
+      const line = waitOn.map((w) => (w.claimed ? `lane ${w.lane}'s #${w.ticket}` : `#${w.ticket}, which lane ${w.lane} may take`)).join(", ");
+      if (line !== said) log(`Lane ${lane.id}: nothing it takes is ready; waiting on ${line}.`);
+      said = line;
+    },
+  });
+  if (ticket === null) log(`Lane ${lane.id}: nothing it takes is ready, and no other live lane can unblock one.`, { routine: true });
+  return ticket === null ? undefined : inScope.find((candidate) => candidate.number === ticket);
 }
 
 // ---------------------------------------------------------------- preflight
@@ -2408,6 +2459,8 @@ function report(run, options, remaining, { final = true } = {}) {
 async function main() {
   const options = parseArgs(process.argv.slice(2));
   const { branch, current, remote, trim } = await preflight(options);
+  // A lane reads "built" off the phase branch: its own HEAD holds passes not landed yet (#34).
+  if (lane) builtRef = branch;
   // Only a dry run gets here without a remote, and its tickets are on GitHub.
   if (!remote) {
     console.log("\nNo tickets listed: they are read from GitHub, and this repo has no remote yet.\n");
@@ -2486,6 +2539,7 @@ async function main() {
     // Two roots (ADR 0007): a lane's results and logs are its own folder in the primary checkout.
     dir: roots ? roots.runDir : join(STATE, branch),
     laneBranch: roots?.branch ?? null, // where a lane's passing commits stay, unlanded
+    claims: roots ? roots.copyDir : null, // the branch's folder in the primary checkout, whose claim file both lanes share (claim.mjs)
     runId: new Date().toISOString(),
     results: [], // this run's
     all: [], // every run's on this branch, as results.json holds them
@@ -2560,6 +2614,7 @@ async function main() {
   // own average, then follows this run's.
   const reachable = inScope.filter((ticket) => {
     const reason = holdReason(ticket, byNumber);
+    if (lane && !takesTicket(lane.takes, ticket)) return false; // a lane counts only what its row takes
     return reason === null || reason.startsWith("waiting on #");
   });
   const earlier = run.all.map(ticketMinutes).filter((minutes) => minutes != null);
@@ -2585,7 +2640,15 @@ async function main() {
 
   let outcome = "continue";
   while (outcome === "continue" && run.results.length < options.max) {
-    const next = inScope.find((ticket) => holdReason(ticket, byNumber) === null);
+    let next;
+    try {
+      next = await nextTicket(inScope, byNumber, run);
+    } catch (error) {
+      // A lane's claim file or its lock refused (claim.mjs): the run still reaches its report.
+      run.stopped = `No ticket could be claimed: ${error.message}`;
+      log(run.stopped);
+      break;
+    }
     if (!next) break;
     if (!(await waitForInternet(waitDeadline(options), `before #${next.number}`))) {
       run.stopped = `The internet connection did not come back within ${options.waitHours} hours, so #${next.number} was never started.`;

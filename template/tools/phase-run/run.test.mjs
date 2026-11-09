@@ -1,7 +1,7 @@
 // Tests for the phase runner's own logic (#194). Plain node:test: no database, no
 // GitHub, no Claude session. Run: pnpm test:runner (node --test tools/phase-run/).
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -10,6 +10,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { BROWSER_CHECK, fill, laneQaUrl, loadRunConfig, parseRunConfig, qaUrl, sessionEnv, targetFingerprint, targetUrl } from "./config.mjs";
 import { afterPass, ignoredImports, ignoredImportsProblem, joinBranch, laneLockPath, lanePortProblems, laneRoots, laneRow, laneValues, liveLanes, mayFinishCopy, prepareWorktree, setupWorktree, writeLaneLock } from "./lane.mjs";
+import { CLAIMS_LOCK, UNREADABLE_GRACE_MS, builtOn, claimNext, claimsPath, laneChoice, liveClaims, readClaims, takeClaim, takesTicket, withClaimLock } from "./claim.mjs";
 import { brigadeCatalog, installedBrigade, parsePluginList, readInstalledBrigade, versionStop } from "./brigade.mjs";
 import { readLedger } from "./ledger.mjs";
 import { QUIET_MS, SETTLE_MS, applyMigrations, backgroundArgs, docCheck, folderTrusted, gatePlan, gotchasFile, holdReason, implementationLogAdded, loadResults, outsideAreas, printArgs, projectGates, promptValues, pullRequestBody, recordResult, render, report, runSession, runVariables, runnerFile, screenshotsSince, sessionSettings, trimmedSettings, turnOver } from "./run.mjs";
@@ -1709,4 +1710,269 @@ test("in a lane the docs gate takes the number token for the implementation log'
   assert.equal(implementationLogAdded("docs/history/implementation-log/NNN-the-worktree.md\n", null), false, "one lane: a number, as before");
   assert.equal(implementationLogAdded("docs/history/implementation-log/NNN-the-worktree.md\n", "NNN"), true);
   assert.equal(implementationLogAdded("docs/history/devlog.md\n", "NNN"), false);
+});
+
+// ---------------------------------------------------------- the claim and the frontier (#34)
+
+/** A fake clock and pause: `pause(ms)` moves `now()` on, so a lock's wait runs out without waiting. */
+const fakeClock = (start = 1_000) => {
+  let t = start;
+  return { now: () => t, pause: (ms) => (t += ms) };
+};
+/** A process check that answers from a set: a pid outside it is gone. */
+const livePids = (...pids) => {
+  const set = new Set(pids);
+  return Object.assign((pid) => set.has(pid), { kill: (pid) => set.delete(pid) });
+};
+const claimDir = () => join(mkdtempSync(join(tmpdir(), "phase-run-claims-")), ".phase-run", "phase-x");
+const firstFree = (numbers) => (claims) => numbers.find((n) => !claims.some((claim) => claim.ticket === n)) ?? null;
+/** A ticket as loadTickets shapes it. */
+const ticketOf = (number, { labels = ["run-ready"], blockers = [] } = {}) => ({ number, title: `t${number}`, state: "open", labels, blockers: blockers.map((n) => ({ number: n, state: "open" })) });
+/** holdReason's order, with "built" a set: done, then not run-ready, then the first unbuilt blocker. */
+const holdFrom = (built) => (ticket) => (built.has(ticket.number) ? "done" : !ticket.labels.includes("run-ready") ? "not labelled run-ready" : (ticket.blockers.find((b) => !built.has(b.number)) ? `waiting on #${ticket.blockers.find((b) => !built.has(b.number)).number}` : null));
+
+async function until(check, what, ms = 20_000) {
+  const deadline = Date.now() + ms;
+  while (!check()) {
+    if (Date.now() > deadline) assert.fail(`timed out waiting for ${what}`);
+    await new Promise((done) => setTimeout(done, 10));
+  }
+}
+
+/** Two real processes take a claim at the same moment: each starts, waits for "go", takes, reports, and lives until "end", so its claim stays live. */
+async function claimAtOnce(dir, tickets) {
+  const sync = mkdtempSync(join(tmpdir(), "phase-run-race-"));
+  const at = (name) => join(sync, name);
+  const script = (i) =>
+    [
+      `import { takeClaim } from ${JSON.stringify(pathToFileURL(join(HERE, "claim.mjs")).href)};`,
+      `import { existsSync, writeFileSync } from "node:fs";`,
+      `const pause = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);`,
+      `writeFileSync(${JSON.stringify(at(`ready-${i}`))}, "");`,
+      `while (!existsSync(${JSON.stringify(at("go"))})) pause(2);`,
+      `const tickets = ${JSON.stringify(tickets)};`,
+      `const { ticket } = takeClaim({ dir: ${JSON.stringify(dir)}, lane: "${i}", at: 0, choose: (claims) => tickets.find((n) => !claims.some((c) => c.ticket === n)) ?? null });`,
+      `writeFileSync(${JSON.stringify(at(`result-${i}`))}, JSON.stringify(ticket));`,
+      `while (!existsSync(${JSON.stringify(at("end"))})) pause(5);`,
+    ].join("\n");
+  const children = [1, 2].map((i) => {
+    const child = spawn(process.execPath, ["--input-type=module", "-e", script(i)], { stdio: ["ignore", "ignore", "pipe"] });
+    let stderr = "";
+    child.stderr.on("data", (chunk) => (stderr += chunk));
+    return { child, exited: new Promise((done) => child.on("close", (code) => done({ code, stderr }))) };
+  });
+  try {
+    await until(() => existsSync(at("ready-1")) && existsSync(at("ready-2")), "both lanes to start");
+    writeFileSync(at("go"), "");
+    await until(() => existsSync(at("result-1")) && existsSync(at("result-2")), "both claims");
+    return [1, 2].map((i) => JSON.parse(readFileSync(at(`result-${i}`), "utf8")));
+  } finally {
+    writeFileSync(at("end"), "");
+    for (const { exited } of children) {
+      const { code, stderr } = await exited;
+      assert.equal(code, 0, stderr);
+    }
+  }
+}
+
+test("two lanes claiming at once: exactly one wins a ticket, and the other takes another, or none", { timeout: 60_000 }, async () => {
+  const two = await claimAtOnce(claimDir(), [5, 6]);
+  assert.deepEqual([...two].sort(), [5, 6], `each ticket claimed once (got ${JSON.stringify(two)})`);
+  const one = await claimAtOnce(claimDir(), [5]);
+  assert.deepEqual([...one].sort(), [5, null], `one lane wins #5, the other gets nothing (got ${JSON.stringify(one)})`);
+});
+
+test("the claim file sits in the primary checkout's branch folder, and a take writes the lane, its pid and the clock's time", () => {
+  const roots = laneRoots({ root: join(tmpdir(), "app"), branch: "phase-x", lane: { id: "2", worktree: "../app-lanes/lane-2" } });
+  assert.equal(claimsPath(roots.copyDir), join(tmpdir(), "app", ".phase-run", "phase-x", "claims.json"), "shared by both lanes (ADR 0007), never the worktree");
+  const dir = claimDir();
+  const { now } = fakeClock(Date.UTC(2026, 10, 10, 1, 2, 3));
+  const taken = takeClaim({ dir, lane: "2", pid: 222, at: now(), alive: livePids(222), choose: firstFree([5]) });
+  assert.equal(taken.ticket, 5);
+  assert.deepEqual(readClaims(dir), [{ ticket: 5, lane: "2", pid: 222, at: "2026-11-10T01:02:03.000Z" }]);
+  assert.equal(existsSync(join(dir, CLAIMS_LOCK)), false, "the lock is gone once the take is done");
+  const none = takeClaim({ dir, lane: "2", pid: 222, at: now(), alive: livePids(222), choose: () => null });
+  assert.equal(none.ticket, null);
+  assert.equal(readClaims(dir).length, 1, "choosing nothing claims nothing and keeps the live claims");
+});
+
+test("a claim held by a process that is gone lapses, and the ticket can be claimed again", () => {
+  const dir = claimDir();
+  const alive = livePids(111, 222);
+  assert.equal(takeClaim({ dir, lane: "1", pid: 111, at: 0, alive, choose: firstFree([5]) }).ticket, 5);
+  assert.equal(takeClaim({ dir, lane: "2", pid: 222, at: 0, alive, choose: firstFree([5]) }).ticket, null, "held while lane 1 lives");
+  alive.kill(111);
+  const again = takeClaim({ dir, lane: "2", pid: 222, at: 0, alive, choose: firstFree([5]) });
+  assert.equal(again.ticket, 5, "lane 1 died: its claim lapsed");
+  assert.deepEqual(readClaims(dir).map(({ ticket, lane }) => ({ ticket, lane })), [{ ticket: 5, lane: "2" }], "the lapsed claim is dropped from the file");
+  assert.deepEqual(liveClaims(readClaims(dir), livePids()), [], "and a claim lapses for every reader, not only on a take");
+});
+
+test("the claim file changes only under the lock: a dead holder's lock is broken, a live holder's is waited on and then refused", () => {
+  const dir = claimDir();
+  mkdirSync(dir, { recursive: true });
+  const lock = join(dir, CLAIMS_LOCK);
+  writeFileSync(lock, `${JSON.stringify({ pid: 333, token: "dead" })}\n`);
+  const clock = fakeClock();
+  assert.equal(withClaimLock(dir, () => "ran", { pid: 222, alive: livePids(222), ...clock }), "ran", "pid 333 is gone: its lock is broken");
+  assert.equal(existsSync(lock), false);
+
+  writeFileSync(lock, `${JSON.stringify({ pid: 333, token: "live" })}\n`);
+  let ran = false;
+  const message = refusal(() => withClaimLock(dir, () => (ran = true), { pid: 222, alive: livePids(222, 333), ...fakeClock(), waitMs: 1_000 }));
+  assert.equal(ran, false, "nothing runs without the lock");
+  assert.match(message, /claims\.lock/, "the refusal names the lock");
+  assert.match(message, /333/, "and its holder");
+  assert.equal(JSON.parse(readFileSync(lock, "utf8")).token, "live", "a live holder's lock is never broken");
+
+  rmSync(lock);
+  assert.throws(() => withClaimLock(dir, () => assert.fail("a failing take"), { pid: 222, alive: livePids(222), ...fakeClock() }));
+  assert.equal(existsSync(lock), false, "released when the take throws");
+
+  // A lock its maker died before writing is empty: waited on for the grace, then broken, never spun on.
+  writeFileSync(lock, "");
+  let pauses = 0;
+  const empty = fakeClock();
+  assert.equal(withClaimLock(dir, () => "ran", { pid: 222, alive: livePids(222), now: empty.now, pause: (ms) => (pauses += 1, empty.pause(ms)) }), "ran");
+  assert.equal(pauses, UNREADABLE_GRACE_MS / 50, "it paused until the grace ran out, then broke the lock");
+  // A lock naming this very process is a leftover: a take never nests.
+  writeFileSync(lock, `${JSON.stringify({ pid: 222, token: "old" })}\n`);
+  assert.equal(withClaimLock(dir, () => "ran", { pid: 222, alive: livePids(222), ...fakeClock() }), "ran");
+});
+
+test("two lanes never wait on each other: a waiting lane is listed, and the other lane, looking next, stops", async () => {
+  const dir = claimDir();
+  const alive = livePids(111, 222);
+  // Each lane holds a built, unlanded ticket (nothing releases a claim before #37), and each one's
+  // next ticket waits on the other's: #6 (core) on lane 2's #7, #8 (walk) on lane 1's #5.
+  const core = ["run-ready", "core"];
+  const tickets = [ticketOf(5, { labels: core }), ticketOf(6, { labels: core, blockers: [7] }), ticketOf(7, { labels: ["run-ready", "walk"] }), ticketOf(8, { labels: ["run-ready", "walk"], blockers: [5] })];
+  const byNumber = new Map(tickets.map((t) => [t.number, t]));
+  takeClaim({ dir, lane: "1", pid: 111, at: 0, alive, choose: firstFree([5]) });
+  takeClaim({ dir, lane: "2", pid: 222, at: 0, alive, choose: firstFree([7]) });
+  const rows = { 1: { id: "1", takes: "core" }, 2: { id: "2", takes: "walk" } };
+  const pids = { 1: 111, 2: 222 };
+  const look = (self, sleep) =>
+    claimNext({
+      dir,
+      lane: self,
+      pid: pids[self],
+      alive,
+      now: () => 0,
+      sleep,
+      pollMs: 1,
+      choose: (claims, idle) => laneChoice({ tickets, byNumber, hold: holdFrom(new Set()), done: () => false, takes: rows[self].takes, claims, self, idle, others: Object.values(rows).filter((row) => row.id !== self && alive(pids[row.id])) }),
+    });
+  let lane2 = null;
+  const lane1 = await look("1", async () => {
+    assert.deepEqual(JSON.parse(readFileSync(claimsPath(dir), "utf8")).waiting, [{ lane: "1", pid: 111 }], "lane 1 waits, and says so");
+    lane2 = await look("2", async () => assert.fail("lane 2 never waits on a lane that is waiting"));
+    alive.kill(222); // lane 2 stops and exits
+  });
+  assert.equal(lane2.ticket, null, "lane 2 stopped at once");
+  assert.equal(lane1.ticket, null, "then lane 1, as no live lane can land #7");
+  assert.deepEqual(JSON.parse(readFileSync(claimsPath(dir), "utf8")).waiting, [], "a lane that stops is no longer listed");
+});
+
+test("a ticket whose commit is on the phase branch is built; an unlanded one on a lane's branch is not, whichever worktree asks", () => {
+  const { root, git, put, roots, start } = laneProject();
+  start();
+  put(roots.tree, { "feature.md": "the ticket\n" });
+  git(roots.tree, "add", "feature.md");
+  git(roots.tree, "commit", "-q", "-m", "feat: the ticket — Closes #7");
+  const gitIn = (cwd) => (...args) => {
+    const result = spawnSync("git", args, { cwd, encoding: "utf8" });
+    return { ok: result.status === 0, stdout: (result.stdout ?? "").trim() };
+  };
+  assert.equal(builtOn(gitIn(roots.tree), "HEAD", 7), true, "today's reading, HEAD, would count the lane's own unlanded pass");
+  assert.equal(builtOn(gitIn(roots.tree), "phase-x", 7), false, "asked from the lane's worktree");
+  assert.equal(builtOn(gitIn(root), "phase-x", 7), false, "asked from the primary checkout");
+  git(root, "branch", "-f", "phase-x", "phase-x-lane-2"); // landed
+  assert.equal(builtOn(gitIn(roots.tree), "phase-x", 7), true);
+  assert.equal(builtOn(gitIn(root), "phase-x", 7), true);
+  assert.equal(builtOn(gitIn(root), "phase-x", 70), false, "#7's commit never counts for #70");
+});
+
+test("a lane whose row takes a label never claims a ticket without it; a row that takes any claims any ready ticket", () => {
+  const plain = ticketOf(5);
+  const walk = ticketOf(6, { labels: ["run-ready", "walk"] });
+  const tickets = [plain, walk];
+  const byNumber = new Map(tickets.map((t) => [t.number, t]));
+  const choose = (takes, claims = []) => laneChoice({ tickets, byNumber, hold: holdFrom(new Set()), done: () => false, takes, claims, self: "2" });
+  assert.equal(takesTicket("walk", plain), false);
+  assert.equal(takesTicket("any", plain), true);
+  assert.equal(choose("walk").ticket.number, 6, "the walk lane passes over #5");
+  assert.equal(choose("walk", [{ ticket: 6, lane: "1", pid: 1 }]).ticket, null, "and never falls back to it");
+  assert.equal(choose("any").ticket.number, 5, "any: the first ready ticket, in order");
+  assert.equal(choose("any", [{ ticket: 5, lane: "1", pid: 1 }]).ticket.number, 6, "a claimed ticket is passed over, a label ticket taken");
+  assert.equal(laneChoice({ tickets: [ticketOf(8, { labels: ["walk"] })], byNumber, hold: holdFrom(new Set()), done: () => false, takes: "walk", claims: [], self: "2" }).ticket, null, "the label alone is not ready: run-ready still holds");
+});
+
+test("a lane with nothing ready waits while a live lane holds a claim that could unblock it, and stops when none can", async () => {
+  const dir = claimDir();
+  const alive = livePids(111, 222);
+  // Lane 1 has #5. #7 (walk) waits on #6, which waits on #5: lane 1's #5 could unblock it.
+  const tickets = [ticketOf(5), ticketOf(6, { blockers: [5] }), ticketOf(7, { labels: ["run-ready", "walk"], blockers: [6] }), ticketOf(9)];
+  const byNumber = new Map(tickets.map((t) => [t.number, t]));
+  assert.equal(takeClaim({ dir, lane: "1", pid: 111, at: 0, alive, choose: firstFree([5]) }).ticket, 5);
+  const built = new Set();
+  // The other lanes still running, as their rows: lane 1 takes any ticket while pid 111 lives.
+  const lane1 = (takes = "any") => (alive(111) ? [{ id: "1", takes }] : []);
+  const chooser = (others) => (claims) => laneChoice({ tickets, byNumber, hold: holdFrom(built), done: (b) => built.has(b.number), takes: "walk", claims, self: "2", others: others() });
+  const lane2 = ({ dir: at = dir, sleep, waits = [], others = () => lane1() }) =>
+    claimNext({ dir: at, lane: "2", pid: 222, alive, now: () => 0, sleep, pollMs: 30_000, onWait: (waitOn) => waits.push(waitOn.map((w) => `${w.lane}:#${w.ticket}${w.claimed ? "" : "?"}`).join(",")), choose: chooser(others) });
+
+  // #5 lands, then #6 (which lane 1 may still take), while lane 2 waits: #7 is ready, and lane 2 claims it.
+  const waits = [];
+  let slept = 0;
+  const landed = await lane2({
+    waits,
+    sleep: async (ms) => {
+      assert.equal(ms, 30_000, "the injected pause, never a real one");
+      slept += 1;
+      if (slept === 1) built.add(5);
+      if (slept === 2) built.add(6);
+    },
+  });
+  assert.equal(landed.ticket, 7);
+  assert.equal(slept, 2);
+  assert.deepEqual(waits, ["1:#6?,1:#5", "1:#6?"], "#6, which lane 1 takes and may still land, and lane 1's claim on #5; then #6 alone");
+  assert.ok(readClaims(dir).some((claim) => claim.ticket === 7 && claim.lane === "2"));
+
+  // Lane 1 lives, but its claim is on #9 and it takes only "docs": nothing on #7's chain can land. It stops at once.
+  const dir2 = claimDir();
+  built.clear();
+  takeClaim({ dir: dir2, lane: "1", pid: 111, at: 0, alive, choose: firstFree([9]) });
+  const unrelated = await lane2({ dir: dir2, others: () => lane1("docs"), sleep: async () => assert.fail("never waits") });
+  assert.equal(unrelated.ticket, null);
+
+  // Lane 1 dies while lane 2 waits: its claim lapses, no live lane can land #5, and lane 2 stops.
+  const dir3 = claimDir();
+  takeClaim({ dir: dir3, lane: "1", pid: 111, at: 0, alive, choose: firstFree([5]) });
+  let deaths = 0;
+  const stopped = await lane2({ dir: dir3, sleep: async () => (deaths += 1, alive.kill(111)) });
+  assert.equal(stopped.ticket, null);
+  assert.equal(deaths, 1, "one wait, then the stop");
+
+  // A lane never waits on its own claim: it cannot land it while it waits.
+  const own = laneChoice({ tickets, byNumber, hold: holdFrom(new Set()), done: () => false, takes: "any", claims: [{ ticket: 5, lane: "2", pid: 222 }], self: "2", others: [] });
+  assert.equal(own.ticket.number, 9, "any: #9 is ready");
+  const ownOnly = laneChoice({ tickets: tickets.slice(0, 3), byNumber, hold: holdFrom(new Set()), done: () => false, takes: "any", claims: [{ ticket: 5, lane: "2", pid: 222 }], self: "2", others: [] });
+  assert.deepEqual(ownOnly, { ticket: null, waitOn: [] });
+  // A parked ticket on the chain is no one's to land: no wait for it.
+  const parked = ticketOf(6, { labels: ["needs-info"], blockers: [] });
+  const chain = [ticketOf(5, { labels: [] }), parked, ticketOf(7, { labels: ["run-ready", "walk"], blockers: [6] })];
+  const parkedChoice = laneChoice({ tickets: chain, byNumber: new Map(chain.map((t) => [t.number, t])), hold: holdFrom(new Set()), done: () => false, takes: "walk", claims: [], self: "2", others: [{ id: "1", takes: "any" }] });
+  assert.deepEqual(parkedChoice, { ticket: null, waitOn: [] });
+});
+
+test("a run without lanes picks tickets as today: the first ready one in order, built read off HEAD; a lane reads the phase branch", () => {
+  const source = readFileSync(join(HERE, "run.mjs"), "utf8").replace(/\r\n/g, "\n"); // a Windows checkout may have CRLF
+  const body = (name) => source.slice(source.indexOf(`function ${name}(`), source.indexOf("\n}\n", source.indexOf(`function ${name}(`)));
+  assert.match(body("nextTicket"), /^function nextTicket\([^)]*\) \{\n {2}if \(!lane\) return inScope\.find\(\(ticket\) => holdReason\(ticket, byNumber\) === null\);/, "one lane: today's pick, before any claim");
+  assert.match(source, /let builtRef = "HEAD";/, "one lane: main..HEAD, as before");
+  assert.match(source, /if \(lane\) builtRef = branch;/, "a lane: the phase branch, never its own");
+  assert.match(body("builtOnBranch"), /builtOn\(gitTry, builtRef, number\)/);
+  // The claim file is run state: the primary checkout's, never the worktree's (ADR 0007).
+  assert.match(source, /claims: roots \? roots\.copyDir : null/);
 });

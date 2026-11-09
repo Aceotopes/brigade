@@ -33,4 +33,5 @@ plain. The index below is generated.
 - `#31` the snapshot carries doc-check, `template/tools/phase-run/snapshot.mjs` `docTools` / `runnerCode`, `template/tools/doc-lib.mjs` `TOOLS_ROOT` / `checkedRoot`, `run.mjs` `docCheck`, `hooks/guard-shell.mjs`
 - `#32` the lane declaration, `template/tools/phase-run/ticket-size.mjs` `laneProblems`, `skills/ticket-check/SKILL.md`, the ticket template
 - `#33` the worktree, `template/tools/phase-run/lane.mjs`, `run.mjs` `work` / `sessionState` / `runVariables` / `main`, `config.mjs` `laneQaUrl`
+- `#34` the claim and the frontier, `template/tools/phase-run/claim.mjs` `withClaimLock` / `takeClaim` / `laneChoice` / `claimNext` / `builtOn`, `run.mjs` `nextTicket` / `builtRef`
 <!-- generated:end gotchas -->

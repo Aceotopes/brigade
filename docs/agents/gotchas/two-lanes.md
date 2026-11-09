@@ -48,3 +48,13 @@ listed in the gotchas index, `docs/agents/gotchas/README.md`.
 - `prepareWorktree` refuses a lane branch ahead of the phase branch: a reset would lose an unlanded pass. #37 lands them first instead, and must reset the lane branch after a replay, or the new hashes keep refusing.
 - A lane's runner copy is taken from its worktree at the phase tip, never the primary's working tree, which a lane leaves on any branch. The lane's database is `laneDatabase` only (gotcha #29).
 - In a lane, `./` in a permission rule is the worktree. The run's folder in the primary is denied by its absolute `//` form (`//d/…` on Windows). pinned: the lane section.
+
+**`#34` — the claim and the frontier, `template/tools/phase-run/claim.mjs` `withClaimLock` / `takeClaim` / `laneChoice` / `claimNext` / `builtOn`, `run.mjs` `nextTicket` / `builtRef` (built 2026-11-10):**
+- The choice runs inside the lock (`takeClaim`'s `choose`): read the claims, choose, write. A choice made before the lock lets two lanes take one ticket. pinned: `template/tools/phase-run/run.test.mjs` (two real processes).
+- Nothing releases a claim yet: it lives until its lane's process exits. #37 releases it on land or park, and must do it under `withClaimLock`. pinned: none.
+- A claim lapses on `pidAlive` alone. A reused pid keeps a dead lane's claim alive until that process exits. pinned: none.
+- "Built" in a lane is `main..<phase branch>` (`builtRef`); a one-lane run keeps `main..HEAD`. Code that reads "built" goes through `builtOnBranch`, never its own `git log`. pinned: the claim section (source pin).
+- A lane waits on another live lane's takes, not only its claims: a blocker that lane 1 may take next keeps lane 2 waiting. The loop ends when the other lane stops and exits. pinned: the claim section.
+- A waiting lane is listed in the claim file's `waiting`, in the same locked write as its look, and the other lane counts neither its claims nor its takes (`idle`). Drop that and two lanes holding each other's blockers wait forever. pinned: the claim section ("never wait on each other").
+- The lock is broken when its pid is gone, is the caller's own, or it stays empty past `UNREADABLE_GRACE_MS`. A live lock moved aside by mistake is written back by `wx`, never `linkSync`, which some file systems lack. pinned: the claim section (the lock test).
+- The source pins in `run.test.mjs` normalize CRLF first: a Windows checkout of `run.mjs` has CRLF, and `"\n}\n"` never matches there.

@@ -9,6 +9,17 @@ Each commit's entry goes on top, in the shape of `docs/_templates/devlog-entry.m
 message cites it (`devlog #N`). At each phase end, `node tools/doc-rotate.mjs` moves the closed
 entries into `docs/history/devlog/`.
 
+## #35 · feat · the claim and the frontier: two lanes never build the same ticket
+
+**Built:** #34. A lane claims its ticket before it builds it, from its frontier (Goal 3, D6, ADR 0007).
+- `claim.mjs`: one claim file per branch in the primary checkout, changed only under an exclusive-create lock; a dead process's claims lapse.
+- The frontier: ready tickets its row `takes` that no live claim holds, chosen inside the lock.
+- With none ready, a lane waits while another live lane may still land a blocker, and stops when none can; two lanes never wait on each other.
+- "Built" is read off the phase branch in a lane; a one-lane run still reads `main..HEAD` and picks as before.
+**Verified:** 9 tests at the runner seam, written first, with the clock and the process check
+injected and the race run in two real processes; the plugin's and the template's suites pass;
+doc-check clean; the code review's fixes folded in. **Next:** #35. **Record:** implementation log 020.
+
 ## #34 · feat · the worktree: run.mjs --lane builds in a lane's own worktree, each pass unlanded
 
 **Built:** #33. A lane runs its tickets in its own git worktree, with its ports, QA database, prefix and env (D8, D13).
