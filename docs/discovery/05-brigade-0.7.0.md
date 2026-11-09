@@ -1,5 +1,53 @@
 # Discovery: Brigade 0.7.0, two lanes
 
+> **Addendum 2026-11-09 (the probe, #28): seven yes, and the eighth names a row, so the port
+> goes on.** Run on Claude Code 2.1.319 and Brigade 0.6.2, installed from `aceotopes` at project
+> scope in a scratch repo (`claude plugin install brigade@aceotopes --scope project`, no
+> `--plugin-dir`). The worktree came from `git worktree add ../probe-lanes/lane-2 -b lane-2`. Its
+> session was started from that folder with the night's flags (`claude --bg --name …
+> --permission-mode dontAsk --settings <file>`, sessionSettings' shape: `PHASE_RUN=1`,
+> `PHASE_RUN_ROOT` = the worktree, `bgIsolation: "none"`, `--model claude-haiku-5-5`). Both the
+> scratch repo and the worktree were removed afterwards.
+> 1. **Session, hooks and writes in the worktree: yes.** `claude agents --json` listed its `cwd`
+>    as the worktree, every transcript line's `cwd` was the worktree, and its `probe-1.txt` landed
+>    there. The primary's `git status` stayed clean.
+> 2. **`--bg --resume` keeps it there: yes.** `claude stop <id>`, then `claude --bg --resume
+>    <full id> "<ask>"` from the worktree printed `woke session <id> with its saved options`. It
+>    was the same id with no copy, its one transcript grew from 88 to 136 lines, and turn 2's
+>    `cwd` was the worktree. The runner's checks (the id echoed, no "started a copy") read this
+>    output correctly.
+> 3. **No trust prompt under `dontAsk`: yes, nothing waits.** With the primary untrusted, the
+>    launch exits 1 with `Workspace not trusted. Run claude in <worktree> once…`. Once the owner
+>    had trusted the primary by hand, the worktree started without a prompt, and it never got a
+>    `~/.claude.json` entry of its own: it rides on the primary's trust.
+> 4. **The transcript is in the worktree's own projects folder: yes.**
+>    `ls ~/.claude/projects/*/<id>.jsonl` found one, under
+>    `D--HGP-brigade-trials-probe-lanes-lane-2`.
+> 5. **`local` reads the worktree's settings: yes.** Each checkout's untracked
+>    `.claude/settings.local.json` set `PROBE_LOCAL` (`primary`, `worktree`), and both the
+>    session's shell and its Stop hook read `worktree`.
+> 6. **A project-scope Brigade loads in the sibling worktree, and runs its hooks there: yes.** The
+>    worktree has only the tracked `.claude/settings.json` `enabledPlugins`, and the installs list
+>    names only the primary. Still, `git commit --no-verify` was refused there by
+>    `…\plugins\cache\aceotopes\brigade\0.6.2/hooks/guard-shell.mjs`. The stop gate ran the
+>    worktree's `stopGate` check and wrote `.phase-run/stop-check-log.jsonl` in the worktree.
+> 7. **`CLAUDE_PROJECT_DIR` is the worktree: yes, in the hooks.** The stop check (`node
+>    probe-hook.mjs`, writing its env to a file) saw
+>    `D:/HGP/brigade-trials/probe-lanes/lane-2` (forward slashes), with its `cwd` the worktree.
+>    The session's own Bash tool has no `CLAUDE_PROJECT_DIR` at all, so a session's commands read
+>    `PHASE_RUN_ROOT`.
+> 8. **The lane's Brigade version comes from the primary checkout's row.** `claude plugin list
+>    --json`, run from the worktree, lists no row for it. `installedBrigade(rows, <worktree>)`
+>    returns null, and `installedBrigade(rows, <primary>)` returns `0.6.2`.
+>
+> **Handed to #33** (what this changes in how the lane code is built; no decision changes):
+> - the runner's trust check (`folderTrusted`, an exact path) and its version read take the
+>   primary checkout's root, never the worktree's: for a worktree, one reads false and the other
+>   null;
+> - this is ADR 0007's split as it stands.
+>
+> **Changes:** the open question "The probe's answers". D8, D13 and ADR 0007 stand.
+
 > **Addendum 2026-11-09:** the owner dropped the build gate. 0.7.0 no longer waits for a real
 > project's first 0.6.x night (Block23GymV2's), and its build starts with the probe (#28). So the
 > first time 0.6.0's snapshot, side-by-side gates and tampering gate meet a real night is 0.7.0's

@@ -9,6 +9,19 @@ Each commit's entry goes on top, in the shape of `docs/_templates/devlog-entry.m
 message cites it (`devlog #N`). At each phase end, `node tools/doc-rotate.mjs` moves the closed
 entries into `docs/history/devlog/`.
 
+## #29 · docs · the probe: a lane under the installed plugin
+
+**Built:** #28, run attended on Claude Code 2.1.319 with Brigade 0.6.2 installed at project scope in
+a scratch repo, plus a sibling worktree whose `--bg` session had the night's flags. Seven answers are
+yes, and the eighth names a row. The session, its hooks, its writes, its transcript and its local settings were all the
+worktree's, and they stayed there through a resume. An untrusted folder is refused, never prompted,
+and a worktree rides on its primary's trust. `CLAUDE_PROJECT_DIR` in its hooks was the worktree. The
+version read and the trust check will need the primary's root. Discovery 05 gains the addendum; the
+handoff names the phase run next.
+**Verified:** each answer read off the session's own files, its transcript and `claude agents
+--json`; the scratch repo, worktree and install removed, the real install untouched; doc-check clean.
+**Next:** #27's phase run, #29 first. **Record:** discovery 05's probe addendum.
+
 ## #28 · docs · 0.7.0 no longer waits for a real project's night
 
 **Built:** the owner dropped D17, the build gate. Discovery 05 gains a dated addendum saying so.
