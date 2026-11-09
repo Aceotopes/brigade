@@ -9,6 +9,17 @@ Each commit's entry goes on top, in the shape of `docs/_templates/devlog-entry.m
 message cites it (`devlog #N`). At each phase end, `node tools/doc-rotate.mjs` moves the closed
 entries into `docs/history/devlog/`.
 
+## #36 · feat · the fingerprint: a browser-check pass records what it judged
+
+**Built:** #35. A browser-check pass records a fingerprint, for Landing to carry it over a rebase (D12, ADR 0008).
+- `fingerprint.mjs`: a sha256 of each changed file under the check's own `sourceFiles`, and of each counted screenshot.
+- `compareFingerprint` says "carry" on an unchanged tree, or "re-check", naming the file that changed or the screenshot gone.
+- `run.mjs`: the gate is `browserCheckVerdict`, and the built result gains `fingerprint` only on a pass.
+- A ticket with no browser check records none, and its result is as before.
+**Verified:** 5 tests at the runner seam, the first 4 written first, on temp trees with fixed times;
+the plugin's and the template's suites pass; doc-check clean; the code review's fixes folded in.
+**Next:** #36. **Record:** implementation log 021.
+
 ## #35 · feat · the claim and the frontier: two lanes never build the same ticket
 
 **Built:** #34. A lane claims its ticket before it builds it, from its frontier (Goal 3, D6, ADR 0007).

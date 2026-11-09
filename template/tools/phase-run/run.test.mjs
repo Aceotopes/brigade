@@ -11,9 +11,10 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { BROWSER_CHECK, fill, laneQaUrl, loadRunConfig, parseRunConfig, qaUrl, sessionEnv, targetFingerprint, targetUrl } from "./config.mjs";
 import { afterPass, ignoredImports, ignoredImportsProblem, joinBranch, laneLockPath, lanePortProblems, laneRoots, laneRow, laneValues, liveLanes, mayFinishCopy, prepareWorktree, setupWorktree, writeLaneLock } from "./lane.mjs";
 import { CLAIMS_LOCK, UNREADABLE_GRACE_MS, builtOn, claimNext, claimsPath, laneChoice, liveClaims, readClaims, takeClaim, takesTicket, withClaimLock } from "./claim.mjs";
+import { compareFingerprint } from "./fingerprint.mjs";
 import { brigadeCatalog, installedBrigade, parsePluginList, readInstalledBrigade, versionStop } from "./brigade.mjs";
 import { readLedger } from "./ledger.mjs";
-import { QUIET_MS, SETTLE_MS, applyMigrations, backgroundArgs, docCheck, folderTrusted, gatePlan, gotchasFile, holdReason, implementationLogAdded, loadResults, outsideAreas, printArgs, projectGates, promptValues, pullRequestBody, recordResult, render, report, runSession, runVariables, runnerFile, screenshotsSince, sessionSettings, trimmedSettings, turnOver } from "./run.mjs";
+import { QUIET_MS, SETTLE_MS, applyMigrations, backgroundArgs, browserCheckVerdict, docCheck, folderTrusted, gatePlan, gotchasFile, holdReason, implementationLogAdded, loadResults, outsideAreas, printArgs, projectGates, promptValues, pullRequestBody, recordResult, render, report, runSession, runVariables, runnerFile, screenshotsSince, sessionSettings, trimmedSettings, turnOver } from "./run.mjs";
 import { finishSnapshot, readManifest, runnerChanges, takeSnapshot } from "./snapshot.mjs";
 import { PATCH_ARGS } from "./tampering.mjs";
 import { TRIM_FLAGS, readTrim, trimPath } from "./trim.mjs";
@@ -1569,9 +1570,9 @@ test("a passing ticket's commit stays on the lane's branch: the phase branch doe
   assert.deepEqual(afterPass(laneRow(runConfig(LANES), "2")), { push: false, migrate: false }, "Landing pushes and migrates (ADR 0008)");
   assert.deepEqual(afterPass(null), { push: true, migrate: true }, "a run without --lane, as before");
   // The gates and finishBuilt call git and gh, so the seam is pinned in the source, as docCheck's is.
-  const source = readFileSync(join(HERE, "run.mjs"), "utf8");
+  const source = readFileSync(join(HERE, "run.mjs"), "utf8").replace(/\r\n/g, "\n"); // a Windows checkout may have CRLF
   const body = (name) => source.slice(source.indexOf(`async function ${name}(`), source.indexOf("\n}\n", source.indexOf(`async function ${name}(`)));
-  assert.match(body("runGates"), /if \(!afterPass\(lane\)\.migrate\) \{[\s\S]*?return \{ ok: true \};/, "the migration is skipped before it is applied");
+  assert.match(body("runGates"), /if \(!afterPass\(lane\)\.migrate\) \{[\s\S]*?return \{ ok: true, fingerprint \};/, "the migration is skipped before it is applied");
   assert.match(body("finishBuilt"), /const pushing = afterPass\(lane\)\.push;[\s\S]*const push = pushing \? gitTry\("push"/, "the push waits on afterPass");
   // A restart would reset over it: it is refused, naming the commit, until Landing lands it.
   assert.match(refusal(start), /phase-x-lane-2 holds commits phase-x does not have[\s\S]*feat: the ticket — Closes #7/);
@@ -1975,4 +1976,106 @@ test("a run without lanes picks tickets as today: the first ready one in order, 
   assert.match(body("builtOnBranch"), /builtOn\(gitTry, builtRef, number\)/);
   // The claim file is run state: the primary checkout's, never the worktree's (ADR 0007).
   assert.match(source, /claims: roots \? roots\.copyDir : null/);
+});
+
+// ------------------------------------------------------------------ the fingerprint (#35)
+
+const SHA_X = "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881"; // sha256("x")
+const SHA_SHOT = "8dccea5217902053b636f0e105c590eb30db4280b8a7a51806110f7ff7b5177e"; // sha256("shot")
+/** A project whose screens live in `app/`, not `src/`: the browser check's own paths decide what is source. */
+const appCheck = () => runConfig({ browserCheck: { screenFiles: "^app/", sourceFiles: "^app/", screenshots: "shots/{N}", minimum: 1, redo: "walk it" } }).browserCheck;
+
+/**
+ * A ticket's tree after a pass: app/page.tsx changed, app/gone.tsx deleted, a devlog edit, one
+ * screenshot from before the last source edit, and one after it, in a subfolder. Fixed times only.
+ */
+function passedTree() {
+  const root = mkdtempSync(join(tmpdir(), "phase-run-print-"));
+  const put = (rel, body, at) => {
+    mkdirSync(dirname(join(root, rel)), { recursive: true });
+    writeFileSync(join(root, rel), body);
+    utimesSync(join(root, rel), new Date(at), new Date(at));
+  };
+  put("shots/35/old.png", "stale", 1000_000);
+  put("app/page.tsx", "x", 2000_000);
+  put("docs/history/devlog.md", "notes", 2500_000);
+  put("shots/35/wide/1280.png", "shot", 3000_000);
+  return { root, put, changed: ["app/page.tsx", "app/gone.tsx", "docs/history/devlog.md"] };
+}
+const ticket35 = (labels = ["run-ready"]) => ({ number: 35, labels });
+
+test("a browser-check pass records a hash of each changed source file under the check's paths, and of each counted screenshot", () => {
+  const { root, changed } = passedTree();
+  const verdict = browserCheckVerdict({ check: appCheck(), ticket: ticket35(), changed, startedAt: 0, root });
+  assert.equal(verdict.problem, null);
+  assert.deepEqual(verdict.fingerprint, {
+    // A file the ticket deleted is recorded as gone; the devlog is not source; the stale shot does not count.
+    sources: { "app/page.tsx": SHA_X, "app/gone.tsx": null },
+    screenshots: { "shots/35/wide/1280.png": SHA_SHOT },
+  });
+});
+
+test("a fingerprint carries on a tree where all its files are unchanged, and says re-check, naming the file, when one changed or a counted screenshot is gone", () => {
+  const { root, put, changed } = passedTree();
+  const { fingerprint } = browserCheckVerdict({ check: appCheck(), ticket: ticket35(), changed, startedAt: 0, root });
+  assert.deepEqual(compareFingerprint(fingerprint, root), { verdict: "carry" });
+  // Files the fingerprint never judged may change: the devlog, the stale screenshot.
+  put("docs/history/devlog.md", "more notes", 4000_000);
+  put("shots/35/old.png", "other", 4000_000);
+  assert.deepEqual(compareFingerprint(fingerprint, root), { verdict: "carry" });
+
+  put("app/page.tsx", "y", 5000_000);
+  assert.deepEqual(compareFingerprint(fingerprint, root), { verdict: "re-check", file: "app/page.tsx", why: "changed" });
+  put("app/page.tsx", "x", 5000_000);
+
+  put("app/gone.tsx", "back", 5000_000);
+  assert.deepEqual(compareFingerprint(fingerprint, root), { verdict: "re-check", file: "app/gone.tsx", why: "changed" });
+  rmSync(join(root, "app/gone.tsx"));
+
+  rmSync(join(root, "shots/35/wide/1280.png"));
+  assert.deepEqual(compareFingerprint(fingerprint, root), { verdict: "re-check", file: "shots/35/wide/1280.png", why: "gone" });
+  put("shots/35/wide/1280.png", "another walk", 5000_000);
+  assert.deepEqual(compareFingerprint(fingerprint, root), { verdict: "re-check", file: "shots/35/wide/1280.png", why: "changed" });
+});
+
+test("which files count as source is the browser check's sourceFiles, never a fixed src/", () => {
+  const { root, put } = passedTree();
+  put("src/legacy.ts", "x", 2000_000);
+  const changed = ["app/page.tsx", "src/legacy.ts"];
+  const { fingerprint } = browserCheckVerdict({ check: appCheck(), ticket: ticket35(), changed, startedAt: 0, root });
+  assert.deepEqual(Object.keys(fingerprint.sources), ["app/page.tsx"]);
+  const srcCheck = runConfig({ browserCheck: { screenFiles: "^app/", sourceFiles: "^src/", screenshots: "shots/{N}", minimum: 1, redo: "walk it" } }).browserCheck;
+  assert.deepEqual(browserCheckVerdict({ check: srcCheck, ticket: ticket35(), changed, startedAt: 0, root }).fingerprint.sources, { "src/legacy.ts": SHA_X });
+});
+
+test("a ticket with no browser check records no fingerprint, and a failed check records none", () => {
+  const { root } = passedTree();
+  // No screen file changed and no frontend label: the check does not apply.
+  assert.deepEqual(browserCheckVerdict({ check: appCheck(), ticket: ticket35(), changed: ["docs/history/devlog.md"], startedAt: 0, root }), { problem: null, fingerprint: null });
+  // A project with no browser check at all.
+  assert.deepEqual(browserCheckVerdict({ check: null, ticket: ticket35(["frontend"]), changed: ["app/page.tsx"], startedAt: 0, root }), { problem: null, fingerprint: null });
+  // A failed check: today's problem text, and no fingerprint.
+  const failed = browserCheckVerdict({ check: appCheck(), ticket: ticket35(["frontend"]), changed: ["app/page.tsx"], startedAt: 9000_000, root });
+  assert.equal(failed.fingerprint, null);
+  assert.match(failed.problem, /^This ticket changes what a screen shows, and shots\/35\/ holds 0 screenshot\(s\) saved after your last edit/);
+
+  // The result gains the key only with a fingerprint: a ticket without one has a result as before.
+  // Both of runGates' passing returns (a lane's, and the one after the migration) carry it.
+  const source = readFileSync(join(HERE, "run.mjs"), "utf8").replace(/\r\n/g, "\n");
+  const body = (name) => source.slice(source.indexOf(`async function ${name}(`), source.indexOf("\n}\n", source.indexOf(`async function ${name}(`)));
+  assert.match(body("finishBuilt"), /\.\.\.\(fingerprint \? \{ fingerprint \} : \{\}\)/);
+  assert.equal(body("runGates").match(/return \{ ok: true, fingerprint \};/g)?.length, 2);
+  assert.doesNotMatch(body("runGates"), /return \{ ok: true \}/);
+});
+
+test("a fingerprint's paths keep one separator, and a changed path that is a folder is recorded as no file, never a crash", () => {
+  const { root, put } = passedTree();
+  mkdirSync(join(root, "app", "vendor"), { recursive: true }); // a submodule's folder
+  utimesSync(join(root, "app", "vendor"), new Date(2000_000), new Date(2000_000)); // fixed, before the shot
+  const slash = runConfig({ browserCheck: { screenFiles: "^app/", sourceFiles: "^app/", screenshots: "shots/{N}/", minimum: 1, redo: "walk it" } }).browserCheck;
+  const { fingerprint } = browserCheckVerdict({ check: slash, ticket: ticket35(), changed: ["app/page.tsx", "app/vendor"], startedAt: 0, root });
+  assert.deepEqual(fingerprint, { sources: { "app/page.tsx": SHA_X, "app/vendor": null }, screenshots: { "shots/35/wide/1280.png": SHA_SHOT } });
+  assert.deepEqual(compareFingerprint(fingerprint, root), { verdict: "carry" });
+  put("app/page.tsx", "y", 5000_000);
+  assert.equal(compareFingerprint(fingerprint, root).file, "app/page.tsx");
 });

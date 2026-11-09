@@ -10,6 +10,7 @@ what was built, why it works that way, and how to say it out loud. The index bel
 <!-- generated:start implementation-log -->
 ### Current phase
 
+- [021](021-the-fingerprint.md) · `#35` · 2026-11-10 · The fingerprint: a browser-check pass records what it judged
 - [020](020-the-claim-and-the-frontier.md) · `#34` · 2026-11-10 · The claim and the frontier: two lanes never build the same ticket
 - [019](019-the-worktree.md) · `#33` · 2026-11-10 · The worktree: `run.mjs --lane <id>` builds in a lane's own worktree and keeps each pass unlanded
 - [018](018-lane-declaration.md) · `#32` · 2026-11-09 · The lane declaration: a `## Lane` holds only on a ticket with its lane's label

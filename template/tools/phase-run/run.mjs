@@ -38,12 +38,13 @@ import {
 } from "node:fs";
 import net from "node:net";
 import { homedir } from "node:os";
-import { dirname, join, relative, resolve } from "node:path";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { BROWSER_CHECK, HOTSPOT_TOKEN, fill, fillEnv, laneQaUrl, loadRunConfig, sessionEnv as pinnedEnv, targetFingerprint, targetUrl } from "./config.mjs";
 import { afterPass, ignoredImports, ignoredImportsProblem, joinBranch, laneLockPath, lanePortProblems, laneRoots, laneRow, laneValues, liveLanes, mayFinishCopy, prepareWorktree, setupWorktree, writeLaneLock } from "./lane.mjs";
 import { builtOn, claimNext, laneChoice, takesTicket } from "./claim.mjs";
+import { takeFingerprint } from "./fingerprint.mjs";
 import { Screen, notify, ticketMinutes } from "./display.mjs";
 import { brigadeCatalog, readInstalledBrigade, versionStop, withAutoUpdateOff } from "./brigade.mjs";
 import { LEDGER_PATH, appendRow, ledgerRow, stampVersion } from "./ledger.mjs";
@@ -1593,16 +1594,27 @@ function screenshotsSince(root, rel, startedAt, changed, sourceFiles) {
 }
 
 /**
- * The browser check's gate (phaseRun.browserCheck), or null when it passes.
- * The check is the session's own work, so its word is not enough: the
- * screenshots it was told to save must be there, and be from this build.
+ * The browser check's gate (phaseRun.browserCheck, `check`) on the tree at `root`:
+ * `{ problem, fingerprint }`. The check is the session's own work, so its word is
+ * not enough: the screenshots it was told to save must be there, and be from this
+ * build. A pass records the fingerprint of what it judged (fingerprint.mjs, D12);
+ * a ticket the check does not apply to, or a failed check, has none.
  */
-function browserCheckProblem(ticket, changed, startedAt) {
-  const check = config.browserCheck;
-  if (!ticket.labels.includes("frontend") && !changed.some((file) => check.screenFiles.test(file))) return null;
+function browserCheckVerdict({ check, ticket, changed, startedAt, root }) {
+  if (!check) return { problem: null, fingerprint: null };
+  if (!ticket.labels.includes("frontend") && !changed.some((file) => check.screenFiles.test(file))) return { problem: null, fingerprint: null };
   const dir = fill(check.screenshots, { N: ticket.number });
-  const shots = screenshotsSince(work, dir, startedAt, changed, check.sourceFiles);
-  if (shots.fresh.length >= check.minimum) return null;
+  const shots = screenshotsSince(root, dir, startedAt, changed, check.sourceFiles);
+  if (shots.fresh.length >= check.minimum) {
+    // readdirSync names a subfolder's file with the platform's separator; the fingerprint keeps `/`.
+    const counted = shots.fresh.map((file) => `${dir.replace(/\/+$/, "")}/${file.split(sep).join("/")}`);
+    return { problem: null, fingerprint: takeFingerprint({ root, changed, sourceFiles: check.sourceFiles, shots: counted }) };
+  }
+  return { problem: browserCheckProblem(check, dir, shots), fingerprint: null };
+}
+
+/** What a failed browser check tells the session. */
+function browserCheckProblem(check, dir, shots) {
   return (
     `This ticket changes what a screen shows, and ${dir}/ holds ${shots.fresh.length} screenshot(s) saved after your last edit to a source file` +
     `${shots.stale ? ` (${shots.stale} older one(s) do not count: a source file changed after them, so they show code that is no longer there)` : ""}; ` +
@@ -1800,9 +1812,15 @@ async function runGates(ticket, base, options, run, startedAt) {
     run.tamperingNotes ??= new Map();
     run.tamperingNotes.set(n, plan.tampering.refusedNote);
   }
+  // A browser-check pass's fingerprint, for the ticket's result (finishBuilt) and Landing (#36).
+  let fingerprint = null;
   const failed = await projectGates(plan, {
     values: { base, N: n, qaUrl: runQaUrl(), cache: gateCache() },
-    browserCheck: () => browserCheckProblem(ticket, changed, startedAt),
+    browserCheck: () => {
+      const verdict = browserCheckVerdict({ check: config.browserCheck, ticket, changed, startedAt, root: work });
+      fingerprint = verdict.fingerprint;
+      return verdict.problem;
+    },
     stopStray: (when) => stopStray(`${when} for #${n}`),
   });
   if (failed) return fail(failed.gate, failed.output);
@@ -1815,7 +1833,7 @@ async function runGates(ticket, base, options, run, startedAt) {
   if (!afterPass(lane).migrate) {
     const waiting = newMigrations(base);
     if (waiting.length) log(`#${n}: ${waiting.join(", ")} not applied: in a lane, Landing applies it as the re-gate's last step.`);
-    return { ok: true };
+    return { ok: true, fingerprint };
   }
   // Last on purpose: nothing reaches the migration target until everything else is green.
   const migrations = newMigrations(base).filter((name) => !run.migrationsApplied.has(name));
@@ -1837,7 +1855,7 @@ async function runGates(ticket, base, options, run, startedAt) {
       );
     }
   }
-  return { ok: true };
+  return { ok: true, fingerprint };
 }
 
 // ------------------------------------------------------- finishing a ticket
@@ -2002,7 +2020,7 @@ function screenshotFolder(number) {
   return existsSync(join(work, dir)) ? `${dir}/` : null;
 }
 
-async function finishBuilt(ticket, base, options, run, session) {
+async function finishBuilt(ticket, base, options, run, session, fingerprint = null) {
   const hash = git("rev-parse", "--short", "HEAD");
   const stat = git("diff", "--shortstat", `${base}..HEAD`);
   const files = git("diff", "--name-only", `${base}..HEAD`).split("\n").filter(Boolean);
@@ -2029,6 +2047,8 @@ async function finishBuilt(ticket, base, options, run, session) {
     handedForward: verdict.handedForward ?? [],
     summary: verdict.summary ?? "",
     screenshots: screenshotFolder(ticket.number),
+    // What a browser-check pass judged (fingerprint.mjs), for Landing (#36); no key without one.
+    ...(fingerprint ? { fingerprint } : {}),
     notes: [],
     session,
     // Unlanded: the commit is on the lane's branch, and Landing (#36) puts it on the phase branch.
@@ -2252,7 +2272,7 @@ async function runTicket(ticket, options, run) {
     gatesMs += Date.now() - gatesFrom;
     if (gates.ok) {
       await freeTicketPorts();
-      await finishBuilt(ticket, base, options, run, measured(facts));
+      await finishBuilt(ticket, base, options, run, measured(facts), gates.fingerprint);
       return "continue";
     }
     if (round >= options.fixRounds) {
@@ -2709,6 +2729,7 @@ export {
   SETTLE_MS,
   applyMigrations,
   backgroundArgs,
+  browserCheckVerdict,
   docCheck,
   fetchBlockers,
   gatePlan,

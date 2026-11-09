@@ -58,3 +58,10 @@ listed in the gotchas index, `docs/agents/gotchas/README.md`.
 - A waiting lane is listed in the claim file's `waiting`, in the same locked write as its look, and the other lane counts neither its claims nor its takes (`idle`). Drop that and two lanes holding each other's blockers wait forever. pinned: the claim section ("never wait on each other").
 - The lock is broken when its pid is gone, is the caller's own, or it stays empty past `UNREADABLE_GRACE_MS`. A live lock moved aside by mistake is written back by `wx`, never `linkSync`, which some file systems lack. pinned: the claim section (the lock test).
 - The source pins in `run.test.mjs` normalize CRLF first: a Windows checkout of `run.mjs` has CRLF, and `"\n}\n"` never matches there.
+
+**`#35` — the fingerprint, `template/tools/phase-run/fingerprint.mjs` `takeFingerprint` / `compareFingerprint`, `run.mjs` `browserCheckVerdict` / `runGates` / `finishBuilt` (built 2026-11-10):**
+- The fingerprint is taken from the same `screenshotsSince` count that passed the gate. A second scan could count other files. pinned: `template/tools/phase-run/run.test.mjs` (the fingerprint section).
+- A hash is of the working tree's bytes, not the git blob: compare on a tree checked out with the same line-ending settings. pinned: none.
+- It holds only the files the ticket changed: a rebase that edits a shared source file the ticket never touched still says "carry" (D12's scope). pinned: none.
+- `projectGates`' `browserCheck` callback still returns a string or null; the fingerprint leaves `runGates` by closure. Keep both of its passing returns `{ ok: true, fingerprint }`. pinned: the same section (a source pin that counts both).
+- Screenshot paths are stored with `/`: `readdirSync`'s recursive names use `\` on Windows. pinned: the same section (a subfolder shot).
