@@ -87,3 +87,13 @@ listed in the gotchas index, `docs/agents/gotchas/README.md`.
 - `undoDetach` acts only on a checkout still detached at the recorded commit: a dead lane's record may be stale (handed back, or the owner's checkout). pinned: the same file.
 - A parked ticket's claim goes into the claim file's `parked` list: the other lane read its labels at its own start. The list is cleared only by a lane that starts with no other lane live. pinned: the same file.
 - A lane's result is changed in place after Landing (`saveResults`), never recorded twice: a second `recordResult` would write a second night row to the ledger.
+
+**`#38` — findings and the lane reading, `template/tools/phase-run/findings.mjs` `recordFindings` / `branchResults` / `laneState` / `laneStatus`, `run.mjs` `recordFound` / `nightOf` / `report` / `ensurePullRequest`, `status.mjs` (built 2026-11-10):**
+- A lane report reads its night by `night`, the shared copy's `runId`: never a lane's own `runId`, nor `reported`, which each lane sets for itself. A result from before #38 has no `night` and is in no lane report. pinned: `tests/phase-run-findings.test.mjs`.
+- `branchResults` tags each lane's result with its folder's lane: a session's park has no `lane` key on disk. Code that names a result's lane reads it through `branchResults`. pinned: the same file.
+- The record is written under the claim lock, which is synchronous: keep its body free of `await` (gotcha #37). A record it can't read refuses the write, never reads as empty. pinned: the same file.
+- The one-lane report is pinned word for word by `tests/fixtures/report-one-lane.txt`. A change you mean to make there rewrites the fixture in the same commit. pinned: the same file.
+- A Landing park is `status: "failed"` with `landing`: `laneState` calls it "parked at Landing", and a lane report lists it under Parked. pinned: the same file.
+- The other lane reads a lane's `results.json`: `saveResults` writes it whole and renames it into place. A plain write can be read half-done, as no results. pinned: the same file (source pin).
+- At its end, a lane releases its own lock before it reads `othersLive`. Release it after, and two lanes stopping together each see the other: neither posts the report. pinned: the same file (source pin).
+- `measure.test.mjs`'s status fixture copies a fixed list of runner files: a new import in `status.mjs` or `findings.mjs` goes on that list. pinned: `template/tools/phase-run/measure.test.mjs`.

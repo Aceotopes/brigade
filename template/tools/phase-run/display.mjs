@@ -63,10 +63,13 @@ export function resultLines(result, paint) {
   const fixes = Math.max(0, (result.session?.calls ?? 1) - 1);
   const minutes = ticketMinutes(result);
   let outcome;
+  // A lane's result (#38) says which lane built it; its pass reads "unlanded" until Landing puts it on the branch.
+  const unlanded = result.lane != null && result.landed === false;
+  const laneTag = result.lane != null ? ` · lane ${result.lane}` : "";
   if (result.status === "built") {
-    const text = `✔ ${result.hash}${fixes ? ` · ${fixes} fix${fixes > 1 ? "es" : ""}` : ""}`;
-    outcome = fixes ? paint.yellow(text) : paint.green(text);
-  } else outcome = paint.red(result.status === "parked" ? "⏸ parked: needs you" : "✖ failed");
+    const text = `${unlanded ? "◇ unlanded" : "✔"} ${result.hash}${fixes ? ` · ${fixes} fix${fixes > 1 ? "es" : ""}` : ""}${laneTag}`;
+    outcome = fixes || unlanded ? paint.yellow(text) : paint.green(text);
+  } else outcome = paint.red(`${result.status === "parked" ? "⏸ parked: needs you" : result.landing ? "⏸ parked at Landing" : "✖ failed"}${laneTag}`);
   const row = `  ${pad(String(result.number), 5)}${pad(shortTitle(result.title), 25)}${pad(minutes == null ? "—" : `${minutes}m`, 6, true)}  ${pad(money(metrics?.costUsd), 7, true)}  ${outcome}`;
 
   const lines = [row];

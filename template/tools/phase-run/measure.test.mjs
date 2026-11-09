@@ -352,7 +352,7 @@ test("the CSV has each session's latest row, its group under kind and its own la
 /** A project with this folder's runner copied in and the fixture ledger in its .phase-run/. */
 function ledgerProject(ledger, rest = {}) {
   const dir = temp("phase-run-status-");
-  for (const name of ["status.mjs", "display.mjs", "metrics.mjs", "ledger.mjs", "config.mjs", "ticket-size.mjs", "prices.json"]) {
+  for (const name of ["status.mjs", "display.mjs", "metrics.mjs", "ledger.mjs", "config.mjs", "ticket-size.mjs", "prices.json", "findings.mjs", "claim.mjs", "lane.mjs"]) {
     mkdirSync(join(dir, "tools", "phase-run"), { recursive: true });
     writeFileSync(join(dir, "tools", "phase-run", name), readFileSync(join(HERE, name), "utf8"));
   }
@@ -380,6 +380,41 @@ test("status --ledger prints the weekly view, from the config's weekStarts", () 
   const broken = ledgerProject({ weekStarts: "Sunday" }).status("--ledger");
   assert.match(broken.stderr, /ledger\.weekStarts must be a day in lowercase/);
   assert.match(broken.stdout, /Weeks start on Monday/);
+});
+
+test("status reads every lane's results into its table, and shows each live lane and what it holds (#38)", () => {
+  const { dir, status } = ledgerProject();
+  const run = join(dir, ".phase-run", "phase-x");
+  const result = (number, title, extra) => ({ number, title, status: "built", hash: `l${number}`, stat: "1 file changed", session: null, ...extra });
+  mkdirSync(join(run, "lane-1"), { recursive: true });
+  mkdirSync(join(run, "lane-2"), { recursive: true });
+  writeFileSync(join(run, "lane-1", "results.json"), JSON.stringify([result(36, "The fingerprint", { lane: "1", landed: true })]));
+  writeFileSync(join(run, "lane-2", "results.json"), JSON.stringify([result(37, "The landing lock", { lane: "2", landed: false, laneBranch: "phase-x-lane-2" })]));
+  // Lane 1 is live: this test's own process holds its lock and its claim.
+  writeFileSync(join(dir, ".phase-run", "lane-1.lock"), JSON.stringify({ lane: "1", pid: process.pid, branch: "phase-x", startedAt: "2026-11-10T01:00:00.000Z" }));
+  writeFileSync(join(run, "claims.json"), JSON.stringify({ claims: [{ ticket: 38, lane: "1", pid: process.pid, at: "2026-11-10T01:05:00.000Z" }], waiting: [], parked: [] }));
+  writeFileSync(join(run, "lane-1", "live.json"), JSON.stringify({ label: "X phase run", done: 1, total: 2, startedAt: Date.UTC(2026, 10, 10, 1), avgMinutes: 40, finished: [40], current: { number: 38, title: "Findings", startedAt: Date.UTC(2026, 10, 10, 1, 30), stage: "gates" } }));
+  const out = status();
+  assert.equal(out.status, 0, out.stderr);
+  assert.match(out.stdout, /phase-x · 2 result\(s\)/);
+  assert.match(out.stdout, /36 {3}The fingerprint .*✔ l36 · lane 1/);
+  assert.match(out.stdout, /37 {3}The landing lock .*◇ unlanded l37 · lane 2/);
+  assert.match(out.stdout, /lane 1 · live \(pid \d+\) · holds the claim on #38/);
+  assert.match(out.stdout, /▶ 38 {3}Findings/);
+  assert.match(out.stdout, /lane 2 · not running · holds the unlanded pass #37/);
+  assert.doesNotMatch(out.stdout, /No run is on now/);
+  assert.match(status("36").stdout, /#36 The fingerprint\n {2}result {3}built l36 · lane 1, landed/);
+});
+
+test("status of a run without lanes shows no lane section", () => {
+  const { dir, status } = ledgerProject();
+  mkdirSync(join(dir, ".phase-run", "phase-y"));
+  writeFileSync(join(dir, ".phase-run", "phase-y", "results.json"), JSON.stringify([{ number: 12, title: "A", status: "built", hash: "h12", stat: "1 file changed", session: null }]));
+  const out = status();
+  assert.equal(out.status, 0, out.stderr);
+  assert.match(out.stdout, /12 {3}A .*✔ h12\n/);
+  assert.doesNotMatch(out.stdout, /lane/i);
+  assert.match(out.stdout, /No run is on now/);
 });
 
 test("status --csv prints the CSV, and --csv <file> writes it", () => {

@@ -9,6 +9,17 @@ Each commit's entry goes on top, in the shape of `docs/_templates/devlog-entry.m
 message cites it (`devlog #N`). At each phase end, `node tools/doc-rotate.mjs` moves the closed
 entries into `docs/history/devlog/`.
 
+## #39 · feat · findings and the reports' lane reading
+
+**Built:** #38. One findings record per phase branch, and the reports read every lane (D14).
+- `findings.mjs`: `findings.json` in the branch folder, written under the claim lock, each finding with its outcome (fixed, ticketed, taken, dropped) or open; every lane's results read back, tagged with their lane.
+- `run.mjs`: a lane's report shows the whole night (landed, unlanded, parked, failed, and the findings), naming each lane; the pull request's body lists every lane; the last lane out posts.
+- `status.mjs` reads lane folders and shows each lane and what it holds; a run without lanes reports exactly as before.
+**Verified:** 15 tests at the runner seam, 14 written first (real processes for the record's race), plus
+two `status.mjs` tests; a fixture pins the one-lane report word for word; the plugin's and the
+template's suites pass; doc-check clean; the code review's two fixes (atomic results, last-out) folded in.
+**Next:** #39. **Record:** implementation log 024.
+
 ## #38 · feat · the landing lock: a lane lands its own passes, one at a time
 
 **Built:** #37. A lane lands each pass under one landing lock, and the primary checkout stays good (D13).

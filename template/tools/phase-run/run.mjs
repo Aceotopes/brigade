@@ -33,6 +33,7 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -48,6 +49,7 @@ import { builtOn, claimNext, clearParked, laneChoice, releaseClaim, takeClaim, t
 import { keepParked, land } from "./landing.mjs";
 import { dropUnlanded, handBack, keepUnlanded, restartSteps, underLandingLock, unlandedCommits, unlandedRef } from "./landing-lock.mjs";
 import { takeFingerprint } from "./fingerprint.mjs";
+import { branchResults, findingText, findingsPath, laneState, onBranch, readFindings, recordFindings } from "./findings.mjs";
 import { Screen, notify, ticketMinutes } from "./display.mjs";
 import { brigadeCatalog, readInstalledBrigade, versionStop, withAutoUpdateOff } from "./brigade.mjs";
 import { LEDGER_PATH, appendRow, ledgerRow, stampVersion } from "./ledger.mjs";
@@ -1933,8 +1935,11 @@ function resultsFile(run) {
   return join(run.dir, "results.json");
 }
 
+/** Written whole and renamed into place: the other lane reads this file (findings.mjs branchResults), and a half-written one would read as no results (#38). */
 function saveResults(run) {
-  writeFileSync(resultsFile(run), `${JSON.stringify(run.all, null, 2)}\n`);
+  const part = `${resultsFile(run)}.${process.pid}.part`;
+  writeFileSync(part, `${JSON.stringify(run.all, null, 2)}\n`);
+  renameSync(part, resultsFile(run));
 }
 
 /**
@@ -1943,8 +1948,10 @@ function saveResults(run) {
  * runner's own error.
  */
 function recordResult(run, result, at = Date.now()) {
-  const stamped = { ...withTamperingNote(run, result), runId: run.runId, reported: false };
+  // A lane's result names its night (the shared runner copy's run), so every lane's report reads the same night (#38).
+  const stamped = { ...withTamperingNote(run, result), runId: run.runId, ...(run.night ? { night: run.night } : {}), reported: false };
   recordNight(run, stamped, at);
+  recordFound(run, stamped, at);
   run.results.push(stamped);
   run.all.push(stamped);
   saveResults(run);
@@ -1985,6 +1992,20 @@ function recordNight(run, result, at) {
   }
 }
 
+/**
+ * The result's findings (`foundElsewhere`) in the phase branch's one record (findings.mjs, D14): the
+ * branch folder in the primary checkout, which a lane shares (`run.claims`) and a run without lanes
+ * is (`run.dir`). A record that cannot be written leaves a note and never stops the run.
+ */
+function recordFound(run, result, at) {
+  if (!result.foundElsewhere?.length) return;
+  try {
+    recordFindings({ dir: run.claims ?? run.dir, ticket: result.number, lane: result.lane ?? null, night: run.night ?? null, items: result.foundElsewhere, at });
+  } catch (error) {
+    (result.notes ??= []).push(`The findings record could not be written (${error.message}): this ticket's findings are only in its result.`);
+  }
+}
+
 /** The report's line for a result whose night row was lost, or nothing. */
 const ledgerNote = (r) => (r.ledger === "not written" ? [`⚠ ledger: not written (${r.ledgerError ?? "no reason recorded"}). This ticket's cost is missing from .phase-run/ledger.jsonl.`] : []);
 
@@ -1998,20 +2019,22 @@ function pullRequestBody(all, options) {
     "**Merge with a merge commit, never squash or rebase**: a devlog entry reads as closed once a commit message cites it, and a squash would drop those messages.",
     "",
     "Built on this branch:",
-    ...[...latest.values()].map((r) => `- #${r.number} ${r.title} (\`${r.hash}\`)`),
+    ...[...latest.values()].map((r) => `- #${r.number} ${r.title} (\`${r.hash}\`)${r.lane != null ? ` · lane ${r.lane}` : ""}`),
     "",
   ].join("\n");
 }
 
 function ensurePullRequest(run, options) {
   const bodyFile = join(run.dir, "pr-body.md");
+  // A lane's body reads every lane's landed results (findings.mjs), checked against the phase branch: its own HEAD is its worktree's.
+  const all = lane ? onBranch(branchResults(run.claims)) : run.all;
+  const tip = lane ? `refs/heads/${run.branch}` : "HEAD";
   // Only commits still on the branch: results.json outlives a branch deleted or rebuilt by hand.
-  const onBranch = run.all.filter((r) => r.status !== "built" || gitTry("merge-base", "--is-ancestor", r.hash, "HEAD").ok);
-  writeFileSync(bodyFile, pullRequestBody(onBranch, options));
+  const listed = all.filter((r) => r.status !== "built" || gitTry("merge-base", "--is-ancestor", r.hash, tip).ok);
+  writeFileSync(bodyFile, pullRequestBody(listed, options));
   const existing = exec("gh", ["pr", "view", run.branch, "--json", "number,url", "-q", ".url"]);
   if (existing.ok && existing.stdout) {
-    // A lane knows only its own tickets: it never rewrites a body the other lane's landings listed (#38 reads every lane).
-    if (!lane) exec("gh", ["pr", "edit", run.branch, "--body-file", bodyFile]);
+    exec("gh", ["pr", "edit", run.branch, "--body-file", bodyFile]);
     return existing.stdout;
   }
   const title = options.spec ? `Phase run: ${run.branch} (spec #${options.spec})` : `Phase run: ${run.branch} (#${options.only})`;
@@ -2531,7 +2554,8 @@ async function runTicket(ticket, options, run) {
 
 /** The lines for one result that a person must act on: its assumptions, steps, findings and hand-offs. */
 function actionLines(results) {
-  const pick = (key) => results.flatMap((r) => (r[key] ?? []).map((line) => `#${r.number}: ${line}`));
+  // A lane's result says which lane built it (#38); a `foundElsewhere` item may be `{ finding, outcome }` (findings.mjs).
+  const pick = (key) => results.flatMap((r) => (r[key] ?? []).map((line) => `#${r.number}${r.lane != null ? ` (lane ${r.lane})` : ""}: ${findingText(line)}`));
   return {
     assumptions: pick("assumptions"),
     byHand: pick("runByHand"),
@@ -2565,18 +2589,20 @@ function docHealthSection(table) {
  * context and its size. Size beside cost is what the size budget
  * (phaseRun.ticketSize) is retuned from.
  */
-function scoreboardSection(results) {
+function scoreboardSection(results, { lanes = false } = {}) {
   const out = ["### Scoreboard", ""];
-  out.push("| # | Ticket | Result | Min | Claude | Tests | Checks | Browser | Slept | Reviews | Hook | Gates | Cost | Peak | Criteria | Areas | Words |");
-  out.push("|---|---|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|");
+  // With lanes, a Lane column, and each result as where it stands (landed, unlanded, parked at Landing).
+  out.push(`| # |${lanes ? " Lane |" : ""} Ticket | Result | Min | Claude | Tests | Checks | Browser | Slept | Reviews | Hook | Gates | Cost | Peak | Criteria | Areas | Words |`);
+  out.push(`|---|${lanes ? "---|" : ""}---|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|`);
   const cell = (value) => (value == null ? "—" : String(value));
   for (const r of results) {
     const m = r.session?.metrics ?? {};
     const t = m.minutes ?? {};
     const fixes = Math.max(0, (r.session?.calls ?? 1) - 1);
-    const result = r.status === "built" ? `built${fixes ? `, ${fixes} fix` : ""}` : r.status;
+    const status = lanes ? laneState(r) : r.status;
+    const result = r.status === "built" ? `${status}${fixes ? `, ${fixes} fix` : ""}` : status;
     out.push(
-      `| ${r.number} | ${r.title.replace(/\|/g, "/").slice(0, 48)} | ${result} | ${cell(ticketMinutes(r))} | ${cell(t.claude)} | ${cell(t.tests)} | ${cell(t.checks)} | ${cell(t.browser)} | ${cell(t.waiting)} | ${cell(t.reviewing)} | ${cell(t.hook)} | ${cell(t.gates)} | ${m.costUsd == null ? "—" : `$${m.costUsd.toFixed(2)}`} | ${m.peakContext ? `${Math.round(m.peakContext / 1000)}K` : "—"} | ${cell(m.size?.criteria)} | ${cell(m.size?.areas)} | ${cell(m.size?.words)} |`,
+      `| ${r.number} |${lanes ? ` ${cell(r.lane)} |` : ""} ${r.title.replace(/\|/g, "/").slice(0, 48)} | ${result} | ${cell(ticketMinutes(r))} | ${cell(t.claude)} | ${cell(t.tests)} | ${cell(t.checks)} | ${cell(t.browser)} | ${cell(t.waiting)} | ${cell(t.reviewing)} | ${cell(t.hook)} | ${cell(t.gates)} | ${m.costUsd == null ? "—" : `$${m.costUsd.toFixed(2)}`} | ${m.peakContext ? `${Math.round(m.peakContext / 1000)}K` : "—"} | ${cell(m.size?.criteria)} | ${cell(m.size?.areas)} | ${cell(m.size?.words)} |`,
     );
   }
   const costs = results.map((r) => r.session?.metrics?.costUsd).filter((c) => c != null);
@@ -2585,10 +2611,33 @@ function scoreboardSection(results) {
   return out;
 }
 
+/**
+ * A lane's night across every lane (#38, D14): the results every lane recorded under this night (the
+ * shared runner copy's run), read from the branch folder, and the night's findings from its record.
+ * Null for a run without lanes, whose report reads its own results only.
+ */
+function nightOf(run) {
+  if (!run.night) return null;
+  const results = branchResults(run.claims).filter((r) => r.night === run.night);
+  let findings = [];
+  let problem = null;
+  try {
+    findings = readFindings(run.claims).filter((row) => row.night === run.night);
+  } catch (error) {
+    problem = error.message;
+  }
+  const lanes = [...new Set(results.map((r) => r.lane))].sort();
+  return { results, findings, problem, lanes };
+}
+
 function report(run, options, remaining, { final = true } = {}) {
-  const built = run.results.filter((r) => r.status === "built");
-  const parked = run.results.filter((r) => r.status === "parked");
-  const failed = run.results.filter((r) => r.status === "failed");
+  const night = nightOf(run);
+  const results = night ? night.results : run.results;
+  const atLanding = (r) => night && laneState(r) === "parked at Landing";
+  const built = results.filter((r) => r.status === "built");
+  const parked = results.filter((r) => r.status === "parked" || atLanding(r));
+  const failed = results.filter((r) => r.status === "failed" && !atLanding(r));
+  const laneOf = (r) => (night && r.lane != null ? ` · lane ${r.lane}` : "");
   const out = [];
   const thousands = (tokens) => `${Math.round(tokens / 1000)}K`;
   const money = (facts) =>
@@ -2604,17 +2653,24 @@ function report(run, options, remaining, { final = true } = {}) {
   out.push(`## Phase run report: ${run.branch}`, "");
   // The Brigade version whose hooks judged every ticket (brigade.mjs, D14).
   const version = run.brigade ? ` · Brigade ${run.brigade}` : "";
-  out.push(`${new Date().toISOString().slice(0, 16).replace("T", " ")} UTC${version} · built ${built.length} · parked ${parked.length} · failed ${failed.length}`, "");
+  const count = (state) => results.filter((r) => laneState(r) === state).length;
+  const counts = night
+    ? `lanes ${night.lanes.join(", ") || "none yet"} · landed ${count("landed")} · unlanded ${count("unlanded")} · parked ${parked.length} · failed ${failed.length}`
+    : `built ${built.length} · parked ${parked.length} · failed ${failed.length}`;
+  out.push(`${new Date().toISOString().slice(0, 16).replace("T", " ")} UTC${version} · ${counts}`, "");
+  // Only the last lane out writes the night's whole report; an earlier lane's says who is still building.
+  for (const other of run.othersLive ?? []) out.push(`🕒 Lane ${other} is still running: its report, written when the last lane stops, is the night's whole report.`, "");
   if (run.brigade && run.stamp && run.stamp !== run.brigade) {
     out.push(`This project's runner is stamped ${run.stamp}; Brigade ${run.brigade} judged the run. \`/update-workflow\` brings the runner to the plugin's version.`, "");
   }
   if (run.catalog && !run.catalog.catalog) out.push(`⚠ Brigade's auto-update was not switched off for this run: ${run.catalog.why}`, "");
   if (!final) out.push("🕒 **In progress.** This file is rewritten after each ticket; the run had not finished when it was saved. If no later version exists, the run stopped here.", "");
   if (run.stopped) out.push(`🚨 **The run stopped early.** ${run.stopped}`, "");
-  if (run.results.length) out.push(...scoreboardSection(run.results));
+  if (results.length) out.push(...scoreboardSection(results, { lanes: Boolean(night) }));
 
-  // A ticket this run built again is reported once, under this run's own sections.
-  const carried = (run.carried ?? []).filter((c) => !run.results.some((r) => r.number === c.number));
+  // A ticket this run built again is reported once, under this run's own sections; with lanes, a
+  // restart's earlier results of the same night are tonight's, never carried.
+  const carried = (run.carried ?? []).filter((c) => !results.some((r) => r.number === c.number) && !(night && c.night === run.night));
   if (carried.length) {
     out.push("### From an earlier run that stopped before writing its report", "");
     for (const r of carried) {
@@ -2635,9 +2691,7 @@ function report(run, options, remaining, { final = true } = {}) {
     out.push("");
   }
 
-  if (built.length) out.push("### Built", "");
-  for (const r of built) {
-    out.push(`**#${r.number} ${r.title}** · \`${r.hash}\``);
+  const builtLines = (r) => {
     if (r.summary) out.push(`- ${r.summary}`);
     out.push(`- Size: ${r.stat || "no diff"}`);
     if (r.outside.length) out.push(`- ⚠ Files outside the areas the ticket named: ${r.outside.map((f) => `\`${f}\``).join(", ")}`);
@@ -2649,13 +2703,35 @@ function report(run, options, remaining, { final = true } = {}) {
     for (const note of ledgerNote(r)) out.push(`- ${note}`);
     if (r.session?.watch) out.push(`- The whole session, to read back: \`claude attach ${r.session.watch}\``);
     out.push(`- Effort: ${effort(r.session)}`, "");
+  };
+  if (night) {
+    // A lane's pass is landed (on the branch) or unlanded (still on its lane's branch, for its restart).
+    const landed = built.filter((r) => laneState(r) === "landed");
+    const unlanded = built.filter((r) => laneState(r) === "unlanded");
+    if (landed.length) out.push("### Landed", "");
+    for (const r of landed) {
+      out.push(`**#${r.number} ${r.title}**${laneOf(r)} · \`${r.hash}\``);
+      builtLines(r);
+    }
+    if (unlanded.length) out.push("### Unlanded: passed, not on the branch yet", "");
+    for (const r of unlanded) {
+      out.push(`**#${r.number} ${r.title}**${laneOf(r)} · \`${r.hash}\`${r.laneBranch ? ` on \`${r.laneBranch}\`` : ""}`);
+      builtLines(r);
+    }
+  } else {
+    if (built.length) out.push("### Built", "");
+    for (const r of built) {
+      out.push(`**#${r.number} ${r.title}** · \`${r.hash}\``);
+      builtLines(r);
+    }
   }
 
   const lines = actionLines(built);
   for (const [title, list] of [
     ["Assumptions made (confirm or reverse each)", lines.assumptions],
     ["Run by hand", lines.byHand],
-    ["Found in other tickets' code (for the finish, or a ticket of its own)", lines.elsewhere],
+    // With lanes, the findings section below lists these from the record, with their outcomes.
+    ["Found in other tickets' code (for the finish, or a ticket of its own)", night ? [] : lines.elsewhere],
     ["Handed forward (owed by a later ticket: check it took it)", lines.handed],
   ]) {
     if (!list.length) continue;
@@ -2664,17 +2740,24 @@ function report(run, options, remaining, { final = true } = {}) {
     out.push("");
   }
 
+  if (night && (night.findings.length || night.problem)) {
+    out.push("### Findings", "", `What the night's sessions found in other tickets' code, from the record (\`${relative(ROOT, findingsPath(run.claims)).replaceAll("\\", "/")}\`). Give each open one its outcome: fixed, ticketed, taken or dropped.`, "");
+    if (night.problem) out.push(`⚠ The findings record can't be read: ${night.problem}`, "");
+    for (const row of night.findings) out.push(`- #${row.ticket}${row.lane != null ? ` (lane ${row.lane})` : ""}: ${row.finding} · ${row.outcome ?? "**open**"}`);
+    if (night.findings.length) out.push("");
+  }
+
   const unposted = (r) =>
     r.notPosted
       ? `⚠ GitHub could not be reached, so this was not posted on the issue. The ticket still carries \`${READY_LABEL}\` there, and the next run will try it again from the start.`
       : "";
 
   if (parked.length) out.push("### Parked: your decision is needed", "");
-  for (const r of parked) out.push(`**#${r.number} ${r.title}**`, "", r.detail, "", r.keptOn ? `Work kept on \`${r.keptOn}\`.` : "", unposted(r), ...ledgerNote(r), "");
+  for (const r of parked) out.push(`**#${r.number} ${r.title}**${laneOf(r)}`, "", r.detail, "", r.keptOn ? `Work kept on \`${r.keptOn}\`.` : "", unposted(r), ...ledgerNote(r), "");
 
   if (failed.length) out.push("### Failed", "");
   for (const r of failed) {
-    out.push(`**#${r.number} ${r.title}**`, "", r.detail, "", r.keptOn ? `Work kept on \`${r.keptOn}\`.` : "", unposted(r), ...ledgerNote(r));
+    out.push(`**#${r.number} ${r.title}**${laneOf(r)}`, "", r.detail, "", r.keptOn ? `Work kept on \`${r.keptOn}\`.` : "", unposted(r), ...ledgerNote(r));
     if (r.leftOnTarget?.length) out.push(`🚨 ${targetName()} holds ${r.leftOnTarget.join(", ")} from this ticket, which is not on the phase branch.`);
     if (r.session?.watch) out.push(`The whole session, to read back: \`claude attach ${r.session.watch}\``);
     out.push(`Effort: ${effort(r.session)}`, "");
@@ -2828,6 +2911,8 @@ async function main() {
   try {
     const snapshot = takeSnapshot({ root: roots ? roots.tree : ROOT, runDir: roots ? roots.copyDir : run.dir, runId: run.runId, commit: made ? made.tip : git("rev-parse", "HEAD"), at: Date.now(), brigade: run.brigade });
     run.runner = snapshot.dir;
+    // A lane's night is the shared copy's run (ADR 0005): both lanes, and a restart, stamp the same one (#38).
+    if (lane) run.night = snapshot.manifest.runId;
     log(snapshot.reused ? `Restarted on the runner copy taken ${snapshot.manifest.takenAt} (run ${snapshot.manifest.runId}).` : `Runner copy taken at ${snapshot.manifest.commit.slice(0, 7)}.`, { routine: true });
   } catch (error) {
     die(error.message);
@@ -2946,19 +3031,24 @@ async function main() {
 
   const health = docCheck(run.runner, work, ["--report"]);
   run.docHealth = health.ok ? health.stdout : null;
-  // A night that pushed nothing still reports on an earlier night's pull request. A lane's
-  // passes are unlanded, so its report stays in its folder (the reports reading every lane are #38's).
-  if (!run.pullRequest && !lane) {
+  // A night that pushed nothing still reports on an earlier night's pull request.
+  if (!run.pullRequest) {
     const existing = exec("gh", ["pr", "view", branch, "--json", "url", "-q", ".url"]);
     if (existing.ok && existing.stdout) run.pullRequest = existing.stdout;
   }
+  // A lane's report reads every lane's night (#38). Only the last lane out posts it: an earlier
+  // lane's is the night so far, and says which lanes still run. Its own lock goes first, so of two
+  // lanes reaching here together the second sees the first gone; at worst both post, never neither.
+  if (lane) release();
+  if (lane) run.othersLive = liveLanes(STATE).filter((lock) => lock.branch === branch && String(lock.lane) !== String(lane.id)).map((lock) => String(lock.lane));
+  const lastOut = !lane || run.othersLive.length === 0;
   const text = report(run, options, remaining);
   writeFileSync(reportFile, text);
   for (const result of run.all) result.reported = true;
   saveResults(run);
   // The run reached its report: the next one takes a fresh copy. Both lanes share it, so only the last lane out marks it.
-  if (!lane || mayFinishCopy(STATE, { id: lane.id, branch })) finishSnapshot(run.runner);
-  if (run.pullRequest) exec("gh", ["pr", "comment", branch, "--body-file", reportFile]);
+  if (lastOut) finishSnapshot(run.runner);
+  if (run.pullRequest && lastOut) exec("gh", ["pr", "comment", branch, "--body-file", reportFile]);
   log(`Run finished. Report: ${reportFile}${run.pullRequest ? ` · pull request: ${run.pullRequest}` : ""}`);
   rmSync(liveFile, { force: true });
   const counts = ["built", "parked", "failed"].map((status) => `${status} ${run.results.filter((r) => r.status === status).length}`).join(" · ");

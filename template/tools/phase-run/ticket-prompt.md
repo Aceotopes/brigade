@@ -178,6 +178,9 @@ with the turn over, as your end.
 
 `foundElsewhere` and `handedForward` reach the owner's morning report; without them, two real
 bugs and an owed note were once lost across two phases. Say each also in the implementation log.
+Each finding goes into the phase's findings record with an outcome: `fixed`, `ticketed`, `taken`
+(a named later ticket takes it on) or `dropped`. A plain string is recorded open, for the owner to
+decide; when you already know its outcome, write it as `{ "finding": "…", "outcome": "taken" }`.
 
 or, when parked:
 
