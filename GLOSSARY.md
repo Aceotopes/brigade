@@ -93,6 +93,43 @@ weakened.
 The frozen copy of the runner, its config and the Brigade version that judges a whole phase run.
 _Avoid_: backup, cache
 
+**Lane**:
+One of at most two runners building the same phase run at once, each in its own copy of the repo
+with its own ports and databases, so the two share nothing but the phase branch.
+_Avoid_: worker, slot, night run
+
+**Claim**:
+A lane's hold on the ticket it is building, so the other lane never builds it too. It lapses when
+the lane's process dies.
+_Avoid_: lock, reservation
+
+**Landing**:
+Putting a lane's passing ticket on the phase branch: onto the newest tip, numbered, and checked by
+the gates again there. A ticket that conflicts or fails is parked, never forced.
+_Avoid_: merge, push
+
+**Unlanded ticket**:
+A ticket built and passing in its lane but not yet on the phase branch.
+_Avoid_: kept ticket (a kept branch is a failed ticket's)
+
+**Unnumbered entry**:
+A devlog entry, implementation log or commit message a lane writes without its number, which
+Landing fills in from the phase branch's tip.
+_Avoid_: placeholder
+
+**Hotspot**:
+A file nearly every ticket's commit writes at the same spot, such as the devlog or a generated
+index, with a rule for how Landing settles it.
+_Avoid_: shared file, conflict file
+
+**Primary checkout**:
+The repo's own folder, as opposed to a lane's worktree beside it. Run state for every lane is kept
+there.
+_Avoid_: main checkout (`main` is a branch)
+
+**Hand-back**:
+The last lane out returning the primary checkout to the phase branch's tip.
+
 **Ledger**:
 The append-only record of every session's tokens and cost, one row per session, kept per project.
 _Avoid_: log, metrics

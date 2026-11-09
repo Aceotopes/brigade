@@ -9,6 +9,18 @@ Each commit's entry goes on top, in the shape of `docs/_templates/devlog-entry.m
 message cites it (`devlog #N`). At each phase end, `node tools/doc-rotate.mjs` moves the closed
 entries into `docs/history/devlog/`.
 
+## #23 · docs · 0.7.0, two lanes: the grill's outcome
+
+**Built:** discovery 05 records the owner's four-round grill on porting a source project's
+two-lane runner: D1–D19 and 13 proposed tickets. 0.6.2 comes first with two bugs found there.
+Lanes are `phaseRun.lanes` and `phaseRun.hotspots` rows, at most two, and lane 2 takes a label
+the project picks. Setup's checklist, not template code, carries the test prefix and QA address.
+ADRs 0006 (numbering at Landing), 0007 (two roots), 0008 (Landing re-gates, never forces). Eight
+glossary terms. The handoff names 0.6.2 next.
+**Verified:** doc-index rewrote both indexes; doc-check clean; plugin tests 148/148; no source
+names in the new docs. Nothing built.
+**Next:** 0.6.2, attended. **Record:** discovery 05, adr/0006, adr/0007, adr/0008.
+
 ## #22 · chore · the tests row gets its name
 
 **Built:** the stop check's row in `.claude/workflow.json` is named `tests`, so its receipt has a
