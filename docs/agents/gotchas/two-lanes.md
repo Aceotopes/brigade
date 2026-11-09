@@ -19,3 +19,9 @@ listed in the gotchas index, `docs/agents/gotchas/README.md`.
   database into the url must use the same rule, or it disagrees with the refusal. pinned: the same test.
 - `assert.throws(fn, /^…/)` never matches: Node tests a RegExp against `String(error)`, which starts
   `Error: `. The lane tests use a `refusal()` helper that returns the message.
+
+**`#30` — hotspots and unnumbered entries, `template/tools/phase-run/numbering.mjs` `numberLane` / `scratchFor`, `template/tools/doc-check.mjs` `unnumberedProblems`, `run.mjs` `laneNumbers` / `runVariables` (built 2026-11-09):**
+- One-lane prompts use `NNN` as a placeholder; in a lane it is literal text. pinned: `tests/phase-run-numbering.test.mjs`.
+- Two counters, one token: a log's file name, its `# #NNN` title and a bare `NNN` take the log's number. pinned: the same test.
+- `NUMBER_TOKEN` and `HOTSPOT_TOKEN` cannot import each other once installed; `laneToken` refuses a lane token doc-check won't accept. pinned: the same test.
+- `numberLane` imports only from `tools/phase-run/`: the runner copy holds nothing else until #31.

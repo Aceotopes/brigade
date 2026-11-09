@@ -133,7 +133,7 @@ step; and the per-ticket rows the project adds in its doc-sync rows file, if it 
 session handoff, Artifact pages) is **not** yours.
 
 No doc carries this commit's hash: cite `devlog #NNN` or the ticket `#{{N}}` instead. The devlog
-entry's heading is `## #NNN · <type> · <title>`, at most 15 lines (doc-sync §3).
+entry's heading is `## #NNN · <type> · <title>`, at most 15 lines (doc-sync §3).{{LANE_NUMBERS}}
 
 Then commit **once**:
 

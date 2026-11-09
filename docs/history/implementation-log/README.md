@@ -10,6 +10,7 @@ what was built, why it works that way, and how to say it out loud. The index bel
 <!-- generated:start implementation-log -->
 ### Current phase
 
+- [016](016-unnumbered-entries.md) · `#30` · 2026-11-09 · Hotspots and unnumbered entries: a lane writes NNN, a pure step numbers it
 - [015](015-lane-table.md) · `#29` · 2026-11-09 · The lane table: two lanes as config, checked at preflight
 
 ### Phase measure-trim — Brigade 0.6.0, measure and trim (with 0.5.2's entries before it)

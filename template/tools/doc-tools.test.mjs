@@ -504,3 +504,58 @@ test("doc-check refuses a roadmap table out of format, and leaves an unconverted
   writeFileSync(path, "---\njob: Where things stand.\nkind: living\nmax-lines: 60\n---\n# Roadmap\n\n| Phase | Stands |\n|---|---|\n| 2 | almost |\n");
   assert.equal(node("doc-check.mjs").status, 0, "an older roadmap without the markers is not checked");
 });
+
+// ------------------------------------------------- a lane's unnumbered entry (#30, ADR 0006)
+
+/** The test repo with an implementation-log folder and its generated index, committed. */
+function withLog({ token = true } = {}) {
+  const repository = repo();
+  const { dir, run } = repository;
+  const config = CONFIG.replace(
+    "export const GENERATED = [",
+    'export const GENERATED = [{ name: "implementation-log", target: "docs/log/README.md", dir: "docs/log" }, ',
+  ).replace("export const HEADER_EXEMPT = [", "export const HEADER_EXEMPT = [/^docs\\/log\\/\\d/, ");
+  writeFileSync(join(dir, "tools", "doc-config.mjs"), token ? `${config}export const NUMBER_TOKEN = "NNN";\n` : config);
+  mkdirSync(join(dir, "docs", "log"));
+  writeFileSync(join(dir, "docs", "log", "README.md"), "---\njob: The logs.\nkind: generated\n---\n# Log\n\n<!-- generated:start implementation-log -->\n<!-- generated:end implementation-log -->\n");
+  spawnSync(process.execPath, ["tools/doc-index.mjs"], { cwd: dir });
+  run("add", "-A");
+  run("commit", "-q", "-m", "chore: the log — devlog #1");
+  const lane = (...args) => spawnSync(process.execPath, ["tools/doc-check.mjs", ...args], { cwd: dir, encoding: "utf8", env: { ...process.env, PHASE_RUN: "1", PHASE_RUN_LANE: "2" } });
+  const unnumbered = (type = "feat") => {
+    repository.addEntry("NNN", type);
+    writeFileSync(join(dir, "docs", "log", "NNN-lane-work.md"), "# #NNN — The lane's work\n\n**Ticket:** `#5` · **Devlog:** `#NNN`\n");
+  };
+  return { ...repository, lane, unnumbered };
+}
+
+test("inside a lane, an unnumbered entry, its log's file name and devlog #NNN all pass", () => {
+  const { run, lane, unnumbered } = withLog();
+  unnumbered();
+  const tree = lane();
+  assert.equal(tree.status, 0, tree.stderr);
+  const message = lane("--message", "feat: the lane's work — devlog #NNN, Closes #5");
+  assert.equal(message.status, 0, message.stderr);
+  assert.match(lane("--message", "feat: the lane's work — devlog #2").stderr, /cites devlog #2, but the devlog's top entry is #NNN/);
+  assert.equal(lane("--message", "feat: the lane's work — Devlog #nnn").status, 0, "the match ignores case, as for a number");
+  run("add", "-A");
+  run("commit", "-q", "-m", "feat: the lane's work — devlog #NNN, Closes #5");
+  const head = lane("--head");
+  assert.equal(head.status, 0, head.stderr);
+});
+
+test("outside a lane, the same tree and message fail, naming the token", () => {
+  const { node, unnumbered } = withLog();
+  unnumbered();
+  const tree = node("doc-check.mjs").stderr;
+  assert.match(tree, /docs\/devlog\.md:\d+ "## #NNN · feat · work" is a lane's unnumbered entry \(NNN\)/);
+  assert.match(tree, /docs\/log\/NNN-lane-work\.md is named with a lane's token \(NNN\)/);
+  assert.doesNotMatch(tree, /NNN-lane-work\.md: has no header/, "one problem, the token's, not a missing header too");
+  assert.match(node("doc-check.mjs", "--message", "feat: the lane's work — devlog #NNN").stderr, /The commit message cites devlog #NNN, a lane's token/);
+});
+
+test("a lane's entry still needs its type tag; an older doc-config without the token constant still works", () => {
+  const { lane, unnumbered } = withLog({ token: false });
+  unnumbered("party");
+  assert.match(lane("--message", "x — devlog #NNN").stderr, /type "party"/);
+});

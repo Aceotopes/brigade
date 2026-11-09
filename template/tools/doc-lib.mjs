@@ -33,6 +33,11 @@ export function git(args, input) {
 
 export const KINDS = ["living", "log", "record", "generated"];
 
+/** Text matched as itself inside a RegExp. */
+export function escapeRegExp(text) {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 /**
  * The header a doc opens with:
  *   ---
@@ -135,11 +140,15 @@ export function citedDevlogNumbers() {
  * The devlog's entries in file order (newest first), each with its number and
  * whether it is still open. An entry closes when a commit cites it; an entry
  * whose heading carries its hash (the older `## #N — <hash> — title` style) is closed too.
+ * Given a lane's `token`, an entry headed `## #<token>` counts too: its number is the token, and it
+ * stays open until it lands and is numbered.
  */
-export function devlogEntries(text, cited) {
+export function devlogEntries(text, cited, { token = null } = {}) {
+  const unnumbered = token ? new RegExp(`^## #${escapeRegExp(token)}(?![\\w])`) : null;
   return sections(text)
-    .filter((section) => /^## #\d+\b/.test(section.heading))
+    .filter((section) => /^## #\d+\b/.test(section.heading) || unnumbered?.test(section.heading))
     .map((section) => {
+      if (unnumbered?.test(section.heading)) return { ...section, number: token, open: true };
       const number = String(Number(section.heading.match(/^## #(\d+)/)[1]));
       const legacyClosed = !/uncommitted|HASH-PENDING/i.test(section.heading) && /—\s*`?[0-9a-f]{7,}`?\s*—/.test(section.heading);
       return { ...section, number, open: !cited.has(number) && !legacyClosed };

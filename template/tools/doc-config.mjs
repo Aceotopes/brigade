@@ -131,3 +131,9 @@ export const GENERATED = [
 export const DEVLOG_TYPES = ["feat", "fix", "docs", "chore", "refactor", "test", "style", "design", "ci", "infra", "research", "perf"];
 /** Entries from this number on use `## #NNN · type · title` and carry no hash. A project that starts on the workflow starts at 1. */
 export const DEVLOG_TAGGED_FROM = 1;
+/**
+ * The token a lane writes where a number goes (its devlog entry, its log's file name, its commit
+ * message), filled in when it lands. doc-check accepts it only while PHASE_RUN_LANE is set. It is the
+ * phase runner's `phaseRun.hotspots.token` default, and a test keeps the two equal.
+ */
+export const NUMBER_TOKEN = "NNN";

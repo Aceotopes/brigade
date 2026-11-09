@@ -9,6 +9,19 @@ Each commit's entry goes on top, in the shape of `docs/_templates/devlog-entry.m
 message cites it (`devlog #N`). At each phase end, `node tools/doc-rotate.mjs` moves the closed
 entries into `docs/history/devlog/`.
 
+## #31 · feat · hotspots and unnumbered entries: a lane writes NNN, a pure step numbers it
+
+**Built:** #30. A lane may write `NNN` where a number goes, and a pure function numbers it from the
+tip (ADR 0006). Nothing runs a lane yet.
+- doc-check: with `PHASE_RUN_LANE` set, a `## #NNN` entry, a log `NNN-<slug>.md` and `devlog #NNN`
+  pass; without it, each fails, naming the token. `NUMBER_TOKEN` mirrors the runner's `HOTSPOT_TOKEN`.
+- `numbering.mjs` `numberLane`: `log`, `generated` and `own-file` rows (exact, folder or `*`, with
+  `{phase}`); the devlog and the log each take their own next number.
+- The lane prompt's `{{LANE_NUMBERS}}` and `PHASE_RUN_LANE` come only with a lane.
+**Verified:** 10 runner-seam and 3 doc-tools-seam tests written first; the plugin's and the
+template's suites pass; doc-check clean. The code review's fixes are folded in.
+**Next:** #31, the runner copy holds doc-check. **Record:** implementation log 016.
+
 ## #30 · feat · the lane table: two lanes as config, checked at preflight
 
 **Built:** #29. The runner's loader reads `phaseRun.lanes` and `phaseRun.hotspots` and refuses a bad

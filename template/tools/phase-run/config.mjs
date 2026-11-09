@@ -95,8 +95,10 @@ const KEYS = {
 export const MAX_LANES = 2;
 /** What a lane row may take besides a label: any ticket. At most one row takes it (D6). */
 export const ANY_TICKET = "any";
-/** The kinds of hotspot row (ADR 0006); a file on no row is left to git. What each kind does is Landing's. */
+/** The kinds of hotspot row (ADR 0006); a file on no row is left to git. What each kind does is numbering.mjs's. */
 export const HOTSPOT_KINDS = ["log", "generated", "own-file"];
+/** `phaseRun.hotspots.token`'s default: what a lane writes where a number goes. doc-config's NUMBER_TOKEN mirrors it. */
+export const HOTSPOT_TOKEN = "NNN";
 
 /** Which placeholders each kind of value may use. */
 const ALLOWED = {
@@ -614,7 +616,7 @@ function noKeysYet(value, at, allowed) {
   return Object.fromEntries(Object.entries(value).filter(([key]) => key !== "note"));
 }
 
-/** `phaseRun.hotspots` (ADR 0006): checked here; what each kind does, and the token's default, are Landing's. */
+/** `phaseRun.hotspots` (ADR 0006): checked here. A token left out stays null (HOTSPOT_TOKEN, where read); what each kind does is numbering.mjs's. */
 function parseHotspots(section, where) {
   keys(section, KEYS.hotspots, where);
   if (section.token !== undefined && (typeof section.token !== "string" || !/^\S+$/.test(section.token))) {

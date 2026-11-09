@@ -35,7 +35,7 @@ import { homedir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { BROWSER_CHECK, fill, fillEnv, loadRunConfig, qaUrl, sessionEnv as pinnedEnv, targetFingerprint, targetUrl } from "./config.mjs";
+import { BROWSER_CHECK, HOTSPOT_TOKEN, fill, fillEnv, loadRunConfig, qaUrl, sessionEnv as pinnedEnv, targetFingerprint, targetUrl } from "./config.mjs";
 import { Screen, notify, ticketMinutes } from "./display.mjs";
 import { brigadeCatalog, readInstalledBrigade, versionStop, withAutoUpdateOff } from "./brigade.mjs";
 import { LEDGER_PATH, appendRow, ledgerRow, stampVersion } from "./ledger.mjs";
@@ -44,6 +44,7 @@ import { finishSnapshot, takeSnapshot } from "./snapshot.mjs";
 import { DEFAULT_RULES as DEFAULT_SIZE, measureTicket as ticketSize } from "./ticket-size.mjs";
 import { PATCH_ARGS, tamperingVerdict } from "./tampering.mjs";
 import { projectKeeps, readTrim, trimEntries, trimPath, withTrim } from "./trim.mjs";
+import { scratchFor } from "./numbering.mjs";
 import { unreadMatcher } from "./unread.mjs";
 import * as docConfig from "../doc-config.mjs";
 
@@ -739,7 +740,36 @@ function promptValues(project, prose, ticket) {
     BROWSER_GATE: check
       ? `The runner checks this itself: a ticket labelled \`frontend\`, or one that changes a screen's file, does not pass without at least ${check.minimum} screenshots saved to \`${fill(check.screenshots, { N })}/\` **after your last edit to a source file**. A fix you make after the walk (the code review's, a fix round's) means walking again.`
       : "The runner has no screenshot gate for this project; say in the implementation log what you checked.",
+    LANE_NUMBERS: ticket.LANE ? laneNumbers(ticket.LANE, laneToken(project.hotspots), ticket.GOTCHAS_FILE) : "",
   };
+}
+
+/**
+ * The token a lane writes: `phaseRun.hotspots.token`, else HOTSPOT_TOKEN. doc-check accepts only
+ * doc-config's NUMBER_TOKEN, so a token the two disagree on is refused before a lane is told to write it.
+ */
+function laneToken(hotspots, docToken = docConfig.NUMBER_TOKEN ?? HOTSPOT_TOKEN) {
+  const token = hotspots?.token ?? HOTSPOT_TOKEN;
+  if (token !== docToken) {
+    throw new Error(`phaseRun.hotspots.token is "${token}", but tools/doc-config.mjs's NUMBER_TOKEN is "${docToken}", the only token doc-check accepts. Make them the same.`);
+  }
+  return token;
+}
+
+/**
+ * A lane session's numbering paragraph (ADR 0006): it writes the token itself where a number goes,
+ * and its gotchas block to the scratch file numbering.mjs folds in. Empty for a one-lane run, whose
+ * prompt is then today's, byte for byte.
+ */
+function laneNumbers(lane, token, gotchasFile) {
+  return (
+    `\n\n**You are lane \`${lane}\`: write \`${token}\` where a number goes, literally.** Another lane builds beside you, ` +
+    `so neither takes the next number; the runner fills them in when your commit lands on the phase branch. Above, ` +
+    `\`${token}\` stood for "your number"; here it is the text you write: the devlog heading \`## #${token} · <type> · <title>\`, ` +
+    `the log's file name \`${token}-<slug>.md\`, its title \`# #${token} — …\` and its Devlog line's \`#${token}\`, ` +
+    `the devlog entry's \`implementation log ${token}\`, and \`devlog #${token}\` in the commit message. Your gotchas block goes in \`${scratchFor(gotchasFile)}\`, ` +
+    `not in \`${gotchasFile}\`: it is added to that file when your commit lands. doc-check accepts \`${token}\` only in a lane.`
+  );
 }
 
 /** A `-p` call's arguments. Each call is a process of its own, so trim's flags go on a resume too. */
@@ -1963,7 +1993,7 @@ function sessionFacts(result, previous) {
  * run's frozen copy of the runner and its config (snapshot.mjs, ADR 0005); PHASE_RUN_ROOT points
  * the copy's own scripts (stop-tests.mjs) back at the repo they check.
  */
-function runVariables({ ticket, base, spec, runner, root }) {
+function runVariables({ ticket, base, spec, runner, root, lane = null }) {
   return {
     PHASE_RUN: "1",
     PHASE_RUN_TICKET: String(ticket),
@@ -1971,6 +2001,8 @@ function runVariables({ ticket, base, spec, runner, root }) {
     ...(spec ? { PHASE_RUN_SPEC: String(spec) } : {}),
     PHASE_RUN_RUNNER: runner,
     PHASE_RUN_ROOT: root,
+    // A lane's session only (0.7.0): doc-check then accepts the number token (ADR 0006).
+    ...(lane ? { PHASE_RUN_LANE: String(lane) } : {}),
   };
 }
 
