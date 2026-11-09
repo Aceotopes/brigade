@@ -9,6 +9,18 @@ Each commit's entry goes on top, in the shape of `docs/_templates/devlog-entry.m
 message cites it (`devlog #N`). At each phase end, `node tools/doc-rotate.mjs` moves the closed
 entries into `docs/history/devlog/`.
 
+## #26 · docs · 0.7.0's spec, published
+
+**Built:** spec #27, "0.7.0, two lanes", from discovery 05 (D1–D19), labelled `ready-for-agent`.
+It says D1 (0.6.2) is already built, lists 90 user stories and the 13 proposed tickets, and pins the
+source's §20 at `43a31019`. Its test seams are the loaders, the runner's exports, doc-tools, setup,
+the hooks, and one new one: Landing's pure plan and its executor on throwaway repos. #27 joins
+`.claude/spec-issues.json`, so the guard refuses a closing keyword for it. The handoff now says the
+spec is out and the tickets wait for Block23GymV2's night.
+**Verified:** the issue reads back open and labelled; no closing keyword or stray issue number in its
+body; doc-check clean. Nothing built.
+**Next:** Block23GymV2's first night, then `/to-tickets` from #27. **Record:** this entry only.
+
 ## #25 · chore · update the workflow to 0.6.2
 
 **Built:** `/update-workflow` from 0.6.1 to 0.6.2: `tools/doc-check.mjs`,
