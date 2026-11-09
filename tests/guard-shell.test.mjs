@@ -1,10 +1,11 @@
 // Tests for hooks/guard-shell.mjs: which project it guards, and which commands are aimed at it.
 // Run: node --test tests/*.test.mjs
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { FAILING_DOC_CHECK, repo, runHook } from "./helpers.mjs";
+import { FAILING_DOC_CHECK, repo, runHook, write } from "./helpers.mjs";
 
 /** The hook as Claude Code runs it in `project`: the session's cwd is the project unless given. */
 function guard(project, command, { cwd = project, env = {} } = {}) {
@@ -49,6 +50,25 @@ test("inside a run the pre-commit doc-check is the run's copy's, pointed at the 
   const inRun = guard(dir, 'git commit -m "feat: x"', { env });
   assert.equal(inRun.status, 0, inRun.stderr);
   assert.match(guard(dir, 'git commit -m "feat: x"').stderr, /doc-check stub ran/, "attended: the live tree's doc-check");
+});
+
+// #33 (ADR 0007): a lane's session runs in its worktree (CLAUDE_PROJECT_DIR), and its runner copy is
+// the branch's shared one, in the primary checkout, named by an absolute PHASE_RUN_RUNNER.
+test("in a lane's worktree the guard reads the primary's runner copy and guards as it does lane 1", () => {
+  const passing = 'import { relative } from "node:path";\nif (relative(process.cwd(), process.env.PHASE_RUN_ROOT) !== "") { console.error("not run in the worktree"); process.exit(1); }\n';
+  const { dir, git } = repo("brigade-project-", { ".gitignore": ".phase-run/\n", ...FAILING_DOC_CHECK, ".claude/workflow.json": rule("live-tool") });
+  write(dir, { [`${COPY}/.claude/workflow.json`]: rule("frozen-tool"), [`${COPY}/tools/doc-check.mjs`]: passing });
+  const worktree = `${dir}-lanes-2`;
+  git("worktree", "add", "-q", "-b", "phase-x-lane-2", worktree);
+  const env = { PHASE_RUN: "1", PHASE_RUN_RUNNER: join(dir, COPY), PHASE_RUN_ROOT: worktree, PHASE_RUN_LANE: "2" };
+  assert.match(guard(worktree, "frozen-tool x", { env }).stderr, /no frozen-tool here/, "the copy's rule, from outside the worktree");
+  assert.equal(guard(worktree, "live-tool x", { env }).status, 0, "the live rule written mid-night does not judge the lane");
+  const commit = guard(worktree, 'git commit -m "feat: x"', { env });
+  assert.equal(commit.status, 0, `the copy's doc-check, pointed at the worktree, on the lane's phase-* branch: ${commit.stderr}`);
+  assert.match(guard(worktree, "git push", { env }).stderr, /never pushes/);
+  // Off a phase-* branch the lane's commit is refused, as lane 1's is.
+  execFileSync("git", ["checkout", "-q", "-b", "lane-2"], { cwd: worktree });
+  assert.match(guard(worktree, 'git commit -m "feat: x"', { env }).stderr, /commits only on a phase-\* branch \(this is "lane-2"\)/);
 });
 
 test("a run's copy taken without doc-check (an older runner) leaves the commit to the live one", () => {

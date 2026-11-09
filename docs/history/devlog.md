@@ -9,6 +9,17 @@ Each commit's entry goes on top, in the shape of `docs/_templates/devlog-entry.m
 message cites it (`devlog #N`). At each phase end, `node tools/doc-rotate.mjs` moves the closed
 entries into `docs/history/devlog/`.
 
+## #34 · feat · the worktree: run.mjs --lane builds in a lane's own worktree, each pass unlanded
+
+**Built:** #33. A lane runs its tickets in its own git worktree, with its ports, QA database, prefix and env (D8, D13).
+- `lane.mjs`: the worktree made, or reused and reset to the tip; `worktreeSetup`; the ignored-import check; lane locks and the branch join.
+- `run.mjs --lane`: run state stays in the primary (`lane-<id>/`); the session's root is the worktree (ADR 0007).
+- Both lanes share one runner copy; the last lane out marks it finished.
+- A lane's env carries `PHASE_RUN_LANE`, its QA port, database and prefix; `{qaUrl}` takes its database.
+- A pass stays on `<branch>-lane-<id>`: no push, no migration (ADR 0008). A run without --lane is unchanged.
+**Verified:** 17 tests at the runner and hook seams, written first; the plugin's and the template's
+suites pass; doc-check clean; the code review's fixes folded in. **Next:** #34. **Record:** implementation log 019.
+
 ## #33 · feat · the lane declaration: a ## Lane holds only on a ticket with its lane's label
 
 **Built:** #32. `/ticket-check` holds a ticket's `## Lane` to the label its lane's row `takes` (D6).

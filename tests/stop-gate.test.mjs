@@ -274,6 +274,28 @@ test("with PHASE_RUN_RUNNER set the stop gate imports the copy's receipt code, n
   assert.equal(lastLog().testsSkipped, true);
 });
 
+// #33 (ADR 0007): a lane's stop check judges its own worktree with the primary's shared copy: the
+// receipt it reads, the tree it keys and its log are the worktree's.
+test("in a lane's worktree the stop gate reads the worktree's receipt, with the primary's runner copy", async () => {
+  const workflow = JSON.stringify({ version: 1, stopGate: { checks: [{ label: "Tests", run: FAILING_TESTS, receipt: true }] } });
+  const { dir, git } = repo("brigade-project-", { ".gitignore": ".phase-run/\n", ".claude/workflow.json": workflow });
+  write(dir, { [`${COPY}/.claude/workflow.json`]: workflow, [`${COPY}/tools/phase-run/receipt.mjs`]: readFileSync(RECEIPT_SOURCE, "utf8"), [`${COPY}/tools/phase-run/unread.mjs`]: readFileSync(RECEIPT_CODES["0.6.0"]["tools/phase-run/unread.mjs"], "utf8") });
+  const worktree = `${dir}-lanes-2`;
+  git("worktree", "add", "-q", "-b", "phase-x-lane-2", worktree);
+  const base = git("rev-parse", "HEAD");
+  write(worktree, { "changed.txt": "the lane's work\n", ".phase-run/.keep": "" });
+  const receipts = await import(pathToFileURL(RECEIPT_SOURCE).href);
+  const vouch = (root) => receipts.writeReceipt(receipts.receiptPath(root, "7"), { base, tree: receipts.treeKey(worktree, []), commands: [FAILING_TESTS], passed: true, passedAt: "now" });
+  const check = () => stop(worktree, { PHASE_RUN: "1", PHASE_RUN_TICKET: "7", PHASE_RUN_BASE: base, PHASE_RUN_RUNNER: join(dir, COPY), PHASE_RUN_ROOT: worktree });
+  vouch(dir);
+  assert.equal(check().status, 2, "a receipt in the primary checkout vouches for nothing in the worktree");
+  vouch(worktree);
+  assert.equal(check().status, 0, "the worktree's own receipt held");
+  const log = JSON.parse(readFileSync(join(worktree, ".phase-run", "stop-check-log.jsonl"), "utf8").trim().split("\n").at(-1));
+  assert.deepEqual([log.testsSkipped, log.receipt], [true, "held"]);
+  assert.equal(existsSync(join(dir, ".phase-run", "stop-check-log.jsonl")), false, "nothing of the session's is written in the primary");
+});
+
 test("a PHASE_RUN_RUNNER that names no folder, or a copy that lost its config, fails the stop gate", () => {
   const { dir, check } = copyProject(PASSING, null);
   const result = check({ PHASE_RUN_RUNNER: join(dir, COPY) });

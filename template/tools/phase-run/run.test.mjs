@@ -4,14 +4,15 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { BROWSER_CHECK, fill, loadRunConfig, parseRunConfig, qaUrl, sessionEnv, targetFingerprint, targetUrl } from "./config.mjs";
+import { BROWSER_CHECK, fill, laneQaUrl, loadRunConfig, parseRunConfig, qaUrl, sessionEnv, targetFingerprint, targetUrl } from "./config.mjs";
+import { afterPass, ignoredImports, ignoredImportsProblem, joinBranch, laneLockPath, lanePortProblems, laneRoots, laneRow, laneValues, liveLanes, mayFinishCopy, prepareWorktree, setupWorktree, writeLaneLock } from "./lane.mjs";
 import { brigadeCatalog, installedBrigade, parsePluginList, readInstalledBrigade, versionStop } from "./brigade.mjs";
 import { readLedger } from "./ledger.mjs";
-import { QUIET_MS, SETTLE_MS, applyMigrations, backgroundArgs, docCheck, folderTrusted, gatePlan, gotchasFile, holdReason, loadResults, outsideAreas, printArgs, projectGates, promptValues, pullRequestBody, recordResult, render, report, runSession, runVariables, runnerFile, screenshotsSince, sessionSettings, trimmedSettings, turnOver } from "./run.mjs";
+import { QUIET_MS, SETTLE_MS, applyMigrations, backgroundArgs, docCheck, folderTrusted, gatePlan, gotchasFile, holdReason, implementationLogAdded, loadResults, outsideAreas, printArgs, projectGates, promptValues, pullRequestBody, recordResult, render, report, runSession, runVariables, runnerFile, screenshotsSince, sessionSettings, trimmedSettings, turnOver } from "./run.mjs";
 import { finishSnapshot, readManifest, runnerChanges, takeSnapshot } from "./snapshot.mjs";
 import { PATCH_ARGS } from "./tampering.mjs";
 import { TRIM_FLAGS, readTrim, trimPath } from "./trim.mjs";
@@ -1171,8 +1172,9 @@ test("inside a run --update-baseline is refused, naming why, and the copy's base
 test("the gate and the report run doc-check through docCheck, never the live path", () => {
   const source = readFileSync(join(HERE, "run.mjs"), "utf8");
   assert.doesNotMatch(source, /exec\("node", \["tools\/doc-check\.mjs"/);
-  assert.match(source, /docCheck\(run\.runner, ROOT, \["--head"\]\)/);
-  assert.match(source, /docCheck\(run\.runner, ROOT, \["--report"\]\)/);
+  // `work`: the session's root, the lane's worktree in a lane (ADR 0007), else the repo, as before.
+  assert.match(source, /docCheck\(run\.runner, work, \["--head"\]/);
+  assert.match(source, /docCheck\(run\.runner, work, \["--report"\]\)/);
 });
 
 // D16 (#21): trim. A per-machine list switches off what the owner's nights don't need, and a
@@ -1443,4 +1445,268 @@ test("a night reads its base settings and its prompts from the run's copy, never
   }
   const source = readFileSync(join(here, "run.mjs"), "utf8");
   assert.doesNotMatch(source, /join\(HERE, "(settings\.json|ticket-prompt\.md|fix-prompt\.md)"\)/, "every read goes through runnerFile");
+});
+
+// ------------------------------------------------------------------- the lane (#33)
+
+const refusal = (fn) => {
+  try {
+    fn();
+  } catch (error) {
+    return error.message;
+  }
+  assert.fail("expected a refusal");
+};
+
+const MAKE_TOOL = `node -e "const fs=require('fs');fs.mkdirSync('node_modules/.bin',{recursive:true});fs.writeFileSync('node_modules/.bin/tool','')"`;
+const LANES = {
+  qa: { name: "app_qa", url: "postgresql://qa:pw@localhost:5432/app_qa?schema=public" },
+  lanes: {
+    rows: [
+      { id: 1, takes: "any", worktree: "../app-lanes/lane-1" },
+      { id: 2, takes: "walk", worktree: "../app-lanes/lane-2", qa: "app_qa_2", ports: [{ port: 4402, what: "its QA server", name: "qa" }, { port: 4403, what: "its mail catcher" }], testDbPrefix: "lane2_", env: { CACHE_DB: "2" } },
+    ],
+    worktreeSetup: { copy: [".env"], commands: [MAKE_TOOL], leaves: ["node_modules/.bin/tool"] },
+  },
+};
+
+/** A throwaway repo at `<parent>/app` with a phase branch, an ignored `.env` and the lane rows above. */
+function laneProject(phaseRun = LANES) {
+  const parent = mkdtempSync(join(tmpdir(), "phase-run-lane-"));
+  const root = join(parent, "app");
+  mkdirSync(root);
+  const git = (cwd, ...args) => {
+    const result = spawnSync("git", args, { cwd, encoding: "utf8" });
+    if (result.status !== 0) throw new Error(`git ${args.join(" ")}: ${result.stderr}`);
+    return result.stdout.trim();
+  };
+  const put = (dir, files) => {
+    for (const [rel, text] of Object.entries(files)) {
+      mkdirSync(dirname(join(dir, rel)), { recursive: true });
+      writeFileSync(join(dir, rel), text);
+    }
+  };
+  git(root, "init", "-q", "-b", "main");
+  git(root, "config", "user.email", "t@example.com");
+  git(root, "config", "user.name", "T");
+  put(root, { ".gitignore": ".env\nnode_modules/\n.phase-run/\ngenerated/\n", "README.md": "# app\n" });
+  git(root, "add", "-A");
+  git(root, "commit", "-q", "-m", "start");
+  git(root, "branch", "phase-x");
+  put(root, { ".env": "SECRET=primary\n" });
+  const config = runConfig(phaseRun);
+  const lane = laneRow(config, "2");
+  const roots = laneRoots({ root, branch: "phase-x", lane });
+  const shell = (command, cwd) => {
+    const result = spawnSync(command, { cwd, shell: true, encoding: "utf8" });
+    return { ok: result.status === 0, output: `${result.stdout}${result.stderr}` };
+  };
+  const start = () => {
+    const made = prepareWorktree({ root, tree: roots.tree, branch: "phase-x", ownBranch: roots.branch });
+    setupWorktree({ root, tree: roots.tree, setup: config.lanes.worktreeSetup, shell });
+    return made;
+  };
+  return { parent, root, git, put, config, lane, roots, shell, start };
+}
+
+test("--lane 2 makes the worktree at the row's path on its own branch, and runs worktreeSetup there", () => {
+  const { parent, root, git, roots, start } = laneProject();
+  assert.equal(roots.tree, join(parent, "app-lanes", "lane-2"), "the row's path, from the primary checkout");
+  assert.equal(roots.branch, "phase-x-lane-2", "a phase-* branch: the guard lets a session commit only on one");
+  const made = start();
+  assert.equal(made.reused, false);
+  assert.equal(git(roots.tree, "branch", "--show-current"), "phase-x-lane-2");
+  assert.equal(git(roots.tree, "rev-parse", "HEAD"), git(root, "rev-parse", "phase-x"), "cut from the phase branch's tip");
+  assert.equal(readFileSync(join(roots.tree, ".env"), "utf8"), "SECRET=primary\n", "copy brought the untracked file in");
+  assert.ok(existsSync(join(roots.tree, "node_modules/.bin/tool")), "the commands ran in the worktree");
+  assert.equal(existsSync(join(root, "node_modules")), false, "and never in the primary checkout");
+});
+
+test("the lane refuses to start when a leaves file is missing, or a copy file or a command fails, naming it", () => {
+  const leaves = laneProject({ ...LANES, lanes: { ...LANES.lanes, worktreeSetup: { ...LANES.lanes.worktreeSetup, leaves: ["node_modules/.bin/tool", "generated/client.mjs"] } } });
+  const missing = refusal(leaves.start);
+  assert.match(missing, /worktreeSetup\.leaves: generated\/client\.mjs is missing/);
+  assert.doesNotMatch(missing, /node_modules\/\.bin\/tool/, "only the missing one is named");
+
+  const copy = laneProject({ ...LANES, lanes: { ...LANES.lanes, worktreeSetup: { copy: [".env", ".claude/settings.local.json"] } } });
+  assert.match(refusal(copy.start), /worktreeSetup\.copy names \.claude\/settings\.local\.json, which the primary checkout/);
+
+  const command = laneProject({ ...LANES, lanes: { ...LANES.lanes, worktreeSetup: { commands: ['node -e "process.exit(3)"'] } } });
+  assert.match(refusal(command.start), /worktreeSetup\.commands: `node -e "process\.exit\(3\)"` failed/);
+});
+
+test("a second start reuses the worktree, reset to the phase branch's tip, its install kept", () => {
+  const { root, git, put, roots, start } = laneProject();
+  start();
+  put(roots.tree, { "README.md": "an edit a dead session left\n", "stray.txt": "an untracked file\n" });
+  put(root, { "later.md": "landed by the other lane\n" });
+  git(root, "add", "later.md");
+  git(root, "commit", "-q", "-m", "later");
+  git(root, "branch", "-f", "phase-x", "HEAD");
+  const again = start();
+  assert.equal(again.reused, true);
+  assert.equal(git(roots.tree, "rev-parse", "HEAD"), git(root, "rev-parse", "phase-x"), "at the new tip");
+  assert.equal(git(roots.tree, "status", "--porcelain"), "", "the edit and the stray file are gone");
+  assert.ok(existsSync(join(roots.tree, "later.md")));
+  assert.ok(existsSync(join(roots.tree, "node_modules/.bin/tool")), "ignored files (an install) are kept");
+  // A worktree folder deleted by hand is still registered with git: it is pruned and made again.
+  rmSync(roots.tree, { recursive: true, force: true });
+  const remade = start();
+  assert.equal(remade.reused, false);
+  assert.equal(git(roots.tree, "rev-parse", "HEAD"), git(root, "rev-parse", "phase-x"));
+});
+
+test("a passing ticket's commit stays on the lane's branch: the phase branch doesn't move, nothing is pushed or migrated", () => {
+  const { root, git, put, roots, start } = laneProject();
+  start();
+  const tip = git(root, "rev-parse", "phase-x");
+  put(roots.tree, { "feature.md": "the ticket\n" });
+  git(roots.tree, "add", "feature.md");
+  git(roots.tree, "commit", "-q", "-m", "feat: the ticket — Closes #7");
+  assert.equal(git(root, "rev-parse", "phase-x"), tip, "the phase branch is where it was");
+  assert.match(git(root, "log", "-1", "--format=%s", "phase-x-lane-2"), /Closes #7/);
+  assert.deepEqual(afterPass(laneRow(runConfig(LANES), "2")), { push: false, migrate: false }, "Landing pushes and migrates (ADR 0008)");
+  assert.deepEqual(afterPass(null), { push: true, migrate: true }, "a run without --lane, as before");
+  // The gates and finishBuilt call git and gh, so the seam is pinned in the source, as docCheck's is.
+  const source = readFileSync(join(HERE, "run.mjs"), "utf8");
+  const body = (name) => source.slice(source.indexOf(`async function ${name}(`), source.indexOf("\n}\n", source.indexOf(`async function ${name}(`)));
+  assert.match(body("runGates"), /if \(!afterPass\(lane\)\.migrate\) \{[\s\S]*?return \{ ok: true \};/, "the migration is skipped before it is applied");
+  assert.match(body("finishBuilt"), /const pushing = afterPass\(lane\)\.push;[\s\S]*const push = pushing \? gitTry\("push"/, "the push waits on afterPass");
+  // A restart would reset over it: it is refused, naming the commit, until Landing lands it.
+  assert.match(refusal(start), /phase-x-lane-2 holds commits phase-x does not have[\s\S]*feat: the ticket — Closes #7/);
+});
+
+test("a folder at the row's path that is not one of the repo's worktrees is refused, never reused", () => {
+  const { put, roots, start } = laneProject();
+  put(roots.tree, { "notes.txt": "someone's folder\n" });
+  assert.match(refusal(start), /exists and is not one of this repo's worktrees/);
+});
+
+test("a tracked script that imports an ignored file is refused at start, naming both", () => {
+  const { root, git, put } = laneProject();
+  put(root, {
+    "scripts/seed.mjs": 'import { client } from "../generated/client.mjs";\nconst x = await import("./local-only.mjs");\n',
+    "src/app.ts": 'import { helper } from "./helper.js";\nimport "./styles";\nconst cfg = require("./missing-and-not-ignored");\n',
+    "src/helper.ts": "export const helper = 1;\n",
+    "src/styles.ts": "export {};\n",
+    "scripts/local-only.mjs": "export {};\n",
+    "generated/client.mjs": "export const client = 1;\n",
+  });
+  put(root, { ".gitignore": ".env\nnode_modules/\n.phase-run/\ngenerated/\nscripts/local-only.mjs\n" });
+  git(root, "add", "-A");
+  git(root, "commit", "-q", "-m", "scripts");
+  const found = ignoredImports(root);
+  assert.deepEqual(found, [
+    { script: "scripts/seed.mjs", imports: "generated/client.mjs" },
+    { script: "scripts/seed.mjs", imports: "scripts/local-only.mjs" },
+  ]);
+  const problem = ignoredImportsProblem(found);
+  assert.match(problem, /scripts\/seed\.mjs imports generated\/client\.mjs/);
+  assert.match(problem, /scripts\/seed\.mjs imports scripts\/local-only\.mjs/);
+  // A file worktreeSetup accounts for (made by a command and checked in leaves, or copied in) passes.
+  assert.deepEqual(ignoredImports(root, ["generated", "scripts/local-only.mjs"]), []);
+  assert.equal(ignoredImportsProblem([]), null);
+});
+
+test("each of the lane's ports is checked free at start, and only the lane's", async () => {
+  const lane = laneRow(runConfig(LANES), "2");
+  const busy = async (port) => port === 4403;
+  assert.deepEqual(await lanePortProblems(lane, busy), ["Something is listening on :4403 (its mail catcher, lane 2). Stop it before the lane starts."]);
+  assert.deepEqual(await lanePortProblems(lane, async () => false), []);
+});
+
+test("a lane started without --branch on a detached checkout joins the branch a live lane's lock names", () => {
+  const state = mkdtempSync(join(tmpdir(), "phase-run-locks-"));
+  const alive = (pid) => pid !== 999;
+  assert.equal(joinBranch(state, alive), null, "no live lane: nothing to join");
+  writeLaneLock(state, { id: 1, pid: 101, branch: "phase-x", at: AT });
+  writeLaneLock(state, { id: 3, pid: 999, branch: "phase-old", at: AT }); // its process died
+  assert.equal(laneLockPath(state, 1), join(state, "lane-1.lock"), "under .phase-run/ itself, found before the branch is known");
+  assert.equal(joinBranch(state, alive), "phase-x");
+  assert.deepEqual(liveLanes(state, alive).map((lock) => [lock.lane, lock.branch]), [["1", "phase-x"]]);
+  writeLaneLock(state, { id: 2, pid: 102, branch: "phase-y", at: AT });
+  assert.match(refusal(() => joinBranch(state, alive)), /two branches \(phase-x, phase-y\)/);
+});
+
+test("both lanes share one runner copy: the second reuses the first's, and is refused when the live runner differs", () => {
+  const { root, put, take } = snapshotProject();
+  const lane = (id, worktree) => laneRoots({ root, branch: "phase-x", lane: { id, worktree } });
+  const one = lane(1, "../lanes/lane-1");
+  const two = lane(2, "../lanes/lane-2");
+  assert.equal(one.copyDir, two.copyDir, "one folder per branch");
+  assert.notEqual(one.runDir, two.runDir);
+  assert.equal(two.runDir, join(root, ".phase-run", "phase-x", "lane-2"), "results in the primary checkout's lane-<id>/");
+  const first = takeSnapshot({ root, runDir: one.copyDir, runId: "lane-1", commit: "abc", at: AT, brigade: "0.6.0" });
+  const second = takeSnapshot({ root, runDir: two.copyDir, runId: "lane-2", commit: "abc", at: AT + 60_000, brigade: "0.6.0" });
+  assert.deepEqual([second.reused, second.dir, second.manifest.runId], [true, first.dir, "lane-1"]);
+  put("tools/phase-run/run.mjs", "// changed after lane 1 started\n");
+  assert.match(refusal(() => take("lane-2")), /tools\/phase-run\/run\.mjs/);
+  // The copy is marked finished only by the last lane out, or the other's night is judged by a fresh one.
+  const state = mkdtempSync(join(tmpdir(), "phase-run-locks-"));
+  writeLaneLock(state, { id: 1, pid: 101, branch: "phase-x", at: AT });
+  writeLaneLock(state, { id: 2, pid: 102, branch: "phase-x", at: AT });
+  assert.equal(mayFinishCopy(state, { id: 2, branch: "phase-x" }, () => true), false, "lane 1 still runs");
+  assert.equal(mayFinishCopy(state, { id: 2, branch: "phase-x" }, (pid) => pid !== 101), true, "lane 1 is gone");
+});
+
+test("a lane session's env holds the lane's PHASE_RUN_* values and its row's env; its root is the worktree", () => {
+  const config = runConfig(LANES);
+  const lane = laneRow(config, "2");
+  const roots = laneRoots({ root: "/repo", branch: "phase-x", lane });
+  const env = runVariables({ ticket: 7, base: "abc", spec: 5, runner: "/repo/.phase-run/phase-x/runner", root: roots.tree, lane: laneValues(lane, config) });
+  assert.deepEqual(env, {
+    CACHE_DB: "2",
+    PHASE_RUN: "1",
+    PHASE_RUN_TICKET: "7",
+    PHASE_RUN_BASE: "abc",
+    PHASE_RUN_SPEC: "5",
+    PHASE_RUN_RUNNER: "/repo/.phase-run/phase-x/runner",
+    PHASE_RUN_ROOT: resolve("/repo", "../app-lanes/lane-2"),
+    PHASE_RUN_LANE: "2",
+    PHASE_RUN_QA_PORT: "4402",
+    PHASE_RUN_QA_DATABASE: "app_qa_2",
+    PHASE_RUN_TEST_DB_PREFIX: "lane2_",
+  });
+  assert.equal("PHASE_RUN_FAKE_NOW" in env, false, "reserved, set by no runner code");
+  // Lane 1's row has no qa port and no prefix: its database is qa.name's, and the project's own test names apply.
+  const one = runVariables({ ticket: 7, base: "abc", spec: null, runner: "r", root: "/w", lane: laneValues(laneRow(config, "1"), config) });
+  assert.deepEqual([one.PHASE_RUN_LANE, one.PHASE_RUN_QA_DATABASE, "PHASE_RUN_QA_PORT" in one, "PHASE_RUN_TEST_DB_PREFIX" in one], ["1", "app_qa", false, false]);
+  // A row's env never names a runner variable.
+  const reserved = { ...LANES, lanes: { rows: [{ id: 2, takes: "any", worktree: "../w", env: { PHASE_RUN_ROOT: "/elsewhere" } }] } };
+  assert.match(refusal(() => runConfig(reserved)), /env names PHASE_RUN_ROOT: PHASE_RUN_\* names are the runner's own/);
+});
+
+test("the lane's QA url takes its database, by the loader's rule; a url with no place for it is refused", () => {
+  const config = runConfig({ ...LANES, sessionEnv: { DATABASE_URL: "{qaUrl}" } });
+  const lookup = () => undefined;
+  const two = laneRow(config, "2");
+  assert.equal(laneQaUrl(config, two, lookup), "postgresql://qa:pw@localhost:5432/app_qa_2?schema=public", "the path's database, never the user name's text");
+  assert.equal(laneQaUrl(config, laneRow(config, "1"), lookup), qaUrl(config, lookup), "lane 1 rides on qa.name");
+  assert.equal(laneQaUrl(config, null, lookup), qaUrl(config, lookup), "a run without --lane, as before");
+  assert.deepEqual(sessionEnv(config, lookup, two), { DATABASE_URL: "postgresql://qa:pw@localhost:5432/app_qa_2?schema=public" });
+  assert.deepEqual(sessionEnv(config, lookup), { DATABASE_URL: qaUrl(config, lookup) });
+  const odd = runConfig({ ...LANES, qa: { name: "app_qa", url: "postgresql://localhost:5432/other" } });
+  assert.match(refusal(() => laneQaUrl(odd, laneRow(odd, "2"), lookup)), /does not end in phaseRun\.qa\.name "app_qa"/);
+});
+
+test("--lane names a row the config has; with no lanes section it is refused", () => {
+  assert.match(refusal(() => laneRow(runConfig({}), "2")), /has no phaseRun\.lanes/);
+  assert.match(refusal(() => laneRow(runConfig(LANES), "9")), /no lane "9" \(its lanes: 1, 2\)/);
+});
+
+test("a lane's settings also deny edits to the run's folder by its absolute path: the shared copy sits outside the worktree", () => {
+  const runFolder = process.platform === "win32" ? "D:\\work\\app\\.phase-run\\phase-x" : "/work/app/.phase-run/phase-x";
+  const rule = process.platform === "win32" ? "Edit(//d/work/app/.phase-run/phase-x/**)" : "Edit(//work/app/.phase-run/phase-x/**)";
+  const lane = sessionSettings({}, { allow: [], deny: [] }, { branch: "phase-x", env: {}, background: true, prompt: null, runFolder });
+  assert.ok(lane.permissions.deny.includes(rule), lane.permissions.deny.join("\n"));
+  assert.ok(lane.permissions.deny.includes("Edit(./.phase-run/phase-x/**)"), "the worktree's own run folder too");
+  const plain = sessionSettings({}, { allow: [], deny: [] }, { branch: "phase-x", env: {}, background: true, prompt: null });
+  assert.deepEqual(plain.permissions.deny.filter((r) => r.startsWith("Edit(//")), [], "a run without --lane, as before");
+});
+
+test("in a lane the docs gate takes the number token for the implementation log's number", () => {
+  assert.equal(implementationLogAdded("docs/history/implementation-log/019-the-worktree.md\n", null), true);
+  assert.equal(implementationLogAdded("docs/history/implementation-log/NNN-the-worktree.md\n", null), false, "one lane: a number, as before");
+  assert.equal(implementationLogAdded("docs/history/implementation-log/NNN-the-worktree.md\n", "NNN"), true);
+  assert.equal(implementationLogAdded("docs/history/devlog.md\n", "NNN"), false);
 });

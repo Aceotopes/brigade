@@ -157,5 +157,6 @@ test("a lane session's prompt tells it to write NNN where a number goes; a one-l
 test("a lane session runs under PHASE_RUN_LANE; a one-lane session never does", () => {
   const base = { ticket: 7, base: "abc", spec: 5, runner: "r", root: "/repo" };
   assert.equal("PHASE_RUN_LANE" in runVariables(base), false);
-  assert.equal(runVariables({ ...base, lane: "2" }).PHASE_RUN_LANE, "2");
+  // The lane's values (lane.mjs laneValues, #33), not a bare id.
+  assert.equal(runVariables({ ...base, lane: { id: "2", env: {} } }).PHASE_RUN_LANE, "2");
 });

@@ -517,8 +517,7 @@ function parseLanes(section, where, qa) {
   }
   const at = (i) => `${where}.rows[${i}]`;
   const lanes = rows.map((row, i) => parseLane(row, at(i), qa));
-  // A row's QA database: its own `qa`, else phaseRun.qa's own (its `name`), as lane 1's is.
-  const database = (lane) => lane.qa ?? qa?.name ?? null;
+  const database = (lane) => laneDatabase(lane, qa);
   const databaseFrom = (j) => (lanes[j].qa === null ? `phaseRun.qa.name, as it has no "qa"` : `${at(j)}.qa`);
   lanes.forEach((lane, i) => {
     const earlier = (same) => lanes.findIndex((other, j) => j < i && same(other));
@@ -560,6 +559,14 @@ function parseLanes(section, where, qa) {
   };
 }
 
+/**
+ * A lane's QA database: its row's own `qa`, else phaseRun.qa's `name`, as lane 1's is; null with no
+ * qa section. The one rule the loader's refusal, the lane's url and its env all read.
+ */
+export function laneDatabase(lane, qa) {
+  return lane.qa ?? qa?.name ?? null;
+}
+
 /** One lane row. `takes` is "any" or a label the project picks; `testDbPrefix` may be left out, never set empty. */
 function parseLane(row, at, qa) {
   keys(row, KEYS.lane, at);
@@ -572,6 +579,9 @@ function parseLane(row, at, qa) {
     testDbPrefix: row.testDbPrefix === undefined ? null : testDbPrefix(row.testDbPrefix, `${at}.testDbPrefix`),
     env: envBlock(row.env, `${at}.env`, ALLOWED.laneEnv),
   };
+  // The runner sets PHASE_RUN_* itself (PHASE_RUN_LANE, its QA port and database, its root): a row's env never replaces one.
+  const reserved = Object.keys(lane.env).filter((name) => /^PHASE_RUN/.test(name));
+  if (reserved.length) throw new Error(`${at}.env names ${reserved.join(", ")}: PHASE_RUN_* names are the runner's own, set for every lane. Give the variable another name.`);
   if (lane.qa !== null && !qa) throw new Error(`${at}.qa is set, but there is no phaseRun.qa section whose url it goes into.`);
   if (lane.qa !== null && !lane.ports.some((port) => port.name === "qa")) {
     throw new Error(`${at}.qa is set, but ${at}.ports has no port named "qa": the lane's browser check would reach another lane's QA server.`);
@@ -681,9 +691,36 @@ export function targetFingerprint(url) {
   return new URL(url).hostname;
 }
 
-/** The values a session's environment pins. */
-export function sessionEnv(config, lookup) {
-  return fillEnv(config.sessionEnv, { qaUrl: qaUrl(config, lookup) });
+/**
+ * The QA database's address for a lane (D4): qaUrl's, with its path's last segment, which must be
+ * `qa.name`, swapped for the lane's database. The database is the row's `qa`, else `qa.name`, the
+ * rule the loader's refusal uses. With no lane, or a lane on `qa.name`, it is qaUrl's as it is.
+ */
+export function laneQaUrl(config, lane, lookup) {
+  const url = qaUrl(config, lookup);
+  if (url === null || !lane) return url;
+  const database = laneDatabase(lane, config.qa);
+  if (database === config.qa.name) return url;
+  // The path is found from the url's end (path, query, fragment), never by searching for its text,
+  // which may also sit in the user name ("postgresql://qa:pw@host/qa").
+  let path = null;
+  let at = -1;
+  try {
+    const parsed = new URL(url);
+    const suffix = `${parsed.pathname}${parsed.search}${parsed.hash}`;
+    if (url.endsWith(suffix)) [path, at] = [parsed.pathname, url.length - suffix.length];
+  } catch {
+    path = null;
+  }
+  if (at === -1 || path.split("/").at(-1) !== config.qa.name) {
+    throw new Error(`phaseRun.qa.url's path does not end in phaseRun.qa.name "${config.qa.name}", so lane ${lane.id}'s database "${database}" has no place in it. End the url's path in /${config.qa.name}.`);
+  }
+  return `${url.slice(0, at)}${path.slice(0, path.length - config.qa.name.length)}${database}${url.slice(at + path.length)}`;
+}
+
+/** The values a session's environment pins; in a lane, its `{qaUrl}` is the lane's database's. */
+export function sessionEnv(config, lookup, lane = null) {
+  return fillEnv(config.sessionEnv, { qaUrl: laneQaUrl(config, lane, lookup) });
 }
 
 // -------------------------------------------------------------------- checking

@@ -38,3 +38,13 @@ listed in the gotchas index, `docs/agents/gotchas/README.md`.
 - A refused `## Lane` exits 1; a size or own-file warning exits 0. `/ticket-check` keeps `run-ready` off on the 1. pinned: none (`main()` calls `gh`).
 - `## Lane` is matched exactly (`## Lanes` is another section), and the label decides, never the Areas. pinned: the same test.
 - The two `ticket-template.md` copies are kept identical, and the template's sits at 105 of 108 lines (90% of its budget, `tests/template.test.mjs`): a further line there needs one taken out.
+
+**`#33` — the worktree, `template/tools/phase-run/lane.mjs`, `run.mjs` `work` / `sessionState` / `runVariables` / `main`, `config.mjs` `laneQaUrl` (built 2026-11-10):**
+- Two roots: run state (lock, results, logs, the copy, trust, the Brigade version, `.env`) reads `ROOT`/`STATE`; the session's files and commands read `work`/`sessionState()`. A new path must pick one (ADR 0007). pinned: `template/tools/phase-run/run.test.mjs` (the lane section).
+- A lane's branch starts with `phase-` (`<branch>-lane-<id>`): the guard refuses a commit on any other. pinned: `tests/guard-shell.test.mjs`.
+- `runVariables`' lane names are literal keys: `tests/env-contract.test.mjs` finds them by `PHASE_RUN_X:`. `PHASE_RUN_FAKE_NOW` is reserved there, and no runner file may name it.
+- Both lanes share the branch's copy: only the last lane out may mark it finished (`mayFinishCopy`), or a third start wipes it under a live lane. pinned: the lane section.
+- The lane lock is `.phase-run/lane-<id>.lock`, never under the branch's folder: the branch join reads it to learn the branch.
+- `prepareWorktree` refuses a lane branch ahead of the phase branch: a reset would lose an unlanded pass. #37 lands them first instead, and must reset the lane branch after a replay, or the new hashes keep refusing.
+- A lane's runner copy is taken from its worktree at the phase tip, never the primary's working tree, which a lane leaves on any branch. The lane's database is `laneDatabase` only (gotcha #29).
+- In a lane, `./` in a permission rule is the worktree. The run's folder in the primary is denied by its absolute `//` form (`//d/…` on Windows). pinned: the lane section.

@@ -10,6 +10,7 @@ what was built, why it works that way, and how to say it out loud. The index bel
 <!-- generated:start implementation-log -->
 ### Current phase
 
+- [019](019-the-worktree.md) · `#33` · 2026-11-10 · The worktree: `run.mjs --lane <id>` builds in a lane's own worktree and keeps each pass unlanded
 - [018](018-lane-declaration.md) · `#32` · 2026-11-09 · The lane declaration: a `## Lane` holds only on a ticket with its lane's label
 - [017](017-snapshot-doc-check.md) · `#31` · 2026-11-09 · The snapshot carries doc-check: a night's docs are judged by its run's copy
 - [016](016-unnumbered-entries.md) · `#30` · 2026-11-09 · Hotspots and unnumbered entries: a lane writes NNN, a pure step numbers it
