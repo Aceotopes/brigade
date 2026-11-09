@@ -9,6 +9,18 @@ Each commit's entry goes on top, in the shape of `docs/_templates/devlog-entry.m
 message cites it (`devlog #N`). At each phase end, `node tools/doc-rotate.mjs` moves the closed
 entries into `docs/history/devlog/`.
 
+## #37 · feat · Landing: the plan and the executor
+
+**Built:** #36. Landing puts a lane's passing commit on the phase branch (D13, ADR 0008), tested on throwaway repos.
+- `landing.mjs`: `landingPlan` is pure data, D13's steps from the tip, its last numbers, the lane's commit and the hotspot rows.
+- `land` carries them out in a scratch worktree at the tip: replay, settle, number, rebuild, re-gate, the migration last.
+- The fast-forward is a compare-and-swap (`update-ref` with the old tip), then a plain push; nothing is forced.
+- A conflict off the hotspot rows, a failed step or a moved tip parks on `-parked-<N>`, the branch unmoved.
+- An unchanged fingerprint carries the browser check's pass; a changed one runs the check again.
+**Verified:** 14 tests at the Landing seam, the first 10 written first; the plugin's and the template's
+suites pass; doc-check clean; the code review's fixes folded in.
+**Next:** #37. **Record:** implementation log 022.
+
 ## #36 · feat · the fingerprint: a browser-check pass records what it judged
 
 **Built:** #35. A browser-check pass records a fingerprint, for Landing to carry it over a rebase (D12, ADR 0008).

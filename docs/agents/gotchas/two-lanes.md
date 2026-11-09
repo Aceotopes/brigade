@@ -65,3 +65,14 @@ listed in the gotchas index, `docs/agents/gotchas/README.md`.
 - It holds only the files the ticket changed: a rebase that edits a shared source file the ticket never touched still says "carry" (D12's scope). pinned: none.
 - `projectGates`' `browserCheck` callback still returns a string or null; the fingerprint leaves `runGates` by closure. Keep both of its passing returns `{ ok: true, fingerprint }`. pinned: the same section (a source pin that counts both).
 - Screenshot paths are stored with `/`: `readdirSync`'s recursive names use `\` on Windows. pinned: the same section (a subfolder shot).
+
+**`#36` — Landing, `template/tools/phase-run/landing.mjs` `landingPlan` / `land` / `lastNumbers` / `commandStep`, `numbering.mjs` `hotspotKind` (built 2026-11-10):**
+- The plan writes only what differs from the lane's text. Writing `numberLane`'s whole output would put a no-row file back to the lane's version and drop the other lane's merged edits. pinned: `tests/phase-run-landing.test.mjs` (the plan test).
+- `land` works in a scratch worktree at the tip and moves the branch with `update-ref <new> <old>`. It never checks out the phase branch: the lock, undo-detach and the hand-back stay #37's. pinned: the same file (the primary is still on `main`).
+- Landing never forces. A source pin refuses `--force`, a `+` refspec and an `update-ref` without its old value, so the worktree is removed by `rmSync` and `git worktree prune`, never `worktree remove --force`. pinned: the same file.
+- The fingerprint's screenshots are compared in `shotsRoot` (the lane's worktree), and its sources on the landed tree. Leave `shotsRoot` out and every shot reads "gone": a needless re-check, never a false carry. pinned: the same file (the fingerprint test).
+- The last devlog number counts the tip's `devlog #N` citations too: a devlog rotated empty still numbers past them. pinned: the same file (`lastNumbers`).
+- A test repo sets `core.autocrlf false`: the fingerprint hashes checkout bytes (gotcha #35).
+- A park keeps the lane's commit, unnumbered, never the numbered attempt (`attempt`): with the numbers baked in, a second landing's devlog conflict is no longer Landing's. A taken parked name is passed over (`-2`), never overwritten. pinned: the same file.
+- `readLast` matches the tip's files with `hotspotKind`, never a git pathspec: `ls-tree` does not expand a row's `*`, and the log number would restart. pinned: the same file (the pattern-row test).
+- `land` never throws: an error of its own parks at its step, and a scratch worktree it cannot remove comes back as `cleanup`. A throw after the fast-forward would hide a moved branch. pinned: the same file (the numbering refusal).

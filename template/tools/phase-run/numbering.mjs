@@ -48,6 +48,18 @@ function rowFor(path, rows) {
   return rows.filter((row) => row.pattern.test(path)).sort((a, b) => b.path.length - a.path.length)[0] ?? null;
 }
 
+/**
+ * The kind of row (`log`, `generated`, `own-file`) a path falls on, or null when git settles it.
+ * A lane's `.lane/<path>` scratch file is its target's own-file block. Landing's plan (#36) splits
+ * what numberLane returns by it.
+ */
+export function hotspotKind(path, hotspots, phase = null) {
+  const rows = (hotspots?.rows ?? []).map((row) => rowMatcher(row, phase));
+  const target = path.startsWith(`${LANE_DIR}/`) ? path.slice(LANE_DIR.length + 1) : path;
+  const kind = rowFor(target, rows)?.kind ?? null;
+  return target === path || kind === "own-file" ? kind : null;
+}
+
 /** The token filled in: a log's title line (when `title`), then `#NNN` with the devlog's, then a bare `NNN` with the log's. */
 function fill(text, token, numbers, { title = false } = {}) {
   const t = escapeRegExp(token);

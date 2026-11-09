@@ -35,4 +35,5 @@ plain. The index below is generated.
 - `#33` the worktree, `template/tools/phase-run/lane.mjs`, `run.mjs` `work` / `sessionState` / `runVariables` / `main`, `config.mjs` `laneQaUrl`
 - `#34` the claim and the frontier, `template/tools/phase-run/claim.mjs` `withClaimLock` / `takeClaim` / `laneChoice` / `claimNext` / `builtOn`, `run.mjs` `nextTicket` / `builtRef`
 - `#35` the fingerprint, `template/tools/phase-run/fingerprint.mjs` `takeFingerprint` / `compareFingerprint`, `run.mjs` `browserCheckVerdict` / `runGates` / `finishBuilt`
+- `#36` Landing, `template/tools/phase-run/landing.mjs` `landingPlan` / `land` / `lastNumbers` / `commandStep`, `numbering.mjs` `hotspotKind`
 <!-- generated:end gotchas -->
