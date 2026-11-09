@@ -9,6 +9,16 @@ Each commit's entry goes on top, in the shape of `docs/_templates/devlog-entry.m
 message cites it (`devlog #N`). At each phase end, `node tools/doc-rotate.mjs` moves the closed
 entries into `docs/history/devlog/`.
 
+## #41 · feat · setup's lane checklist and the guide's examples
+
+**Built:** #40. Setup proposes two lanes, writes them only on a yes, and asks what a lane needs of the project's tools (D4, D7, D8, D15, D16).
+- `setup.mjs`: the plan always proposes the lane rows (`../<repo>-lanes/lane-<id>`), `worktreeSetup` and the hotspot rows from doc-config's paths. `answers.lanes` writes them, and an owner's own section is kept.
+- Refresh offers one hotspot row for each path doc-config gains, on a project with hotspots. A hand-written row is never changed.
+- The setup skill asks the three lane questions only with lanes on: the test prefix, the browser scripts' QA address, the date.
+- The template guide's "Two lanes" part: a config sketch, a lane helper, a lint rule and a clock as worked examples, never defaults. No lane helper file is added.
+**Verified:** 9 tests at the setup seam, 7 written first (red, then green), and a CLI check of the plan's summary; the plugin's and the template's suites pass; doc-check clean; the code review's seven fixes are folded in (a relative dir, the plan's refusals, the gotchas fallback, Plug'n'Play, the owner's folder rows, a timeout).
+**Next:** #41. **Record:** implementation log 026.
+
 ## #40 · feat · the listed-code rule
 
 **Built:** #39. A file a test names, on a check's `unread` list, is put back on that list (D11).

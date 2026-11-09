@@ -6,12 +6,13 @@ import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 
 import { parseWorkflowConfig } from "../hooks/workflow-config.mjs";
-import { ARCHIVE, apply, autoModeLines, buildPlan, composeLines, detect, dockerStatus, parseCompose, parseStackTable, plan, proposeWorkflow, refresh, stackDisagreements, suggestPrototypeDir, update } from "../scripts/setup.mjs";
+import { ARCHIVE, apply, autoModeLines, buildPlan, composeLines, detect, docPaths, dockerStatus, hotspotRows, parseCompose, parseStackTable, plan, proposeLanes, proposeWorkflow, refresh, stackDisagreements, suggestPrototypeDir, templateFiles, update } from "../scripts/setup.mjs";
+import { hotspotKind } from "../template/tools/phase-run/numbering.mjs";
 import { MIGRATIONS } from "../scripts/migrations.mjs";
 import { STAMP, compareVersions } from "../scripts/versions.mjs";
 import { PLUGIN, repo, write } from "./helpers.mjs";
@@ -841,6 +842,196 @@ test("an older CLAUDE.md without the Stack section is offered it, and gets it on
   assert.match(read(dir, "CLAUDE.md"), /## Stack[\s\S]*- \*\*Framework:\*\* Next\.js[\s\S]*<!-- generated:end stack -->/);
 });
 
+// ------------------------------------------------------------------ lanes (0.7.0 D4, D7, D8, D15, D16; #40)
+
+/** The hotspot rows setup proposes from the template's doc-config: logs, the generated indexes but the Stack block, the gotchas file. */
+const HOTSPOT_ROWS = [
+  { path: "docs/history/devlog.md", kind: "log" },
+  { path: "docs/history/implementation-log", kind: "log" },
+  { path: "docs/history/implementation-log/README.md", kind: "generated" },
+  { path: "docs/history/devlog/README.md", kind: "generated" },
+  { path: "docs/agents/gotchas/README.md", kind: "generated" },
+  { path: "docs/handbook/README.md", kind: "generated" },
+  { path: "docs/README.md", kind: "generated" },
+  { path: "docs/adr/README.md", kind: "generated" },
+  { path: "docs/discovery/README.md", kind: "generated" },
+  { path: "design/README.md", kind: "generated" },
+  { path: "docs/status/open-items.md", kind: "generated" },
+  { path: "docs/agents/gotchas/{phase}.md", kind: "own-file" },
+];
+
+/** A scratch project on pnpm with a Prisma schema, and the untracked files a fresh worktree lacks. */
+function laneProject() {
+  const pkg = { name: "desk", private: true, scripts: { test: "vitest run" } };
+  const made = repo("brigade-lanes-", {
+    "package.json": `${JSON.stringify(pkg, null, 2)}\n`,
+    "pnpm-lock.yaml": "lockfileVersion: '9.0'\n",
+    "prisma/schema.prisma": 'datasource db {\n  provider = "postgresql"\n  url = env("DATABASE_URL")\n}\n',
+    ".gitignore": "node_modules/\n.env\n.claude/settings.local.json\n",
+    "src/index.ts": "export {};\n",
+  });
+  write(made.dir, { ".env": "DATABASE_URL=\n", ".claude/settings.local.json": "{}\n" });
+  return made;
+}
+
+const workflowText = (p) => p.actions.find((a) => a.path === ".claude/workflow.json");
+
+test("setup's plan proposes the lane rows, the hotspot rows and worktreeSetup, and writes none of them without a yes", async () => {
+  const { dir } = laneProject();
+  const folder = basename(dir);
+  const p = buildPlan(dir, detect(dir), { ...ANSWERS, mode: "merge" });
+  assert.deepEqual(p.problems, []);
+  assert.deepEqual(p.proposed.lanes, {
+    rows: [
+      { id: 1, takes: "any", worktree: `../${folder}-lanes/lane-1` },
+      { id: 2, takes: "lane-2", worktree: `../${folder}-lanes/lane-2` },
+    ],
+    // Only untracked files that exist (a lane's start refuses an absent one), and only what the commands make.
+    worktreeSetup: { copy: [".env", ".claude/settings.local.json"], commands: ["pnpm install --frozen-lockfile", "pnpm exec prisma generate"], leaves: ["node_modules"] },
+  });
+  assert.deepEqual(p.proposed.hotspots, { rows: HOTSPOT_ROWS });
+  // No yes: the config is today's, byte for byte, and the plan says the rows wait on one.
+  const without = JSON.parse(workflowText(p).text);
+  assert.equal(without.phaseRun.lanes, undefined);
+  assert.equal(without.phaseRun.hotspots, undefined);
+  assert.equal(workflowText(p).text, `${JSON.stringify(proposeWorkflow(detect(dir)), null, 2)}\n`);
+  assert.deepEqual(Object.keys(proposeWorkflow(detect(dir)).phaseRun), ["gates", "permissions"], "propose never adds them");
+
+  // The yes, with lane 2's label: both sections are written, and both loaders take them.
+  const yes = buildPlan(dir, detect(dir), { ...ANSWERS, mode: "merge", lanes: { takes: "docs" } });
+  const written = JSON.parse(workflowText(yes).text);
+  assert.deepEqual(written.phaseRun.lanes, { ...p.proposed.lanes, rows: [p.proposed.lanes.rows[0], { ...p.proposed.lanes.rows[1], takes: "docs" }] });
+  assert.deepEqual(written.phaseRun.hotspots, { rows: HOTSPOT_ROWS });
+  apply(dir, plan(dir, { ...ANSWERS, mode: "merge", lanes: { takes: "docs" } }));
+  await bothLoaders(dir);
+});
+
+test("lane 2 takes a label, never any ticket, and a section the owner wrote is kept as written", () => {
+  const { dir } = laneProject();
+  const refused = buildPlan(dir, detect(dir), { ...ANSWERS, mode: "merge", lanes: { takes: "any" } });
+  assert.match(refused.problems.join("\n"), /lane 2 takes a label/);
+  const workflow = proposeWorkflow(detect(dir));
+  workflow.phaseRun.hotspots = { rows: [{ path: "docs/history/devlog.md", kind: "log" }] };
+  const kept = JSON.parse(workflowText(buildPlan(dir, detect(dir), { ...ANSWERS, mode: "merge", workflow, lanes: true })).text);
+  assert.deepEqual(kept.phaseRun.hotspots, workflow.phaseRun.hotspots, "the owner's own rows, never the proposal over them");
+  assert.equal(kept.phaseRun.lanes.rows[1].takes, "lane-2");
+});
+
+test("with a QA database, the stack walk's values for lane 2 (its database, its qa port, its test prefix) load through both loaders", async () => {
+  const { dir } = laneProject();
+  const proposed = buildPlan(dir, detect(dir), { ...ANSWERS, mode: "merge" }).proposed;
+  const workflow = proposeWorkflow(detect(dir));
+  workflow.phaseRun.qa = { name: "desk_qa", url: "postgresql://qa:qa@localhost:5432/desk_qa" };
+  // The walk's answers are the owner's, never defaults (D2): the script proposes no database, port or prefix.
+  assert.ok(proposed.lanes.rows.every((row) => !("qa" in row) && !("ports" in row) && !("testDbPrefix" in row)));
+  const lane2 = { ...proposed.lanes.rows[1], qa: "desk_qa_lane2", ports: [{ port: 4102, what: "lane 2's QA server", name: "qa" }], testDbPrefix: "lane2_" };
+  workflow.phaseRun.lanes = { ...proposed.lanes, rows: [proposed.lanes.rows[0], lane2] };
+  apply(dir, plan(dir, { ...ANSWERS, mode: "merge", workflow, lanes: true }));
+  const written = JSON.parse(read(dir, ".claude/workflow.json"));
+  assert.deepEqual(written.phaseRun.lanes.rows[1], lane2);
+  assert.deepEqual(written.phaseRun.hotspots, { rows: HOTSPOT_ROWS }, "the hotspots the owner left out are still the proposal's");
+  await bothLoaders(dir);
+});
+
+test("each proposed hotspot row settles the files it names as Landing reads them", () => {
+  const hotspots = { rows: HOTSPOT_ROWS };
+  const kind = (path) => hotspotKind(path, hotspots, "two-lanes");
+  assert.equal(kind("docs/history/devlog.md"), "log");
+  assert.equal(kind("docs/history/implementation-log/NNN-the-lanes.md"), "log");
+  assert.equal(kind("docs/history/implementation-log/README.md"), "generated", "the log folder's index is an index, not a log");
+  assert.equal(kind("docs/README.md"), "generated");
+  assert.equal(kind("docs/agents/gotchas/two-lanes.md"), "own-file");
+  assert.equal(kind(".lane/docs/agents/gotchas/two-lanes.md"), "own-file");
+  // CLAUDE.md holds a generated block, but Landing keeps a generated row's whole file from the tip: a lane's
+  // hand edit to CLAUDE.md would be dropped. It is left to git.
+  assert.equal(kind("CLAUDE.md"), null);
+  assert.equal(kind("docs/history/devlog/2026-11.md"), null, "the devlog's archive moves at a phase end, never in a ticket");
+});
+
+test("refresh offers one hotspot row for a path doc-config gained, never changes a hand-written row, and offers none without lanes", async () => {
+  const { dir } = laneProject();
+  apply(dir, plan(dir, { ...ANSWERS, mode: "merge" }));
+  const docConfig = join(dir, "tools/doc-config.mjs");
+  const gained = read(dir, "tools/doc-config.mjs").replace(/(export const GENERATED = \[\r?\n)/, '$1  { name: "terms", target: "docs/reference/terms.md", dir: "docs/reference" },\n');
+  writeFileSync(docConfig, gained);
+  assert.ok(!refresh(dir).items.some((i) => /hotspots/.test(i.id)), "a one-lane project is offered no hotspot row");
+
+  const config = JSON.parse(read(dir, ".claude/workflow.json"));
+  // The owner's own row for the devlog, kind and all, and every other proposed row but the new one.
+  const hand = { path: "docs/history/devlog.md", kind: "own-file" };
+  config.phaseRun.hotspots = { rows: [hand, ...HOTSPOT_ROWS.slice(1)] };
+  writeFileSync(join(dir, ".claude/workflow.json"), `${JSON.stringify(config, null, 2)}\n`);
+  const offers = refresh(dir).items.filter((i) => /hotspots/.test(i.id));
+  assert.deepEqual(offers.map((i) => [i.id, i.op]), [["phaseRun.hotspots.offer+docs/reference/terms.md", "offer"]]);
+  assert.match(offers[0].summary, /"path":"docs\/reference\/terms\.md","kind":"generated"/);
+  assert.deepEqual(update(dir).offers.map((o) => o.id).filter((id) => /hotspots/.test(id)), [offers[0].id], "update lists it with refresh's other offers");
+
+  refresh(dir, { apply: true });
+  assert.deepEqual(JSON.parse(read(dir, ".claude/workflow.json")).phaseRun.hotspots, config.phaseRun.hotspots, "nothing is written without a yes");
+  refresh(dir, { apply: true, onlyAccepted: true, accept: [offers[0].id] });
+  const rows = JSON.parse(read(dir, ".claude/workflow.json")).phaseRun.hotspots.rows;
+  assert.deepEqual(rows, [...config.phaseRun.hotspots.rows, { path: "docs/reference/terms.md", kind: "generated" }]);
+  assert.deepEqual(rows[0], hand, "the hand-written row is as it was");
+  assert.ok(!refresh(dir).items.some((i) => /hotspots/.test(i.id)), "nothing left to offer");
+  await bothLoaders(dir);
+
+  // A row the owner wrote over a path (a folder row, of any kind) is never overridden by an exact offer.
+  writeFileSync(docConfig, read(dir, "tools/doc-config.mjs").replace(/(export const GENERATED = \[\r?\n)/, '$1  { name: "notes", target: "docs/notes/index.md", dir: "docs/notes" },\n'));
+  const owned = JSON.parse(read(dir, ".claude/workflow.json"));
+  owned.phaseRun.hotspots.rows.push({ path: "docs/notes", kind: "log" });
+  writeFileSync(join(dir, ".claude/workflow.json"), `${JSON.stringify(owned, null, 2)}\n`);
+  assert.ok(!refresh(dir).items.some((i) => /hotspots/.test(i.id)), "docs/notes/index.md is the owner's folder row's");
+});
+
+test("the plan refuses a lanes yes that would not load: no walk values beside a QA database, a doc-config that will not load, a yes of the wrong shape", () => {
+  const { dir, git } = laneProject();
+  const workflow = proposeWorkflow(detect(dir));
+  workflow.phaseRun.qa = { name: "desk_qa", url: "postgresql://qa:qa@localhost:5432/desk_qa" };
+  const refused = buildPlan(dir, detect(dir), { ...ANSWERS, mode: "merge", workflow, lanes: true });
+  assert.match(refused.problems.join("\n"), /The lanes do not load yet: .*each lane needs its own/);
+  assert.match(buildPlan(dir, detect(dir), { ...ANSWERS, mode: "merge", lanes: "docs" }).problems.join("\n"), /answers\.lanes is true or \{ "takes": "<label>" \}/);
+  write(dir, { "tools/doc-config.mjs": "export const DEVLOG = ;\n" });
+  git("add", "-A");
+  git("commit", "-q", "-m", "a broken doc-config");
+  assert.match(buildPlan(dir, detect(dir), { ...ANSWERS, mode: "merge", lanes: true }).problems.join("\n"), /tools\/doc-config\.mjs did not load, so no hotspot row can be proposed/);
+  assert.deepEqual(buildPlan(dir, detect(dir), { ...ANSWERS, mode: "merge" }).problems, [], "without a yes, nothing to refuse");
+});
+
+test("the proposal's edges: a relative dir still names the folder, Plug'n'Play leaves no node_modules, an older doc-config still gets its gotchas row", () => {
+  const det = { dir: ".", packageJson: false };
+  assert.equal(proposeLanes(det, null).lanes.rows[0].worktree, `../${basename(process.cwd())}-lanes/lane-1`);
+  const { dir } = laneProject();
+  write(dir, { ".pnp.cjs": "\n" });
+  assert.deepEqual(proposeLanes(detect(dir), null).lanes.worktreeSetup.leaves, []);
+  const older = join(dir, "older-doc-config.mjs");
+  writeFileSync(older, 'export const DEVLOG = "docs/history/devlog.md";\nexport const GENERATED = [];\n');
+  // The runner's own fallback when GOTCHAS_FILE is missing (run.mjs `gotchasFile`).
+  assert.deepEqual(hotspotRows(docPaths(older)), [
+    { path: "docs/history/devlog.md", kind: "log" },
+    { path: "docs/agents/gotchas/{phase}.md", kind: "own-file" },
+  ]);
+});
+
+test("a doc-config that will not load gives no hotspot offer and says so, and refresh still goes ahead", () => {
+  const { dir } = laneProject();
+  apply(dir, plan(dir, { ...ANSWERS, mode: "merge", lanes: true }));
+  writeFileSync(join(dir, "tools/doc-config.mjs"), "export const DEVLOG = ;\n");
+  const seen = refresh(dir);
+  assert.ok(!seen.items.some((i) => /hotspots/.test(i.id)));
+  assert.ok(seen.warnings.some((w) => /hotspot rows could not be checked: tools\/doc-config\.mjs did not load/.test(w)));
+});
+
+test("no lane helper is stamped into a project: no template code outside the runner reads a lane's variables (D15)", () => {
+  // A helper is code a project's scripts import: tests (doc-check's own NNN tests) are not.
+  const code = (rel) => /\.(mjs|cjs|js|ts)$/.test(rel) && !/\.test\.[a-z]+$/.test(rel) && !rel.startsWith("tools/phase-run/");
+  const LANE_VARS = /\bPHASE_RUN_(LANE|QA_PORT|QA_DATABASE|TEST_DB_PREFIX|FAKE_NOW)\b/;
+  const files = templateFiles().filter(code);
+  assert.ok(files.includes("tools/doc-check.mjs"), "the scan reads the template's code");
+  // doc-check reads PHASE_RUN_LANE for its NNN acceptance (#30): Brigade's own rule, not a helper a project imports.
+  assert.deepEqual(files.filter((rel) => rel !== "tools/doc-check.mjs" && LANE_VARS.test(readFileSync(join(PLUGIN, "template", rel), "utf8"))), []);
+  assert.deepEqual(templateFiles().filter((rel) => /lane/i.test(basename(rel)) && !rel.startsWith("tools/phase-run/")), []);
+});
+
 test("the Docker check says whether Docker is installed and running, and never installs it", () => {
   const fake = (results) => (cmd, args) => results[args[0]];
   assert.deepEqual(dockerStatus(fake({ "--version": { error: new Error("ENOENT") } })).installed, false);
@@ -860,6 +1051,9 @@ test("the command line: plan previews the changed files, apply writes, verify pa
   assert.equal(planned.status, 0, planned.stderr);
   assert.match(planned.stdout, /Changed \(shown as a diff before writing\) \(3\):/);
   assert.match(readFileSync(join(scratch, "preview/CLAUDE.md"), "utf8"), /Never push to main\.\n\n## Commands\n/);
+  // Two lanes are shown in the summary, as a proposal: the config is a file a new repo only lists by path.
+  assert.match(planned.stdout, /Two lanes, proposed \(written only on a yes, answers\.lanes\):\n {2}lane 1: takes any, worktree \.\.\/[^\n]+-lanes\/lane-1\n {2}lane 2: takes lane-2,/);
+  assert.match(planned.stdout, /^ {2}hotspot: docs\/agents\/gotchas\/\{phase\}\.md \(own-file\)$/m);
   assert.equal(cli("apply", dir, "--plan", join(scratch, "plan.json")).status, 0);
   // A test file naming a path on the tests row's unread list: verify warns of it, and still passes.
   const config = JSON.parse(read(dir, ".claude/workflow.json"));

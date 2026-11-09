@@ -1,7 +1,7 @@
 ---
 job: The owner's guide to the unattended phase run: evening and morning checklists, merging, undoing a ticket.
 kind: living
-max-lines: 700
+max-lines: 760
 ---
 # The phase run — the owner's practical guide
 
@@ -237,6 +237,54 @@ Check every flag in your own tools' docs before you copy one:
   Their `testFiles` is also the listed-code rule's: a path a test file names is put back on any
   `unread` list, so a change there voids that check's receipt and its suite skip. Without
   `testFiles` there is no such rule, and setup's verify says so.
+
+**Two lanes: worked examples, never defaults.** With `phaseRun.lanes`, a second runner builds a
+ticket beside the first, each in its own worktree. Setup proposes the rows, and you say yes; it
+asks for each lane's own values. Brigade ships no lane helper: a lane is a few environment variables,
+`PHASE_RUN_TEST_DB_PREFIX`, `PHASE_RUN_QA_PORT` and `PHASE_RUN_QA_DATABASE`, which any language
+reads. Your project's own code reads them. In the sketch below, each `<…>` is yours to fill:
+
+```json
+"lanes": {
+  "rows": [
+    { "id": 1, "takes": "any", "worktree": "../<repo>-lanes/lane-1" },
+    { "id": 2, "takes": "<lane 2's label>", "worktree": "../<repo>-lanes/lane-2", "qa": "<lane 2's QA database>",
+      "ports": [{ "port": <a free port>, "what": "lane 2's QA server", "name": "qa" }], "testDbPrefix": "lane2_" }
+  ],
+  "worktreeSetup": { "copy": [".env"], "commands": ["<your install>"], "leaves": ["node_modules"] }
+},
+"hotspots": { "rows": [{ "path": "docs/history/devlog.md", "kind": "log" }, { "path": "docs/agents/gotchas/{phase}.md", "kind": "own-file" }] }
+```
+
+The three pieces the project Brigade was lifted from wrote for itself, sketched here for a JavaScript
+app with browser scripts (written for this guide, not copied from it):
+
+```js
+// The helper, a module of your own. Outside a lane the variables are unset, and the project's own values hold.
+export const testDatabase = (name) => `${process.env.PHASE_RUN_TEST_DB_PREFIX ?? ""}${name}`;
+export const qaTarget = (own) => ({
+  port: Number(process.env.PHASE_RUN_QA_PORT ?? own.port),
+  database: process.env.PHASE_RUN_QA_DATABASE ?? own.database,
+});
+
+// The lint rule, in eslint.config.mjs: a browser script names no address of its own, so it can't reach the other lane's server.
+{ files: ["e2e/**"], rules: { "no-restricted-syntax": ["error",
+  { selector: "Literal[value=/localhost:\\d/], TemplateElement[value.raw=/localhost:\\d/]", message: "Use qaTarget() from the lane helper." }] } }
+
+// The clock, for Playwright: one fixed "today", so a screen's dates match its sample data on any night.
+export async function fixClock(page) {
+  if (process.env.PHASE_RUN_FAKE_NOW) await page.clock.setFixedTime(new Date(process.env.PHASE_RUN_FAKE_NOW));
+}
+```
+
+- **The helper** is the only place that reads the lane's variables. A test or a script asks it for
+  a name or an address, so lane 2 never touches lane 1's databases or server.
+- **The lint rule** keeps it that way. It refuses a hard-coded address in a browser script.
+- **The clock** reads `PHASE_RUN_FAKE_NOW`, which Brigade reserves and never sets. Your project sets
+  it where it starts its browser scripts, to an ISO date, if their screens show dates.
+- **Hotspots** are the files every ticket writes at one spot. Landing numbers a `log` entry and
+  rebuilds a `generated` index, and it adds an `own-file` block to the end of the file. Any other
+  file is left to git. Setup's refresh offers a row when `tools/doc-config.mjs` gains a path.
 
 A mistake in that section stops the run before it starts (dry runs too), and says what is wrong.
 
