@@ -206,9 +206,10 @@ Ask before each; the owner may skip any.
 
 1. `node "${CLAUDE_PLUGIN_ROOT}/scripts/setup.mjs" verify <dir>`: doc-check, the template's two test
    suites, and the config through both loaders. A failure: fix it (in the config, or a doc's line),
-   never by loosening a check. A `warn` line is the unread list's honesty scan (D19): each path a
-   test file (`phaseRun.tampering.testFiles`) names that the tests row's `unread` list leaves out.
-   Say each one; if the tests do read that path, narrow the list on the owner's yes. It never fails.
+   never by loosening a check. A `warn` line is the listed-code rule's scan (0.7.0 D11): each path a
+   test file (`phaseRun.tampering.testFiles`) names that a row's `unread` list leaves out. The rule
+   puts it back, so a change there voids that check's receipt and its suite skip. With no
+   `testFiles` it is one line: there is no listed-code rule. Say each line. It never fails.
 2. Show `git status --short` and the drafted commit message:
    `chore: adopt the workflow (<mode> mode) — devlog #1`. Overwrite mode is on `adopt-workflow`: the
    owner merges it as any branch.
@@ -239,7 +240,7 @@ On a project already set up (§1.3), when the owner picks the refresh:
      flag is still its row, never added back plain or offered for removal. A nameless stop check is
      matched by its `run` alone, and a command the stack no longer suggests (another package
      manager) is a stranger whatever its name.
-   - `warnings`: the unread list's honesty scan, as in §7. Say each; none is an item.
+   - `warnings`: the listed-code rule's scan, as in §7. Say each; none is an item.
 3. Run it again with `--apply` and `--accept <the ids the owner said yes to>`. It writes, regenerates
    the indexes (the Stack block in `CLAUDE.md` follows), and stages.
 4. Walk §3's checklist for the parts that changed (a new database: its QA database; a new test

@@ -38,4 +38,5 @@ plain. The index below is generated.
 - `#36` Landing, `template/tools/phase-run/landing.mjs` `landingPlan` / `land` / `lastNumbers` / `commandStep`, `numbering.mjs` `hotspotKind`
 - `#37` the landing lock, `template/tools/phase-run/landing-lock.mjs` `underLandingLock` / `handBack` / `keepUnlanded` / `unlandedCommits`, `claim.mjs` `lockTaker` / `releaseClaim`, `lane.mjs` `resetWorktree`, `run.mjs` `landPass` / `landUnlanded`
 - `#38` findings and the lane reading, `template/tools/phase-run/findings.mjs` `recordFindings` / `branchResults` / `laneState` / `laneStatus`, `run.mjs` `recordFound` / `nightOf` / `report` / `ensurePullRequest`, `status.mjs`
+- `#39` the listed-code rule, `template/tools/phase-run/unread-scan.mjs` `testNamedPaths` / `listedCode` / `withListedCode` / `listRows`, `receipt.mjs` `listedGroups`, `run.mjs` `gatePlan` / `testNamedIn`, `hooks/workflow-config.mjs` `testFiles`, `hooks/stop-gate.mjs` `perCheckReceipts`
 <!-- generated:end gotchas -->

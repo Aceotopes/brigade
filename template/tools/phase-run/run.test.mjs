@@ -18,6 +18,7 @@ import { QUIET_MS, SETTLE_MS, applyMigrations, backgroundArgs, browserCheckVerdi
 import { finishSnapshot, readManifest, runnerChanges, takeSnapshot } from "./snapshot.mjs";
 import { PATCH_ARGS } from "./tampering.mjs";
 import { TRIM_FLAGS, readTrim, trimPath } from "./trim.mjs";
+import { listedCode, repoFiles, testNamedPaths, withListedCode } from "./unread-scan.mjs";
 
 const options = { minutes: 120, waitHours: 6, print: true, spec: 179 };
 const call = (claude, extra = {}) => ({ options, prompt: "Build it.", sessionId: "s-1", resume: false, claude, online: async () => true, sleep: async () => {}, ...extra });
@@ -504,6 +505,92 @@ test("the decision function skips a gate on a non-empty diff wholly on its check
   // A copy names two paths too, and a path with a tab or a space is read whole.
   assert.deepEqual(planFor(nameStatus(["C075", "src/a.ts", "docs/a b.md"], ["A", "src/x\ty.ts"])).paths, ["src/a.ts", "docs/a b.md", "src/x\ty.ts"]);
   assert.equal(planFor("").base, "abc123");
+});
+
+// #39 (D11): the listed-code rule. A file a test names (testNamedPaths, from the files
+// phaseRun.tampering.testFiles matches) that sits on a check's unread list is put back on that list.
+test("the scan names every repo path a test file quotes or imports, from the test files alone", () => {
+  const text = {
+    "tests/sub/a.test.mjs": 'import { x } from "../../src/x";\nconst f = readFileSync("docs/fixture.json", "utf8");\nconst g = ["docs/**"];\n',
+    "scripts/b.mjs": 'const doc = "docs/guide.md";\n',
+  };
+  const read = (file) => text[file];
+  assert.deepEqual(testNamedPaths({ testFiles: ["tests/**/*.test.mjs"], files: Object.keys(text), read }), ["docs/fixture.json", "src/x"]);
+  assert.deepEqual(testNamedPaths({ testFiles: [], files: Object.keys(text), read: () => assert.fail("no test files, nothing read") }), []);
+  // A test file gone from the tree (deleted, still in the index) names nothing; any other read error is thrown.
+  const enoent = () => {
+    throw Object.assign(new Error("gone"), { code: "ENOENT" });
+  };
+  assert.deepEqual(testNamedPaths({ testFiles: ["**/*.test.mjs"], files: ["a.test.mjs"], read: enoent }), []);
+  assert.throws(() => testNamedPaths({ testFiles: ["**/*.test.mjs"], files: ["a.test.mjs"], read: () => assert.fail("EACCES") }));
+});
+
+test("listed code is a named path on the list, a named folder's listed files, or an import without its extension", () => {
+  const files = ["docs/fixture.json", "docs/fixtures/a.json", "src/x.ts", "src/y.ts", "docs/guide.md"];
+  assert.deepEqual(listedCode(["docs/fixture.json", "src/x"], ["docs/**"], files), ["docs/fixture.json"]);
+  assert.deepEqual(listedCode(["docs/fixtures"], ["**/*.json"], files), ["docs/fixtures"], "a folder whose files are listed");
+  assert.deepEqual(listedCode(["src/x"], ["**/*.ts"], files), ["src/x"], "../src/x imports src/x.ts");
+  assert.deepEqual(listedCode(["docs/missing.json"], ["docs/**"], files), ["docs/missing.json"], "a path not there yet is still named");
+  assert.deepEqual(listedCode(["src/a.ts"], ["docs/**"], files), []);
+  // The list it widens to: the owner's, unchanged when nothing is listed, else each path put back.
+  assert.deepEqual(withListedCode(["docs/**"], []), ["docs/**"]);
+  assert.deepEqual(withListedCode(["src/**"], ["docs/a.json", "src/x"]), ["src/**", "!docs/a.json", "!src/x", "!src/x.*"]);
+});
+
+const named = (paths) => () => paths;
+const listedSkips = (diff, testNamed, config = SKIP_CONFIG) => gatePlan({ base: "abc123", diff, config, testNamed }).gates.map(({ gate, skip }) => `${gate.label}${skip ? ` (${skip})` : ""}`);
+
+test("the listed-code rule voids the suite skip when a changed file is one a test names, and only then", () => {
+  assert.deepEqual(listedSkips(modified("docs/fixture.json", "README.md"), named(["docs/fixture.json"])), ["typecheck", "suite", "build (when)"]);
+  assert.deepEqual(listedSkips(modified("docs/guide.md", "README.md"), named(["docs/fixture.json"])), ["typecheck", "suite (unreadOf)", "build (when)"], "no test names what changed: the skip, as today");
+  assert.deepEqual(listedSkips(modified("docs/fixtures/a.json"), named(["docs/fixtures"])), ["typecheck", "suite", "build (when)"], "under a named folder");
+  assert.deepEqual(listedSkips(modified("docs/helper.mjs"), named(["docs/helper"])), ["typecheck", "suite", "build (when)"], "an import without its extension");
+  // A scan that fails refuses the skip; a plan with no skip to judge never reads the scan.
+  let reads = 0;
+  const broken = () => {
+    reads += 1;
+    throw new Error("unreadable");
+  };
+  assert.deepEqual(listedSkips(modified("docs/guide.md"), broken), ["typecheck", "suite", "build (when)"]);
+  assert.equal(reads, 1);
+  assert.deepEqual(listedSkips(modified("src/a.ts", "docs/guide.md"), broken), ["typecheck", "suite", "build"]);
+  assert.equal(reads, 1, "a diff off the list never reads the scan");
+  assert.deepEqual(skipped(modified("docs/guide.md")), ["typecheck", "suite (unreadOf)", "build (when)"], "no reader: no rule");
+});
+
+test("the listed-code rule holds for every gate's unreadOf, whichever check's list it points at", () => {
+  const config = runConfig(
+    { gates: [{ label: "suite", run: "npm test", unreadOf: "tests" }, { label: "lint", run: "eslint", unreadOf: "lint" }] },
+    { stopGate: { checks: [{ name: "tests", label: "Tests", run: "npm test", receipt: true, unread: ["docs/**"] }, { name: "lint", label: "Lint", run: "eslint", receipt: true, unread: ["docs/**", "scripts/**"] }] } },
+  );
+  assert.deepEqual(listedSkips(modified("docs/a.md"), named(["scripts/tool.mjs"]), config), ["suite (unreadOf)", "lint (unreadOf)"]);
+  assert.deepEqual(listedSkips(modified("docs/a.md", "scripts/tool.mjs"), named(["scripts/tool.mjs"]), config), ["suite", "lint"]);
+  assert.deepEqual(listedSkips(modified("docs/data.json"), named(["docs/data.json"]), config), ["suite", "lint"]);
+  // One plan reads the scan once, for all its gates, even when it fails.
+  let reads = 0;
+  const failing = () => {
+    reads += 1;
+    throw new Error("unreadable");
+  };
+  assert.deepEqual(listedSkips(modified("docs/a.md"), failing, config), ["suite", "lint"]);
+  assert.equal(reads, 1);
+});
+
+test("the repo's files come back unquoted, a non-ASCII name included, so the test-file globs match it", () => {
+  const dir = mkdtempSync(join(tmpdir(), "brigade-files-"));
+  spawnSync("git", ["init", "-q"], { cwd: dir });
+  spawnSync("git", ["config", "core.quotePath", "true"], { cwd: dir });
+  mkdirSync(join(dir, "tests"));
+  writeFileSync(join(dir, "tests", "café.test.mjs"), 'readFileSync("docs/a.json");\n');
+  assert.deepEqual(repoFiles(dir), ["tests/café.test.mjs"]);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("both gate plans, the ticket's and Landing's re-gate, read the listed code from the tree the gates run in", () => {
+  const source = readFileSync(join(HERE, "run.mjs"), "utf8").replace(/\r\n/g, "\n");
+  const calls = [...source.matchAll(/gatePlan\(\{\n([\s\S]*?)\n {2}\}\);/g)].map((m) => m[1]);
+  assert.equal(calls.length, 2, "runGates and regateLanded");
+  for (const call of calls) assert.match(call, /testNamed: testNamedIn\(work\)/);
 });
 
 // D15 (#20): the tampering gate. Fixture diffs as `git diff -U0` prints them (tampering.mjs's

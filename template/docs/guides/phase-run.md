@@ -234,8 +234,9 @@ Check every flag in your own tools' docs before you copy one:
   before the gates, so no gate trusts a cache a session wrote. Each goes after the script's own
   command, and the row keeps its name (a gate's is its label), so setup's refresh still knows it.
 - **The tampering rows** are Vitest's: its skip and focus calls, and `expect(` as the assertion.
-  Their `testFiles` is also the list setup's verify scans: a test file naming a path on the tests
-  row's `unread` list is a warning, as the list probably leaves out something the tests read.
+  Their `testFiles` is also the listed-code rule's: a path a test file names is put back on any
+  `unread` list, so a change there voids that check's receipt and its suite skip. Without
+  `testFiles` there is no such rule, and setup's verify says so.
 
 A mistake in that section stops the run before it starts (dry runs too), and says what is wrong.
 

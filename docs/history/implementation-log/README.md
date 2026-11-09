@@ -10,6 +10,7 @@ what was built, why it works that way, and how to say it out loud. The index bel
 <!-- generated:start implementation-log -->
 ### Current phase
 
+- [025](025-the-listed-code-rule.md) · `#39` · 2026-11-10 · The listed-code rule
 - [024](024-findings-and-the-reports-lane-reading.md) · `#38` · 2026-11-10 · Findings and the reports' lane reading
 - [023](023-the-landing-lock.md) · `#37` · 2026-11-10 · The landing lock
 - [022](022-landing-the-plan-and-the-executor.md) · `#36` · 2026-11-10 · Landing: the plan and the executor

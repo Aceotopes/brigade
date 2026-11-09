@@ -876,7 +876,7 @@ test("without a pair, a pass prints its last lines and a failure its tail", () =
 });
 
 /** What stop-tests.mjs needs of the runner to run: itself and what it imports. */
-const STOP_TESTS_FILES = ["stop-tests.mjs", "receipt.mjs", "unread.mjs", "config.mjs", "metrics.mjs", "ticket-size.mjs", "prices.json"];
+const STOP_TESTS_FILES = ["stop-tests.mjs", "receipt.mjs", "unread.mjs", "unread-scan.mjs", "config.mjs", "metrics.mjs", "ticket-size.mjs", "prices.json"];
 
 /**
  * A project with this folder's runner copied in, and the given test command as its receipt row (or,

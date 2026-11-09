@@ -60,6 +60,7 @@ import { PATCH_ARGS, tamperingVerdict } from "./tampering.mjs";
 import { projectKeeps, readTrim, trimEntries, trimPath, withTrim } from "./trim.mjs";
 import { LANE_DIR, scratchFor } from "./numbering.mjs";
 import { unreadMatcher } from "./unread.mjs";
+import { repoFiles, testNamedPaths, withListedCode } from "./unread-scan.mjs";
 import * as docConfig from "../doc-config.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -221,6 +222,20 @@ function gitTry(...args) {
 function atCommit(rev, path) {
   const result = gitTry("show", `${rev}:${path}`);
   return result.ok ? result.stdout : null;
+}
+
+/**
+ * The listed-code rule's reader for gatePlan (#39): the paths the run's test files
+ * (phaseRun.tampering.testFiles) name, read from `tree`, the checkout the gates run in: runGates
+ * refuses a dirty tree before it plans, and the re-gate checks out the landed commit, so its files
+ * are the commit's. No tampering section, no test files: no rule, and nothing (git included) is read.
+ */
+function testNamedIn(tree) {
+  return () => {
+    const testFiles = config.tampering?.testFiles ?? [];
+    if (testFiles.length === 0) return [];
+    return testNamedPaths({ testFiles, files: repoFiles(tree), read: (file) => readFileSync(join(tree, file), "utf8") });
+  };
 }
 
 function gh(...args) {
@@ -1651,18 +1666,36 @@ function diffPaths(nameStatus) {
  * decision function. `diff` is `git diff --name-status -M -z <base>..HEAD`.
  * A gate skips on `when` when no changed path matches it, and on `unreadOf` (the suite skip, D13)
  * when the diff is non-empty and every path is on that stop check's `unread` list, through the
- * one matcher (unread.mjs). An empty diff never takes the suite skip.
+ * one matcher (unread.mjs). An empty diff never takes the suite skip. Under the listed-code rule
+ * (0.7.0 D11) the list first gets back each path a test names, from `testNamed()` (unread-scan.mjs's
+ * `testNamedPaths`, read only when a skip is in reach), so a changed file a test names runs the gate;
+ * a `testNamed` that throws refuses the skip. Without one there is no rule.
  * `tampering` (D15, tampering.mjs) is null when the run has no tampering section; its rules are read
  * at `base` through `readAt(rev, path)`, from the `patch` (PATCH_ARGS), the ticket `body` as fetched
  * at run start and the commit `message`.
  */
-function gatePlan({ base, diff, config: { gates, stopChecks = [], tampering = null }, patch = "", readAt = null, body = "", message = "" }) {
+function gatePlan({ base, diff, config: { gates, stopChecks = [], tampering = null }, patch = "", readAt = null, body = "", message = "", testNamed = () => [] }) {
   const paths = diffPaths(diff);
-  const unread = new Map(stopChecks.filter((check) => check.name).map((check) => [check.name, unreadMatcher(check.unread)]));
+  const unread = new Map(stopChecks.filter((check) => check.name).map((check) => [check.name, check.unread]));
+  let scan; // `{ named }`, read once and only for a diff wholly on some list; `named` is null when it failed
+  const testNamedOnce = () => (scan ??= (() => {
+    try {
+      return { named: testNamed() };
+    } catch {
+      return { named: null }; // the scan failed: no skip on a list it could not check
+    }
+  })());
+  const onListOf = (name) => {
+    const list = unread.get(name) ?? [];
+    if (!paths.every(unreadMatcher(list))) return false;
+    const { named } = testNamedOnce();
+    // Every changed path is on the list, so each named one among them is listed code: put it back.
+    return named !== null && paths.every(unreadMatcher(withListedCode(list, named)));
+  };
   const skipOf = (gate) => {
     if (gate.builtin) return null;
     if (gate.when && !paths.some((path) => gate.when.test(path))) return "when";
-    if (gate.unreadOf && paths.length > 0 && paths.every(unread.get(gate.unreadOf))) return "unreadOf";
+    if (gate.unreadOf && paths.length > 0 && onListOf(gate.unreadOf)) return "unreadOf";
     return null;
   };
   return {
@@ -1807,6 +1840,7 @@ async function runGates(ticket, base, options, run, startedAt) {
     diff: git("diff", "--name-status", "-M", "-z", `${base}..HEAD`),
     config,
     ...(config.tampering ? { patch: git(...PATCH_ARGS, `${base}..HEAD`), readAt: atCommit, body: ticket.body ?? "", message } : {}),
+    testNamed: testNamedIn(work),
   });
   const changed = plan.paths;
   for (const { gate, skip } of plan.gates.filter((g) => g.skip)) {
@@ -2203,6 +2237,7 @@ async function regateLanded(ticket, { base, head }, run) {
     diff: git("diff", "--name-status", "-M", "-z", `${base}..${head}`),
     config,
     ...(config.tampering ? { patch: git(...PATCH_ARGS, `${base}..${head}`), readAt: atCommit, body: ticket.body ?? "", message: git("log", "-1", "--format=%B", head) } : {}),
+    testNamed: testNamedIn(work),
   });
   const failed = await projectGates(plan, {
     values: { base, N: n, qaUrl: runQaUrl(), cache: gateCache() },

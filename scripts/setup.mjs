@@ -9,7 +9,7 @@
 //                                                                proposed text of each changed or conflicting file under <d>
 //   node scripts/setup.mjs apply <dir> --plan <f>                do it, if the repo is still as planned
 //   node scripts/setup.mjs verify <dir>                          doc-check, the template's tests, both config loaders, and
-//                                                                the unread list's honesty warnings (never a failure)
+//                                                                the listed-code rule's warnings (never a failure)
 //   node scripts/setup.mjs update <dir> [--apply] [--remove] [--auto-update]
 //                                                                re-copy template/ into a set-up project; --auto-update
 //                                                                also turns on auto-update for Brigade's catalog; the
@@ -18,7 +18,7 @@
 //                                                                bring the config in line with the stack (--stack: the new
 //                                                                one); --apply writes the additions and the accepted ids;
 //                                                                --only-accepted, the accepted ids alone; its `warnings`
-//                                                                are the unread list's honesty warnings, its `compose`
+//                                                                are the listed-code rule's warnings, its `compose`
 //                                                                the root's compose files (detect's)
 //   node scripts/setup.mjs docker                                is Docker installed, and running
 //   node scripts/setup.mjs automode --settings <f> --lines <f> [--apply]   the project's autoMode lines
@@ -176,21 +176,20 @@ function gitIn(dir) {
 function projectFiles(dir) {
   const git = gitIn(dir);
   if (git("rev-parse", "--git-dir") === null) return walk(dir);
-  return (git("ls-files", "--cached", "--others", "--exclude-standard") ?? "").split("\n").filter(Boolean);
+  // `-z`: a non-ASCII name comes back as it is, never C-quoted (`core.quotePath`), which no glob matches.
+  return [...new Set((git("ls-files", "-z", "--cached", "--others", "--exclude-standard") ?? "").split("\0").filter(Boolean))];
 }
 
 /**
- * The unread list's honesty warnings (D19): each path a test file names on the tests row's `unread`
- * list, or the one line saying `phaseRun.tampering.testFiles` is not set. Never a failure: a scan that
- * cannot run says so as a warning too. The scan is the plugin's copy, so a project a release behind
- * gets it before /update-workflow copies it in. The tests row is the stop check in the stack's tests
- * role (`roleMatcher`), whatever its name; without one, the scan's own `testsRow`.
+ * The listed-code rule's lines (0.6.0 D19, 0.7.0 D11): each path a test file names on any row's
+ * `unread` list, which the rule puts back on that list, or the one line saying there is no rule
+ * (`phaseRun.tampering.testFiles` is not set). Never a failure: a scan that cannot run says so as a
+ * warning too. The scan is the plugin's copy, so a project a release behind gets it before
+ * /update-workflow copies it in.
  */
-export function unreadWarnings(dir, config, det = detect(dir)) {
+export function unreadWarnings(dir, config) {
   try {
-    const { stopRole } = roleMatchers(det, config);
-    const row = (config.stopGate?.checks ?? []).find((c) => stopRole(c)?.key === "test" && Array.isArray(c.unread) && c.unread.length);
-    return scanLines(unreadScan({ config, row, files: projectFiles(dir), read: (file) => readText(join(dir, file)) }));
+    return scanLines(unreadScan({ config, files: projectFiles(dir), read: (file) => readText(join(dir, file)) }));
   } catch (error) {
     return [`the unread list could not be checked: ${error.message}`];
   }
@@ -1195,10 +1194,10 @@ export function refresh(dir, { stack, apply = false, accept = [], onlyAccepted =
     item(ciPath, ciNow === null ? "add" : "change", `${ciPath}: ${ciNow === null ? "written" : "rewritten"} from the checks`, (config, files) => files.set(ciPath, ci));
   }
 
-  // The unread list's honesty (D19), on the project's config as it is: warnings only, never an item.
+  // The listed-code rule's scan (D19, 0.7.0 D11), on the project's config as it is: warnings only, never an item.
   // The root's compose files (D20), for the skill's testDatabase step on a project that gained one:
   // the preflight row and the database's address are the skill's to propose, never an item here.
-  const report = { stack: chosen, items: items.map(({ id, op, summary }) => ({ id, op, summary })), warnings: unreadWarnings(dir, current, det), compose: det.compose, applied: [], written: [] };
+  const report = { stack: chosen, items: items.map(({ id, op, summary }) => ({ id, op, summary })), warnings: unreadWarnings(dir, current), compose: det.compose, applied: [], written: [] };
   if (!apply) return report;
   const { config, files } = build();
   if (JSON.stringify(config) !== JSON.stringify(current)) files.set(".claude/workflow.json", `${JSON.stringify(config, null, 2)}\n`);
@@ -1402,7 +1401,7 @@ export async function verify(dir) {
   const { loadRunConfig } = await import(pathToFileURL(join(dir, "tools", "phase-run", "config.mjs")).href);
   const runner = loadRunConfig(dir);
   results.push({ label: "the phase runner's config", ok: !runner.error, output: runner.error ?? "" });
-  // The unread list's honesty (D19): a warning, never a failure.
+  // The listed-code rule's lines (D19, 0.7.0 D11): a warning, never a failure.
   let config = null;
   try {
     config = JSON.parse(readText(join(dir, ".claude", "workflow.json")));
@@ -1410,7 +1409,7 @@ export async function verify(dir) {
     // The loaders above already failed on a config that isn't JSON: the scan has nothing to add.
   }
   const warnings = config ? unreadWarnings(dir, config) : [];
-  results.push({ label: "the tests' unread list", ok: true, warn: warnings.length > 0, output: warnings.join("\n") });
+  results.push({ label: "the unread lists (the listed-code rule)", ok: true, warn: warnings.length > 0, output: warnings.join("\n") });
   return results;
 }
 

@@ -65,7 +65,7 @@ export function loadWorkflowConfig(root) {
 
 /** What a loader returns with no rules to give: no file (`error` null), or one it refuses. */
 function noRules(error) {
-  return { rules: [], checks: [], wrappers: DEFAULT_WRAPPERS, ledger: { ...DEFAULT_LEDGER }, error };
+  return { rules: [], checks: [], wrappers: DEFAULT_WRAPPERS, ledger: { ...DEFAULT_LEDGER }, testFiles: [], error };
 }
 
 /**
@@ -145,8 +145,9 @@ export function parseWorkflowConfig(data) {
   // The one look inside `phaseRun`: a gate's `after` or `unreadOf` that names nothing (D13).
   gateReferences(data.phaseRun?.gates, checks.map((check) => check.name).filter(Boolean), "phaseRun.gates");
   // And the tampering section, in full (D15): a broken rule must stop the night wherever it is read.
-  tamperingRules(data.phaseRun?.tampering, "phaseRun.tampering");
-  return { rules, checks, wrappers, ledger };
+  // Its test files are the listed-code rule's scan (#39), which the stop gate reads; no section, no rule.
+  const testFiles = tamperingRules(data.phaseRun?.tampering, "phaseRun.tampering")?.testFiles ?? [];
+  return { rules, checks, wrappers, ledger, testFiles };
 }
 
 /**

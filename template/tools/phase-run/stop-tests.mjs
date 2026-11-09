@@ -20,7 +20,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { loadRunConfig } from "./config.mjs";
-import { readReceipt, receiptGroups, receiptHolds, receiptPath, treeKeys, writeReceipt } from "./receipt.mjs";
+import { listedGroups, readReceipt, receiptHolds, receiptPath, treeKeys, writeReceipt } from "./receipt.mjs";
 
 // The config is read beside this file: the repo's, or the run's frozen copy's when the session runs
 // the copy (ADR 0005), so its receipt is made under the rules the stop hook judges with. The work it
@@ -51,8 +51,9 @@ function main() {
     console.log(loaded.error);
     return 2;
   }
-  // Each receipt: a named check alone, the checks without a name together (one file, as 0.5.x wrote).
-  const groups = receiptGroups(loaded.config.stopChecks);
+  // Each receipt: a named check alone, the checks without a name together (one file, as 0.5.x wrote),
+  // each list with the files a test names put back on it (the listed-code rule, receipt.mjs).
+  const groups = listedGroups(ROOT, loaded.config.stopChecks, loaded.config.tampering?.testFiles);
   if (groups.length === 0) {
     console.log('No stop check in .claude/workflow.json carries a receipt ("receipt": true, the tests\' row at least). Run the stop checks by hand.');
     return 2;

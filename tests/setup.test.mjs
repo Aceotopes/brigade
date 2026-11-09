@@ -765,11 +765,11 @@ test("any name will do: a tests row named unit whose command gained {base} is st
   assert.match(warnings[0], /^tests\/b\.test\.mjs:1 names "docs\/guide\.md", on the Tests check's/);
 });
 
-/** The one line the scan prints for a project that names no test files. */
-const NO_TEST_FILES = "set phaseRun.tampering.testFiles to check your unread list";
+/** The one line the scan prints for a project that names no test files: it has no listed-code rule (#39). */
+const NO_TEST_FILES = "no listed-code rule: set phaseRun.tampering.testFiles, or a file a test reads keeps a check's receipt and suite skip when it changes on that check's unread list";
 const TEST_FILES = { testFiles: ["tests/**/*.test.mjs"] };
 
-test("the unread list's honesty: no tampering section, one line and nothing scanned", () => {
+test("the unread list's honesty: no tampering section, one line saying there is no listed-code rule, and nothing scanned", () => {
   const { dir } = project052();
   write(dir, { "tests/b.test.mjs": 'readFileSync("docs/guide.md");\n' });
   assert.deepEqual(refresh(dir).warnings, [NO_TEST_FILES]);
@@ -778,7 +778,7 @@ test("the unread list's honesty: no tampering section, one line and nothing scan
   assert.deepEqual(refresh(empty.dir).warnings, [NO_TEST_FILES]);
 });
 
-test("the unread list's honesty: a clean repo warns of nothing, whatever a non-test file or another check's list says", async () => {
+test("the unread list's honesty: a clean repo warns of nothing, whatever a non-test file says", async () => {
   const { dir } = project052(ROWS_052, (c) => {
     c.stopGate.checks[0] = { ...c.stopGate.checks[0], name: "typecheck", receipt: true, unread: ["**/*.md"] };
     c.phaseRun.tampering = TEST_FILES;
@@ -787,7 +787,6 @@ test("the unread list's honesty: a clean repo warns of nothing, whatever a non-t
     "tests/a.test.mjs": [
       'import { x } from "../src/x.mjs";',
       'const page = "src/app/page.tsx";',
-      'const notes = "src/notes.md";', // on the named Typecheck's list, never the tests row's
       'const lists = ["docs/**", "*.md"];', // globs, not paths
       'const url = "https://example.com/docs/a.md";',
       "const made = `${dir}/docs/x.md`;",
@@ -811,6 +810,22 @@ test("the unread list's honesty: each path a test file names on the tests row's 
   const applied = refresh(dir, { apply: true });
   assert.deepEqual(applied.warnings, warnings);
   assert.deepEqual(config().guard.wrappers, ["pnpm exec", "pnpm dlx", "pnpm", "npx"], "a warning never stops the refresh");
+  assert.match(warnings[0], /voids that check's receipt and any suite skip pointing at it \(the listed-code rule\)$/);
+});
+
+test("the scan reads every row with a list (#39): a path on a named Typecheck's list is that row's hit, never the tests row's", async () => {
+  const { dir } = project052(ROWS_052, (c) => {
+    c.stopGate.checks[0] = { ...c.stopGate.checks[0], name: "typecheck", receipt: true, unread: ["**/*.md"] };
+    c.phaseRun.tampering = TEST_FILES;
+  });
+  write(dir, { "tests/a.test.mjs": 'const notes = "src/notes.md";\nconst guide = "docs/guide.md";\n' });
+  await bothLoaders(dir);
+  const warnings = refresh(dir).warnings;
+  // src/notes.md is on Typecheck's list only; docs/guide.md on both (Typecheck's **/*.md and the tests row's docs/**).
+  assert.deepEqual(
+    warnings.map((w) => w.replace(/, on the (.+?) check's unread list.*/, " · $1")),
+    ['tests/a.test.mjs:1 names "src/notes.md" · Typecheck', 'tests/a.test.mjs:2 names "docs/guide.md" · Typecheck', 'tests/a.test.mjs:2 names "docs/guide.md" · Tests'],
+  );
 });
 
 test("an older CLAUDE.md without the Stack section is offered it, and gets it only on a yes", () => {
@@ -854,7 +869,13 @@ test("the command line: plan previews the changed files, apply writes, verify pa
   const verified = cli("verify", dir);
   assert.equal(verified.status, 0, verified.stdout);
   assert.match(verified.stdout, /^ok +the phase runner's config$/m);
-  assert.match(verified.stdout, /^warn +the tests' unread list\ntests\/b\.test\.mjs:1 names "docs\/guide\.md"/m);
+  assert.match(verified.stdout, /^warn +the unread lists \(the listed-code rule\)\ntests\/b\.test\.mjs:1 names "docs\/guide\.md"/m);
+  // With no test files, verify says there is no listed-code rule, and still passes.
+  delete config.phaseRun.tampering;
+  writeFileSync(join(dir, ".claude/workflow.json"), `${JSON.stringify(config, null, 2)}\n`);
+  const bare = cli("verify", dir);
+  assert.equal(bare.status, 0, bare.stdout);
+  assert.match(bare.stdout, /^warn +the unread lists \(the listed-code rule\)\nno listed-code rule: /m);
 });
 
 test("overwrite works on its own branch and archives the old docs, CLAUDE.md and settings instead of deleting them", () => {

@@ -119,7 +119,9 @@ for (const check of config.checks) {
  * checks one holds for, and whether any receipt was there to read.
  */
 function perCheckReceipts(receipts) {
-  const groups = receipts.receiptGroups(config.checks);
+  // 0.7.0's receipt code puts the files a test names back on each list (the listed-code rule, #39),
+  // as stop-tests.mjs keyed them; a 0.6.x one has no rule, and is read as 0.6.x read it.
+  const groups = typeof receipts.listedGroups === "function" ? receipts.listedGroups(ROOT, config.checks, config.testFiles) : receipts.receiptGroups(config.checks);
   const keys = receipts.treeKeys(ROOT, groups.map((group) => group.unread));
   const held = new Set();
   let read = false;

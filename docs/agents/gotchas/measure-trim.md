@@ -166,7 +166,7 @@ listed in the gotchas index, `docs/agents/gotchas/README.md`.
 
 **`#22` — setup's tool rows, `scripts/setup.mjs` `roleMatcher` / `unreadWarnings`, `template/tools/phase-run/unread-scan.mjs` `unreadScan` / `pathOf` (built 2026-11-08):**
 - Match a row to a stack role with `roleMatchers`, never `run ===`: refresh's lists, the tests-row
-  adds, `rowOffers` and the scan's tests row all go through it. A name counts only with the
+  adds and `rowOffers` all go through it (the scan reads every row with a list since #39). A name counts only with the
   suggested command as the row's prefix (flags after it): a name alone would hide a package-manager
   switch, since every gate has a label. pinned: `tests/setup.test.mjs` ("a name never hides a stack change").
 - `proposeWorkflow` stays 0.5.x-shaped; its whole output for `existing()` is pinned. A new key goes

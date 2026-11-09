@@ -9,6 +9,18 @@ Each commit's entry goes on top, in the shape of `docs/_templates/devlog-entry.m
 message cites it (`devlog #N`). At each phase end, `node tools/doc-rotate.mjs` moves the closed
 entries into `docs/history/devlog/`.
 
+## #40 · feat · the listed-code rule
+
+**Built:** #39. A file a test names, on a check's `unread` list, is put back on that list (D11).
+- `unread-scan.mjs`: the paths the `phaseRun.tampering.testFiles` files name (relative imports included), and the list widened with a `!` for each listed one.
+- `receipt.mjs` `listedGroups`, used by `stop-tests.mjs` and the Stop hook: a change to such a file voids that check's receipt. The hooks' loader now returns `testFiles`.
+- `run.mjs` `gatePlan`: the same change voids any `unreadOf` skip that points at the check; a scan that fails refuses the skip.
+- Setup's verify and refresh scan every row with a list, and say when there is no listed-code rule.
+**Verified:** tests at the hook, runner and setup seams, written first (red, then green); the plugin's and
+the template's suites pass; doc-check clean; the code review's three fixes (one scan per plan, `-z`
+file names, no git without test files) folded in.
+**Next:** #40. **Record:** implementation log 025.
+
 ## #39 · feat · findings and the reports' lane reading
 
 **Built:** #38. One findings record per phase branch, and the reports read every lane (D14).

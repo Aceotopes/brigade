@@ -49,3 +49,10 @@ existing lists keep their meaning.
 - The keys are one `git add -A` into a copy of the index. Each list then removes its paths from a
   copy of that, through `git update-index --force-remove --stdin`.
 - The Stop hook falls back to 0.5.2's reading beside a `receipt.mjs` without `treeKeys`.
+
+## Addendum 2026-11-10: the listed-code rule (#39)
+
+0.7.0 D11 makes the warning above a rule. A path a test file names (`phaseRun.tampering.testFiles`)
+that a check's list leaves out is put back on that list with a `!`, through the same matcher. A
+change to it voids that check's receipt and any `unreadOf` skip that points at the check. With no
+`testFiles`, no hit, or a 0.6.x `receipt.mjs`, the list is the owner's, as before.
