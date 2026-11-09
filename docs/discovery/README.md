@@ -14,5 +14,5 @@ generated from the docs themselves.
 - [02](02-brigade-0.4.0.md) · Discovery: Brigade 0.4.0, the runner's night · 2026-10-28 · latest addendum 2026-11-02
 - [03](03-brigade-0.5.0.md) · Discovery: Brigade 0.5.0, the out-of-step notice · 2026-11-03 · latest addendum 2026-11-04
 - [04](04-brigade-0.6.0.md) · Discovery: Brigade 0.6.0, measure and trim · 2026-11-08 · no addendum
-- [05](05-brigade-0.7.0.md) · Discovery: Brigade 0.7.0, two lanes · 2026-11-09 · no addendum
+- [05](05-brigade-0.7.0.md) · Discovery: Brigade 0.7.0, two lanes · 2026-11-09 · latest addendum 2026-11-09
 <!-- generated:end discovery -->

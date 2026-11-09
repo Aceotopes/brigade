@@ -9,6 +9,16 @@ Each commit's entry goes on top, in the shape of `docs/_templates/devlog-entry.m
 message cites it (`devlog #N`). At each phase end, `node tools/doc-rotate.mjs` moves the closed
 entries into `docs/history/devlog/`.
 
+## #28 · docs · 0.7.0 no longer waits for a real project's night
+
+**Built:** the owner dropped D17, the build gate. Discovery 05 gains a dated addendum saying so.
+The release night (D18, #41) still gates the release. The handoff names the probe (#28) next and
+the phase run after it, and no longer lists Block23GymV2's setup. #28's "Blocked by" note and a
+comment on spec #27 say the same. /ticket-check also ran on #27 (issues only): #29–#40 are
+`run-ready`, and its answers are commented on #27.
+**Verified:** doc-index picked up the addendum; doc-check clean. Nothing built.
+**Next:** #28, the probe, attended. **Record:** discovery 05's addendum.
+
 ## #27 · docs · 0.7.0's tickets, published
 
 **Built:** #27's 15 tickets, #28–#42, in this repo's ticket shape, each a sub-issue of #27 with

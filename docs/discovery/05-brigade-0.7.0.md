@@ -1,5 +1,11 @@
 # Discovery: Brigade 0.7.0, two lanes
 
+> **Addendum 2026-11-09:** the owner dropped the build gate. 0.7.0 no longer waits for a real
+> project's first 0.6.x night (Block23GymV2's), and its build starts with the probe (#28). So the
+> first time 0.6.0's snapshot, side-by-side gates and tampering gate meet a real night is 0.7.0's
+> own: its phase run here, then the release night (D18, #41), which still gates the release.
+> **Changes:** D17, and the Status line's build timing.
+
 **Rounds:** 2026-11-09. One grill with the owner, in four rounds, to port a runner upgrade that one
 real project built and verified on its own runner: "2b, two lanes", its spec 309. Two nights built
 it with nothing parked. A dry two-lane run (source #321) fixed what it found, and the owner's
