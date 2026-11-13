@@ -395,5 +395,6 @@ test("a run without lanes never takes the landing lock and behaves as today; a r
   assert.ok(main.indexOf('process.on("exit", release)') < main.indexOf("handBack("), "after the lane's own lock is released");
   assert.equal(count(/\bkeepUnlanded\(/g), 1);
   assert.match(main, /const \{ kept \} = keepUnlanded\([^)]*\);\n {6}made = prepareWorktree\(\{[^}]*kept \}\);/, "the keep comes just before the reset");
-  assert.match(body("park"), /if \(lane\) \{\n {4}try \{\n {6}releaseClaim\(\{[^}]*parked: true \}\);/, "a session's park releases its claim in a lane");
+  assert.match(body("park"), /if \(lane\) releaseParked\(run, n\);/, "a session's park releases its claim in a lane");
+  assert.match(body("releaseParked"), /releaseClaim\(\{[^}]*parked: true \}\);/, "as parked, so the other lane never builds it tonight");
 });

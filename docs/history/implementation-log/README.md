@@ -10,6 +10,7 @@ what was built, why it works that way, and how to say it out loud. The index bel
 <!-- generated:start implementation-log -->
 ### Current phase
 
+- [030](030-what-can-be-built-tonight.md) · `#27` · 2026-11-13 · What can be built tonight
 - [029](029-landings-minutes.md) · `#27` · 2026-11-13 · Landing's minutes
 - [028](028-every-lane-names-its-values.md) · `#27` · 2026-11-13 · Every lane names its values, and its gates get them
 - [027](027-a-new-gotchas-file-judged-in-the-lane.md) · `#27` · 2026-11-13 · A phase's new gotchas file, judged in the lane

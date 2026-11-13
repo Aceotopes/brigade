@@ -286,6 +286,38 @@ export function builtOn(git, ref, number) {
 }
 
 /**
+ * Which tickets can still be built tonight: `(ticket) => boolean`. A ticket can when it is ready
+ * (`hold(ticket)` null), or waits only on blockers that are done, claimed (being built), or can be
+ * built tonight in turn. A parked, not run-ready or done ticket can't, nor a blocker outside the
+ * spec that isn't done, nor a loop of blockers. Memoized per call, so a diamond of blockers is
+ * read once each, never as a loop. The one rule for a lane's wait (laneChoice) and its count
+ * (run.mjs), the source's later fix: a lane waited on one blocker while another could never be built.
+ */
+export function buildableTonight({ byNumber, hold, done, claimed = new Set() }) {
+  const memo = new Map();
+  const onPath = new Set();
+  const can = (ticket) => {
+    if (memo.has(ticket.number)) return memo.get(ticket.number);
+    if (onPath.has(ticket.number)) return false; // a loop of blockers: none of it is ever ready
+    const reason = hold(ticket);
+    let result = reason === null;
+    if (/^waiting on #/.test(reason ?? "")) {
+      onPath.add(ticket.number);
+      result = ticket.blockers.every((blocker) => {
+        const known = byNumber.get(blocker.number);
+        if (known ? hold(known) === "done" : done(blocker)) return true;
+        if (claimed.has(blocker.number)) return true;
+        return known ? can(known) : false;
+      });
+      onPath.delete(ticket.number);
+    }
+    memo.set(ticket.number, result);
+    return result;
+  };
+  return can;
+}
+
+/**
  * What lane `self` does next. `tickets` are the run's, in order; `byNumber` every ticket of the spec;
  * `hold(ticket)` is the runner's holdReason (null when ready, "waiting on #N" on an unbuilt blocker);
  * `done(blocker)` reads a `{ number, state }` blocker; `claims` the live ones; `others` the rows of the
@@ -329,7 +361,9 @@ export function laneChoice({ tickets, byNumber, hold, done, takes, claims, self,
       walk(known);
     }
   };
-  for (const ticket of mine) if (/^waiting on #/.test(reason(ticket) ?? "")) walk(ticket);
+  // Only a ticket that can be built tonight is waited for: a landing can't free one behind a park.
+  const tonight = buildableTonight({ byNumber, hold: reason, done, claimed: new Set(claimOf.keys()) });
+  for (const ticket of mine) if (/^waiting on #/.test(reason(ticket) ?? "") && tonight(ticket)) walk(ticket);
   return { ticket: null, waitOn: [...waitOn.values()] };
 }
 

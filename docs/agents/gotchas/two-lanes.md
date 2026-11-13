@@ -130,3 +130,9 @@ listed in the gotchas index, `docs/agents/gotchas/README.md`.
 **`#27`, attended (devlog #44) — Landing's minutes, `metrics.mjs` `withLanding`, `run.mjs` `landPass` (built 2026-11-13):**
 - `withLanding` returns a new metrics object; `landPass` assigns it to `result.session.metrics` before its first `saveResults`. Moving the assignment below a save drops the landing from that outcome's minutes. pinned: `run.test.mjs` (a source pin).
 - `heldAt` is set inside the lock's callback, so a lock never taken leaves it null and the whole span counts as slept.
+
+**`#27`, attended (devlog #45) — what can be built tonight, `claim.mjs` `buildableTonight`, `run.mjs` `reachable` / `releaseParked` (built 2026-11-13):**
+- `buildableTonight` is the one rule for a lane's wait and its count. A new reason a ticket can't start (a new park label) is read through `hold`, so it needs no change here. Don't add a second check beside it. pinned: `run.test.mjs`.
+- Its memo is per call: `laneChoice` builds a new one on every look, as the claims change between looks. Never hoist it to module level.
+- The one-lane count is today's byte for byte: only the `if (lane)` line changed. pinned: `run.test.mjs` (a source pin).
+- Every lane release of a parked claim goes through `releaseParked`: a park and the runner-error catch. pinned: `tests/phase-run-landing-lock.test.mjs`, `run.test.mjs`.

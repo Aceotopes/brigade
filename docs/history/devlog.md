@@ -9,6 +9,15 @@ Each commit's entry goes on top, in the shape of `docs/_templates/devlog-entry.m
 message cites it (`devlog #N`). At each phase end, `node tools/doc-rotate.mjs` moves the closed
 entries into `docs/history/devlog/`.
 
+## #45 · fix · what can be built tonight
+
+**Built:** (attended, before #41) the source's later frontier fix, checked here: a lane waited on one blocker while another could never be built tonight.
+- `claim.mjs` `buildableTonight`: ready, or every blocker done, claimed or buildable tonight in turn; never a parked, not run-ready or out-of-spec blocker, nor a loop. Memoized, so a diamond reads once.
+- `laneChoice` waits only for tickets that can be built tonight; a lane's count (`reachable`) counts only those. A one-lane count is today's.
+- A ticket the runner's own error failed is now released as parked in a lane (`releaseParked`, shared with `park()`), so the other lane never builds it tonight.
+**Verified:** the waits, a diamond, a loop, the count and the error path written first (red, then green). The full test command passes (473), and doc-check is clean. Addresses #27.
+**Next:** the code review's skill as config. **Record:** implementation log 030.
+
 ## #44 · fix · Landing's minutes
 
 **Built:** (attended, before #41) the source's later fix "Landing's minutes were missing from the ticket's gate time", checked here: they were.

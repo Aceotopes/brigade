@@ -10,7 +10,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { BROWSER_CHECK, fill, laneQaUrl, loadRunConfig, parseRunConfig, qaUrl, sessionEnv, targetFingerprint, targetUrl } from "./config.mjs";
 import { afterPass, ignoredImports, ignoredImportsProblem, joinBranch, laneLockPath, lanePortProblems, laneRoots, laneRow, laneValues, liveLanes, mayFinishCopy, prepareWorktree, setupWorktree, writeLaneLock } from "./lane.mjs";
-import { CLAIMS_LOCK, UNREADABLE_GRACE_MS, builtOn, claimNext, claimsPath, laneChoice, liveClaims, readClaims, takeClaim, takesTicket, withClaimLock } from "./claim.mjs";
+import { CLAIMS_LOCK, UNREADABLE_GRACE_MS, buildableTonight, builtOn, claimNext, claimsPath, laneChoice, liveClaims, readClaims, takeClaim, takesTicket, withClaimLock } from "./claim.mjs";
 import { compareFingerprint } from "./fingerprint.mjs";
 import { brigadeCatalog, installedBrigade, parsePluginList, readInstalledBrigade, versionStop } from "./brigade.mjs";
 import { readLedger } from "./ledger.mjs";
@@ -2088,6 +2088,49 @@ test("a lane with nothing ready waits while a live lane holds a claim that could
   const chain = [ticketOf(5, { labels: [] }), parked, ticketOf(7, { labels: ["run-ready", "walk"], blockers: [6] })];
   const parkedChoice = laneChoice({ tickets: chain, byNumber: new Map(chain.map((t) => [t.number, t])), hold: holdFrom(new Set()), done: () => false, takes: "walk", claims: [], self: "2", others: [{ id: "1", takes: "any" }] });
   assert.deepEqual(parkedChoice, { ticket: null, waitOn: [] });
+});
+
+// The source's later fix: lane 2 waited on one blocker while another could never be built tonight,
+// and the night's count included such tickets. One rule, canBeBuilt, for the wait and the count.
+test("a lane never waits for a ticket that can't be built tonight: a blocker parked, or one waiting on a parked one", () => {
+  const others = [{ id: "1", takes: "any" }];
+  const choose = (tickets, claims = []) => laneChoice({ tickets, byNumber: new Map(tickets.map((t) => [t.number, t])), hold: holdFrom(new Set()), done: () => false, takes: "walk", claims, self: "2", others });
+  const walk = (n, blockers) => ticketOf(n, { labels: ["run-ready", "walk"], blockers });
+  // #7 waits on #5, which lane 1 is building, and on #6, parked: #5's landing can't free #7.
+  const parked = ticketOf(6, { labels: ["needs-info"] });
+  assert.deepEqual(choose([ticketOf(5), parked, walk(7, [5, 6])], [{ ticket: 5, lane: "1", pid: 111 }]), { ticket: null, waitOn: [] });
+  // #7 waits on #5, unclaimed, which itself waits on #4, parked: no lane can build #5 tonight.
+  assert.deepEqual(choose([ticketOf(4, { labels: ["needs-info"] }), ticketOf(5, { blockers: [4] }), walk(7, [5])]), { ticket: null, waitOn: [] });
+  // A diamond: #7 waits on #5 and #6, both on #4, which lane 1 is building. One wait on each, never read as a loop.
+  const diamond = choose([ticketOf(4), ticketOf(5, { blockers: [4] }), ticketOf(6, { blockers: [4] }), walk(7, [5, 6])], [{ ticket: 4, lane: "1", pid: 111 }]);
+  assert.deepEqual(diamond.waitOn.map((w) => `${w.lane}:#${w.ticket}${w.claimed ? "" : "?"}`).sort(), ["1:#4", "1:#5?", "1:#6?"]);
+  // A real loop of blockers can never be built.
+  const loop = [walk(5, [6]), walk(6, [5])];
+  const tonight = buildableTonight({ byNumber: new Map(loop.map((t) => [t.number, t])), hold: holdFrom(new Set()), done: () => false });
+  assert.deepEqual(loop.map(tonight), [false, false]);
+});
+
+// Next to the source's "a park let go of its claim" fix: a ticket the runner's own error failed was
+// never listed as parked, so once its lane exited the other lane, still live, could build it again.
+test("a ticket the runner's own error failed is released as parked, in a lane, so the other lane never builds it tonight", () => {
+  const source = readFileSync(join(HERE, "run.mjs"), "utf8").replace(/\r\n/g, "\n");
+  const at = source.indexOf("the runner itself hit an error and stopped");
+  const catchBlock = source.slice(at, source.indexOf('outcome = "stop";', at));
+  assert.match(catchBlock, /if \(lane\) releaseParked\(run, next\.number\);/);
+  assert.match(source, /function releaseParked\(run, n\) \{\n {2}try \{\n {4}releaseClaim\(\{ dir: run\.claims, ticket: n, lane: lane\.id, parked: true \}\);/);
+  assert.equal(source.match(/releaseParked\(run, n\)/g)?.length, 2, "park() uses it too: one way to let go of a parked claim");
+});
+
+test("a lane's count is the tickets it takes that can be built tonight; a run without lanes counts as before", () => {
+  const tickets = [ticketOf(4, { labels: ["needs-info"] }), ticketOf(5, { blockers: [4] }), ticketOf(6), ticketOf(7, { blockers: [6] })];
+  const tonight = buildableTonight({ byNumber: new Map(tickets.map((t) => [t.number, t])), hold: holdFrom(new Set()), done: () => false });
+  assert.deepEqual(tickets.map(tonight), [false, false, true, true], "#5 waits on a parked ticket; #7 on one that can still be built");
+  const source = readFileSync(join(HERE, "run.mjs"), "utf8").replace(/\r\n/g, "\n");
+  assert.match(
+    source,
+    /const reachable = inScope\.filter\(\(ticket\) => \{\n {4}const reason = holdReason\(ticket, byNumber\);\n {4}\/\/ A lane counts what its row takes and can be built tonight \(claim\.mjs buildableTonight\): never a ticket behind a park\.\n {4}if \(lane\) return takesTicket\(lane\.takes, ticket\) && tonight\(ticket\);\n {4}return reason === null \|\| reason\.startsWith\("waiting on #"\);\n {2}\}\);/,
+    "one lane: today's count, byte for byte",
+  );
 });
 
 test("a run without lanes picks tickets as today: the first ready one in order, built read off HEAD; a lane reads the phase branch", () => {

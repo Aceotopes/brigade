@@ -45,7 +45,7 @@ import { fileURLToPath } from "node:url";
 
 import { BROWSER_CHECK, HOTSPOT_TOKEN, fill, fillEnv, laneQaUrl, loadRunConfig, sessionEnv as pinnedEnv, targetFingerprint, targetUrl } from "./config.mjs";
 import { afterPass, ignoredImports, ignoredImportsProblem, joinBranch, laneLockPath, lanePortProblems, laneRoots, laneRow, laneValues, liveLanes, mayFinishCopy, prepareWorktree, resetWorktree, setupWorktree, writeLaneLock } from "./lane.mjs";
-import { builtOn, claimNext, clearParked, laneChoice, releaseClaim, takeClaim, takesTicket } from "./claim.mjs";
+import { buildableTonight, builtOn, claimNext, clearParked, laneChoice, releaseClaim, takeClaim, takesTicket } from "./claim.mjs";
 import { keepParked, land } from "./landing.mjs";
 import { dropUnlanded, handBack, keepUnlanded, restartSteps, underLandingLock, unlandedCommits, unlandedRef } from "./landing-lock.mjs";
 import { takeFingerprint } from "./fingerprint.mjs";
@@ -2351,6 +2351,20 @@ function ticketFinished(result) {
   if (result.status !== "built") notify(`#${result.number} ${result.status}`, `${result.title}${result.status === "parked" ? ": it needs your answer." : ": read the report."}`);
 }
 
+/**
+ * A lane's claim on `n` goes, and the ticket is listed as parked tonight (claim.mjs releaseClaim): the
+ * other lane read its labels at its own start, so without the list it would build it again (#37).
+ * For a park, and for a ticket the runner's own error failed. A claim that can't be released lapses
+ * when this lane exits, and the list then lacks it, as the log says.
+ */
+function releaseParked(run, n) {
+  try {
+    releaseClaim({ dir: run.claims, ticket: n, lane: lane.id, parked: true });
+  } catch (error) {
+    log(`#${n}'s claim could not be released (it lapses when this lane exits): ${error.message}`);
+  }
+}
+
 async function park(ticket, base, kind, detail, run, session) {
   const n = ticket.number;
   let keptOn = null;
@@ -2365,14 +2379,7 @@ async function park(ticket, base, kind, detail, run, session) {
   }
   await freeTicketPorts();
   const notPosted = postPark(ticket, kind, detail, keptOn, run);
-  // The claim goes, and the park is listed: the other lane read this ticket's labels at its own start (#37).
-  if (lane) {
-    try {
-      releaseClaim({ dir: run.claims, ticket: n, lane: lane.id, parked: true });
-    } catch (error) {
-      log(`#${n}'s claim could not be released (it lapses when this lane exits): ${error.message}`);
-    }
-  }
+  if (lane) releaseParked(run, n);
 
   // Applied to the target, but its file went with the reset: the target holds what the branch does not.
   const leftOnTarget = [...run.migrationsApplied].filter((name) => migrationFiles.has(name) && !existsSync(join(work, migrationFiles.get(name))));
@@ -3010,9 +3017,11 @@ async function main() {
   // "6 of 10": the tickets this run can reach (ready now, or waiting only on
   // another ticket), up to --max. The time per ticket starts at the branch's
   // own average, then follows this run's.
+  const tonight = buildableTonight({ byNumber, hold: (ticket) => holdReason(ticket, byNumber), done: blockerDone });
   const reachable = inScope.filter((ticket) => {
     const reason = holdReason(ticket, byNumber);
-    if (lane && !takesTicket(lane.takes, ticket)) return false; // a lane counts only what its row takes
+    // A lane counts what its row takes and can be built tonight (claim.mjs buildableTonight): never a ticket behind a park.
+    if (lane) return takesTicket(lane.takes, ticket) && tonight(ticket);
     return reason === null || reason.startsWith("waiting on #");
   });
   const earlier = run.all.map(ticketMinutes).filter((minutes) => minutes != null);
@@ -3076,6 +3085,8 @@ async function main() {
     } catch (error) {
       log(`#${next.number}: the runner itself hit an error and stopped: ${error.message}`);
       ticketFinished(recordResult(run, { number: next.number, title: next.title, status: "failed", detail: `The runner stopped on an error of its own:\n\n\`\`\`\n${error.stack ?? error.message}\n\`\`\`\n\nThe branch was left as it was. Look before running again.`, keptOn: null, session: null }));
+      // "Look before running again": the other lane, still live, must not build it tonight either.
+      if (lane) releaseParked(run, next.number);
       outcome = "stop";
     }
     writeFileSync(appliedFile, JSON.stringify([...run.migrationsApplied], null, 2));
