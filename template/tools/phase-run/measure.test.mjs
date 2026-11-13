@@ -16,7 +16,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { Screen, makePaint, progressText, resultLines, scoreboard, shortStat, shortTitle, visible } from "./display.mjs";
-import { PRICES_STALE_DAYS, addCost, hookTime, loadPrices, pricesAgeDays, sessionCost, sessionCostFrom, stepKind, stepRules, ticketMetrics, toolTime } from "./metrics.mjs";
+import { PRICES_STALE_DAYS, addCost, hookTime, loadPrices, pricesAgeDays, sessionCost, sessionCostFrom, stepKind, stepRules, ticketMetrics, toolTime, withLanding } from "./metrics.mjs";
 import { appendRow, latestPerSession, ledgerCsv, ledgerRow, ledgerText, readLedger, stampVersion, weeklyView, weekOf } from "./ledger.mjs";
 import { readReceipt, receiptGroups, receiptHolds, receiptPath, treeKey, treeKeys } from "./receipt.mjs";
 import { promptValues, report } from "./run.mjs";
@@ -228,6 +228,15 @@ test("a ticket's minutes: the measured waits, the hook and the gates, and Claude
 
   const metrics = ticketMetrics({ transcript: file, startedAt: start, endedAt: start + 80 * 60_000, gatesMs: 7 * 60_000, hookMs: 10 * 60_000, prices });
   assert.deepEqual(metrics.minutes, { total: 80, claude: 51, tests: 5, checks: 0, browser: 3, waiting: 4, reviewing: 0, hook: 10, gates: 7 });
+
+  // A lane's landing (the source's later fix: its minutes were left out of the ticket's time). The
+  // wait for the landing lock is slept, the landing itself is gates, both join the total, and
+  // Claude's share is what it was.
+  const landed = withLanding(metrics, { waitedMs: 3 * 60_000, landingMs: 12 * 60_000 });
+  assert.deepEqual(landed.minutes, { total: 95, claude: 51, tests: 5, checks: 0, browser: 3, waiting: 7, reviewing: 0, hook: 10, gates: 19 });
+  assert.equal(landed.costUsd, metrics.costUsd, "the rest is as it was");
+  assert.deepEqual(metrics.minutes.total, 80, "the ticket's own metrics are not changed in place");
+  assert.equal(withLanding(null, { waitedMs: 1, landingMs: 1 }), null, "a ticket with no metrics stays without");
 });
 
 // ------------------------------------------------------------------- ledger

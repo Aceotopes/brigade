@@ -53,7 +53,7 @@ import { branchResults, findingText, findingsPath, laneState, onBranch, readFind
 import { Screen, notify, ticketMinutes } from "./display.mjs";
 import { brigadeCatalog, readInstalledBrigade, versionStop, withAutoUpdateOff } from "./brigade.mjs";
 import { LEDGER_PATH, appendRow, ledgerRow, stampVersion } from "./ledger.mjs";
-import { hookTime, loadPrices, sessionCost, stepKind, stepRules, ticketMetrics } from "./metrics.mjs";
+import { hookTime, loadPrices, sessionCost, stepKind, stepRules, ticketMetrics, withLanding } from "./metrics.mjs";
 import { finishSnapshot, takeSnapshot } from "./snapshot.mjs";
 import { DEFAULT_RULES as DEFAULT_SIZE, measureTicket as ticketSize } from "./ticket-size.mjs";
 import { PATCH_ARGS, tamperingVerdict } from "./tampering.mjs";
@@ -2150,11 +2150,15 @@ async function landPass(ticket, result, commit, run, options) {
   log(`#${n}: landing on ${run.branch}.`, { routine: true });
   const appliedBefore = new Set(run.migrationsApplied); // a park after the migration leaves it on the target
   let landing;
+  // The ticket's time takes its landing too (metrics.mjs withLanding): the lock's wait, then the landing.
+  const askedAt = Date.now();
+  let heldAt = null;
   try {
     const held = await underLandingLock(
       { dir: run.claims, root: ROOT, branch: run.branch, lane: lane.id, onWait: (holder) => log(`#${n}: waiting for ${holder?.lane ? `lane ${holder.lane}'s` : "another"} landing to finish.`) },
-      () =>
-        land({
+      () => {
+        heldAt = Date.now();
+        return land({
           repo: ROOT,
           branch: run.branch,
           ticket: n,
@@ -2169,12 +2173,17 @@ async function landPass(ticket, result, commit, run, options) {
           browserCheck: () => `The runner can't walk the screens itself, so the check was not run again on ${run.branch}'s tip: build #${n} again from there.`,
           migration: config.migrations ? { added: config.migrations.added, apply: (dir, names) => migrateLanded(names, run) } : null,
           remote: "origin",
-        }),
+        });
+      },
     );
     landing = held.value;
     result.notes.push(...held.notes);
   } catch (error) {
     landing = { status: "unlanded", detail: error.message };
+  }
+  const endedAt = Date.now();
+  if (result.session?.metrics) {
+    result.session.metrics = withLanding(result.session.metrics, { waitedMs: (heldAt ?? endedAt) - askedAt, landingMs: heldAt === null ? 0 : endedAt - heldAt });
   }
   if (landing.cleanup) result.notes.push(landing.cleanup);
 

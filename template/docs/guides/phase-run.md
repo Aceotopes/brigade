@@ -627,7 +627,9 @@ every measured wait), tests, checks, browser, slept, reviews, the stop hook and 
 at API rates; its peak context; and its size. The cost is read from the session's transcript and
 priced with `tools/phase-run/prices.json`: what the same tokens would cost on the pay-as-you-go
 API, a gauge of your plan's allowance, not a bill. Most of a ticket's cost is the model re-reading
-its own growing conversation, so a long ticket costs more per step. "Slept" should stay near zero;
+its own growing conversation, so a long ticket costs more per step. In a lane, a ticket's landing
+counts too: its re-gate and push join the gates, and its wait for the other lane's landing is slept.
+"Slept" should stay near zero;
 size beside cost is what you retune `phaseRun.ticketSize` from. What you do spend is your plan's
 usage allowance, and a long night can reach its limit. When that
 happens the run is meant to wait and resume by itself, up to `--wait-hours`; that has never

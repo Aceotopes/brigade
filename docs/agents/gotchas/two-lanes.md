@@ -126,3 +126,7 @@ listed in the gotchas index, `docs/agents/gotchas/README.md`.
 - `laneVariables` is the one list of a lane's variables. The session's env (`runVariables`) and every gate job (`projectGates` → `gateGroup`) take it from there. Never add a lane variable to one of them alone. pinned: `run.test.mjs` (a source pin on both gate calls, the ticket's and Landing's re-gate).
 - A gate's job env is `{ ...gate.env, ...laneEnv }`: the lane's value wins over the gate's. Without a lane `laneEnv` is `{}`, so the env is today's.
 - The loader's rule is across rows: once any row names a `testDbPrefix`, a port named `qa` or an `env` key, every row must. A fixture with only lane 2's values is now refused. Give lane 1 its own. pinned: `tests/phase-run-config.test.mjs`.
+
+**`#27`, attended (devlog #44) — Landing's minutes, `metrics.mjs` `withLanding`, `run.mjs` `landPass` (built 2026-11-13):**
+- `withLanding` returns a new metrics object; `landPass` assigns it to `result.session.metrics` before its first `saveResults`. Moving the assignment below a save drops the landing from that outcome's minutes. pinned: `run.test.mjs` (a source pin).
+- `heldAt` is set inside the lock's callback, so a lock never taken leaves it null and the whole span counts as slept.

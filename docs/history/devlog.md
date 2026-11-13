@@ -9,6 +9,15 @@ Each commit's entry goes on top, in the shape of `docs/_templates/devlog-entry.m
 message cites it (`devlog #N`). At each phase end, `node tools/doc-rotate.mjs` moves the closed
 entries into `docs/history/devlog/`.
 
+## #44 · fix · Landing's minutes
+
+**Built:** (attended, before #41) the source's later fix "Landing's minutes were missing from the ticket's gate time", checked here: they were.
+- `metrics.mjs` `withLanding`: the wait for the landing lock joins Slept, the landing itself (replay, rebuild, re-gate, push) joins Gates, and both join the total; Claude's share is unchanged.
+- `landPass` times the lock and the landing, and applies it before any outcome is saved.
+- The guide's "What it costs" says so.
+**Verified:** the sum and a source pin written first (red, then green). The full test command passes (470), and doc-check is clean. Addresses #27.
+**Next:** what can be built tonight. **Record:** implementation log 029.
+
 ## #43 · fix · every lane names its values, and its gates get them
 
 **Built:** (attended, before #41) the source's later fix "lane 1 ran on lane 2's test databases", checked by symptom here.

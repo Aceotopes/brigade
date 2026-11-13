@@ -10,6 +10,7 @@ what was built, why it works that way, and how to say it out loud. The index bel
 <!-- generated:start implementation-log -->
 ### Current phase
 
+- [029](029-landings-minutes.md) · `#27` · 2026-11-13 · Landing's minutes
 - [028](028-every-lane-names-its-values.md) · `#27` · 2026-11-13 · Every lane names its values, and its gates get them
 - [027](027-a-new-gotchas-file-judged-in-the-lane.md) · `#27` · 2026-11-13 · A phase's new gotchas file, judged in the lane
 - [026](026-setups-lane-checklist.md) · `#40` · 2026-11-10 · Setup's lane checklist and the guide's examples

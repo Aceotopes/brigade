@@ -461,6 +461,16 @@ test("the project's gates start with their env and {base} filled in, the alone g
 
 // The source's later fix: a lane's suite ran on the other lane's test databases. Here the runner's
 // own gates, and Landing's re-gate (the same projectGates), got only each gate's env.
+// The source's later fix: Landing's minutes were left out of the ticket's gate time (metrics.mjs withLanding).
+test("a lane's landing adds its lock wait and its own time to the ticket's minutes, before any outcome is saved", () => {
+  const source = readFileSync(join(HERE, "run.mjs"), "utf8").replace(/\r\n/g, "\n");
+  const body = source.slice(source.indexOf("async function landPass("), source.indexOf("async function regateLanded("));
+  const added = body.indexOf("result.session.metrics = withLanding(result.session.metrics, { waitedMs: (heldAt ?? endedAt) - askedAt, landingMs: heldAt === null ? 0 : endedAt - heldAt });");
+  assert.ok(added > 0, "landPass applies withLanding");
+  assert.ok(added < body.indexOf("saveResults(run)"), "before the first save, so every outcome (landed, parked, unlanded) carries it");
+  assert.ok(body.indexOf("heldAt = Date.now();") > body.indexOf("const askedAt = Date.now();"), "the landing's clock starts once the lock is held");
+});
+
 test("in a lane, every gate starts with the lane's variables over its own env; without a lane its env is today's", async () => {
   const laneEnv = laneVariables({ id: "2", qaPort: "4402", qaDatabase: "app_qa_2", testDbPrefix: "lane2_", env: { CACHE_DB: "2" } });
   assert.deepEqual(laneEnv, { CACHE_DB: "2", PHASE_RUN_LANE: "2", PHASE_RUN_QA_PORT: "4402", PHASE_RUN_QA_DATABASE: "app_qa_2", PHASE_RUN_TEST_DB_PREFIX: "lane2_" });
