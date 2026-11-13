@@ -54,7 +54,7 @@ touches. A newer release's keys for the config's rows are offered at the end, on
    changing a hand-written row's own values. A flag goes after the row's command, and the row keeps
    its name, so refresh and the next update still know it.
 7. `node "${CLAUDE_PLUGIN_ROOT}/scripts/setup.mjs" verify <dir>`. A failure is fixed, never by
-   loosening a check. A `warn` line (the unread list's honesty scan) is said, never a failure.
+   loosening a check. A `warn` line (the listed-code rule's scan) is said, never a failure.
 8. Add the devlog entry this commit needs, on top of `docs/history/devlog.md`
    (`## #N · chore · update the workflow to <to>`, the files that changed and the offers taken), and
    draft the message `chore: update the workflow to <to> — devlog #N`. **Stop**: the owner says when

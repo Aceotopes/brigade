@@ -50,7 +50,7 @@ on past nights the same few shapes were refused over and over:
 - **Waiting: never a fixed-length pause.** No `sleep`, no `setTimeout` pause script, no "wait N
   minutes": sessions once slept 1.6 hours of one phase that way, mostly after what they waited for
   had finished. Wait on the thing itself, with the scripts made for it:
-  - for subagents (a design reviewer, the `code-review` skill's reviewers):
+  - for subagents (a design reviewer, the {{CODE_REVIEW}} skill's reviewers):
     `node tools/phase-run/wait-subagents.mjs`, which returns the moment every subagent you started
     has finished. Never poll a subagent's output file, which can stay empty to the end (one did).
   - for a server you started: `node tools/phase-run/wait-url.mjs <its URL>`, which returns as
@@ -133,7 +133,7 @@ step; and the per-ticket rows the project adds in its doc-sync rows file, if it 
 session handoff, Artifact pages) is **not** yours.
 
 No doc carries this commit's hash: cite `devlog #NNN` or the ticket `#{{N}}` instead. The devlog
-entry's heading is `## #NNN · <type> · <title>`, at most 15 lines (doc-sync §3).
+entry's heading is `## #NNN · <type> · <title>`, at most 15 lines (doc-sync §3).{{LANE_NUMBERS}}
 
 Then commit **once**:
 
@@ -148,7 +148,7 @@ Then commit **once**:
 
 ## 8. Code review, folded into that commit
 
-The `code-review` skill reads committed work, so it runs after the commit. Use it with
+The {{CODE_REVIEW}} skill reads committed work, so it runs after the commit. Use it with
 `{{BASE}}` as the fixed point (its diff is `git diff {{BASE}}...HEAD`, which is exactly this
 ticket) and issue #{{N}} as the spec. Its reviewers run as subagents: wait for them with
 `node tools/phase-run/wait-subagents.mjs`. Fix what is real, re-run the tests the fix touches, and
@@ -178,6 +178,9 @@ with the turn over, as your end.
 
 `foundElsewhere` and `handedForward` reach the owner's morning report; without them, two real
 bugs and an owed note were once lost across two phases. Say each also in the implementation log.
+Each finding goes into the phase's findings record with an outcome: `fixed`, `ticketed`, `taken`
+(a named later ticket takes it on) or `dropped`. A plain string is recorded open, for the owner to
+decide; when you already know its outcome, write it as `{ "finding": "…", "outcome": "taken" }`.
 
 or, when parked:
 

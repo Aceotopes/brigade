@@ -8,6 +8,27 @@ One file per ticket, `NNN-<slug>.md`, from `docs/_templates/implementation-log.m
 what was built, why it works that way, and how to say it out loud. The index below is generated.
 
 <!-- generated:start implementation-log -->
+### Current phase
+
+- [032](032-a-piped-commit-message-is-checked.md) · `#27` · 2026-11-13 · A piped commit message is checked
+- [031](031-the-code-reviews-skill.md) · `#27` · 2026-11-13 · The code review's skill is config
+- [030](030-what-can-be-built-tonight.md) · `#27` · 2026-11-13 · What can be built tonight
+- [029](029-landings-minutes.md) · `#27` · 2026-11-13 · Landing's minutes
+- [028](028-every-lane-names-its-values.md) · `#27` · 2026-11-13 · Every lane names its values, and its gates get them
+- [027](027-a-new-gotchas-file-judged-in-the-lane.md) · `#27` · 2026-11-13 · A phase's new gotchas file, judged in the lane
+- [026](026-setups-lane-checklist.md) · `#40` · 2026-11-10 · Setup's lane checklist and the guide's examples
+- [025](025-the-listed-code-rule.md) · `#39` · 2026-11-10 · The listed-code rule
+- [024](024-findings-and-the-reports-lane-reading.md) · `#38` · 2026-11-10 · Findings and the reports' lane reading
+- [023](023-the-landing-lock.md) · `#37` · 2026-11-10 · The landing lock
+- [022](022-landing-the-plan-and-the-executor.md) · `#36` · 2026-11-10 · Landing: the plan and the executor
+- [021](021-the-fingerprint.md) · `#35` · 2026-11-10 · The fingerprint: a browser-check pass records what it judged
+- [020](020-the-claim-and-the-frontier.md) · `#34` · 2026-11-10 · The claim and the frontier: two lanes never build the same ticket
+- [019](019-the-worktree.md) · `#33` · 2026-11-10 · The worktree: `run.mjs --lane <id>` builds in a lane's own worktree and keeps each pass unlanded
+- [018](018-lane-declaration.md) · `#32` · 2026-11-09 · The lane declaration: a `## Lane` holds only on a ticket with its lane's label
+- [017](017-snapshot-doc-check.md) · `#31` · 2026-11-09 · The snapshot carries doc-check: a night's docs are judged by its run's copy
+- [016](016-unnumbered-entries.md) · `#30` · 2026-11-09 · Hotspots and unnumbered entries: a lane writes NNN, a pure step numbers it
+- [015](015-lane-table.md) · `#29` · 2026-11-09 · The lane table: two lanes as config, checked at preflight
+
 ### Phase measure-trim — Brigade 0.6.0, measure and trim (with 0.5.2's entries before it)
 
 - [014](014-finish-0-6-0.md) · `#24` · 2026-11-08 · Finishing 0.6.0: the guard's own part, and the review's fixes

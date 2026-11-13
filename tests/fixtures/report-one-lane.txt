@@ -1,0 +1,116 @@
+## Phase run report: phase-test
+
+<at> UTC · Brigade 0.7.0 · built 2 · parked 1 · failed 1
+
+This project's runner is stamped 0.6.2; Brigade 0.7.0 judged the run. `/update-workflow` brings the runner to the plugin's version.
+
+⚠ Brigade's auto-update was not switched off for this run: no catalog
+
+### Scoreboard
+
+| # | Ticket | Result | Min | Claude | Tests | Checks | Browser | Slept | Reviews | Hook | Gates | Cost | Peak | Criteria | Areas | Words |
+|---|---|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| 180 | Announcements | built, 1 fix | 9 | 5 | 1 | 1 | 0 | 0 | 1 | 0 | 1 | $5.00 | 120K | 4 | 2 | 300 |
+| 181 | Calendar / view | built, 1 fix | 9 | 5 | 1 | 1 | 0 | 0 | 1 | 0 | 1 | $5.00 | 120K | 4 | 2 | 300 |
+| 182 | Payroll | parked | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
+| 183 | Leave | failed | 9 | 5 | 1 | 1 | 0 | 0 | 1 | 0 | 1 | $5.00 | 120K | 4 | 2 | 300 |
+
+4 ticket(s), 27 min, $15.00 at API rates (a usage gauge: a subscription plan is not billed per token). "Claude" is what is left after every measured wait: mostly the model thinking and writing.
+
+### From an earlier run that stopped before writing its report
+
+- **#160 Carried build**: built `h160`
+- **#161 Carried park**: parked: it needs your decision; work kept on `phase-test-parked-161`
+  > Who may see it? Recommended: owners.
+
+**Its assumptions (confirm or reverse each)**
+
+- #160: Kept the old sort.
+
+**What it found in other tickets' code**
+
+- #160: #150's list skips one.
+
+### Built
+
+**#180 Announcements** · `h180`
+- A person can do 180.
+- Size: 2 files changed, 10 insertions(+), 1 deletion(-)
+- ⚠ Files outside the areas the ticket named: `src/x.ts`
+- Applied to the migration target: 0003_add.sql
+- 🚨 Destructive migration (it drops or rewrites data): 0003_add.sql
+- Screenshots: `.shots/180/`
+- Commands the session was refused (1): `rm -rf x`
+- ⚠ The push failed: no network
+- The whole session, to read back: `claude attach w1`
+- Effort: 9 min · 3 turns · 2 session call(s) · $5.00 at API rates, context up to 120K
+
+**#181 Calendar | view** · `h181`
+- A person can do 181.
+- Size: 2 files changed, 10 insertions(+), 1 deletion(-)
+- Commands the session was refused (1): `rm -rf x`
+- ⚠ ledger: not written (no transcript). This ticket's cost is missing from .phase-run/ledger.jsonl.
+- The whole session, to read back: `claude attach w1`
+- Effort: 9 min · 3 turns · 2 session call(s) · $5.00 at API rates, context up to 120K
+
+### Assumptions made (confirm or reverse each)
+
+- #180: Sorted newest first.
+
+### Run by hand
+
+- #180: Set the SMTP secret.
+
+### Found in other tickets' code (for the finish, or a ticket of its own)
+
+- #180: #170's form drops a field.
+
+### Handed forward (owed by a later ticket: check it took it)
+
+- #180: #185 owes the badge.
+
+### Parked: your decision is needed
+
+**#182 Payroll**
+
+Round half up or down? Recommended: up.
+
+Work kept on `phase-test-parked-182`.
+⚠ GitHub could not be reached, so this was not posted on the issue. The ticket still carries `run-ready` there, and the next run will try it again from the start.
+
+### Failed
+
+**#183 Leave**
+
+The lint gate failed.
+
+
+
+🚨 the migration target holds 0004_x.sql from this ticket, which is not on the phase branch.
+The whole session, to read back: `claude attach w1`
+Effort: 9 min · 3 turns · 2 session call(s) · $5.00 at API rates, context up to 120K
+
+### Not started
+
+- #190 Later: ready, not reached this run
+
+### Doc health
+
+1 doc(s) at 90% of their budget or over; the finish ticket trims them (or the owner raises a limit):
+
+- `docs/a.md` 90 / 100 lines (90%)
+
+<details><summary>Every doc's size against its budget</summary>
+
+```text
+docs/a.md   90  /  100  90%  near the limit
+docs/b.md   10  /  100  10%
+```
+
+</details>
+
+### Next
+
+- CI runs on the pull request (https://github.com/o/r/pull/4); check it is green there.
+- To hand-test: `git checkout phase-test`. Leave the folder alone while a run is on.
+- Merge with a **merge commit** when the phase is done. Never squash or rebase.

@@ -6,7 +6,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { parseWorkflowConfig } from "../hooks/workflow-config.mjs";
+import { loadWorkflowConfig, parseWorkflowConfig } from "../hooks/workflow-config.mjs";
 import { PLUGIN, repo, runHook, write } from "./helpers.mjs";
 
 const STJ = readFileSync(join(PLUGIN, "examples", "steak-to-juan", "workflow.json"), "utf8");
@@ -25,10 +25,16 @@ const RUN = { PHASE_RUN: "1" };
 // ------------------------------------------------------------------- the loader
 
 test("both shipped configs load: the blank template and Steak To Juan's example", () => {
-  assert.deepEqual(parseWorkflowConfig(JSON.parse(BLANK)), { rules: [], checks: [], wrappers: ["pnpm exec", "pnpm dlx", "pnpm", "npx"], ledger: { attended: true, weekStarts: "monday" } });
+  assert.deepEqual(parseWorkflowConfig(JSON.parse(BLANK)), { rules: [], checks: [], wrappers: ["pnpm exec", "pnpm dlx", "pnpm", "npx"], ledger: { attended: true, weekStarts: "monday" }, testFiles: [] });
   const stj = parseWorkflowConfig(JSON.parse(STJ));
   assert.equal(stj.rules.length, 4);
   assert.deepEqual(stj.checks.map((c) => c.label), ["Typecheck", "Lint", "The tests your changes touch"]);
+});
+
+test("the hooks' loader gives the stop gate the tampering section's test files, the listed-code rule's scan (#39)", () => {
+  assert.deepEqual(parseWorkflowConfig({ version: 1, phaseRun: { tampering: { testFiles: ["tests/**/*.test.mjs"] } } }).testFiles, ["tests/**/*.test.mjs"]);
+  assert.deepEqual(parseWorkflowConfig({ version: 1, phaseRun: { tampering: { guarded: ["package.json"] } } }).testFiles, []);
+  assert.deepEqual(loadWorkflowConfig(project().dir).testFiles, [], "no file, no test files");
 });
 
 test("a config with a mistake names it: version, a typo'd key, a bad when, a bad pattern, both match kinds", () => {

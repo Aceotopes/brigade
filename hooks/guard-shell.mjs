@@ -30,7 +30,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
-import { loadJudgeGuard } from "./workflow-config.mjs";
+import { judgeRoot, loadJudgeGuard } from "./workflow-config.mjs";
 
 const IN_RUN = process.env.PHASE_RUN === "1";
 /** One shell word: double-quoted, single-quoted, or bare. */
@@ -58,6 +58,15 @@ function specIssues(root) {
   }
   if (process.env.PHASE_RUN_SPEC) numbers.add(String(process.env.PHASE_RUN_SPEC));
   return numbers;
+}
+
+/** True when the run's copy at `dir` says it took a doc-check (snapshot.mjs's manifest, 0.7.0). */
+function copyTookDocCheck(dir) {
+  try {
+    return JSON.parse(readFileSync(join(dir, "manifest.json"), "utf8")).docCheck === true;
+  } catch {
+    return false;
+  }
 }
 
 /** A path as a shell wrote it, made absolute: quotes off, `~` expanded, Git Bash's `/d/x` read as `d:/x`. */
@@ -246,24 +255,33 @@ function main() {
       block("a phase-run session never reads `.env`: it holds live credentials. `.env.example` lists the names.");
     }
     if (/doc-check\.mjs\b.*--update-baseline/.test(command)) {
-      block("the doc-check baseline is not updated inside a phase run. Fix the line it names.");
+      block("the doc-check baseline is not updated inside a phase run: the night's docs are judged by the baseline the run's copy took at run start (ADR 0005). Fix the line it names.");
     }
   }
 
   // A project without the doc tools has nothing to check; its commits are not blocked for it.
-  if (isCommit && existsSync(join(root, "tools", "doc-check.mjs"))) {
-    const args = ["tools/doc-check.mjs"];
+  // Inside a run the doc-check is the run's copy's (D10), as the runner's gate is, pointed at the
+  // project; a copy taken by an older runner holds none, and the live one checks, as before. A copy
+  // whose manifest says it took one, and has lost it, blocks: the live one must not judge instead.
+  const copied = process.env.PHASE_RUN_RUNNER ? join(judgeRoot(root), "tools", "doc-check.mjs") : null;
+  if (isCommit && copied && !existsSync(copied) && copyTookDocCheck(judgeRoot(root))) {
+    block(`the phase run's runner copy (${judgeRoot(root)}) has lost its tools/doc-check.mjs. Write the verdict file and stop; the owner deletes the copy to start a fresh run.`);
+  }
+  const docCheck = copied && existsSync(copied) ? copied : join(root, "tools", "doc-check.mjs");
+  if (isCommit && existsSync(docCheck)) {
+    const args = [docCheck];
     const amend = /\s--amend\b/.test(command);
     const file = messageFile(command, find(mine, COMMIT).dir, String.raw`\s-F|\s--file`);
     if (file) {
       args.push("--message-file", file);
-    } else if (/\s(-m|--message)[=\s]/.test(command)) {
-      // An inline message: the command's own text holds it, heredoc and all.
+    } else if (/\s(-m|--message)[=\s]/.test(command) || /\s(-F|--file)[=\s]+-(?=\s|$)/.test(command)) {
+      // An inline message, or one piped in (`-F -`): the command's own text holds it, heredoc and all.
       args.push("--message", command);
     }
     if (amend && args.length > 1) args.push("--amend");
 
-    const check = spawnSync(process.execPath, args, { cwd: root, encoding: "utf8" });
+    const env = docCheck === copied ? { ...process.env, PHASE_RUN_ROOT: root } : process.env;
+    const check = spawnSync(process.execPath, args, { cwd: root, encoding: "utf8", env });
     if (check.status !== 0) {
       block(`doc-check failed, so the commit did not run.\n${(check.stderr || check.stdout || "").slice(0, 4000)}`);
     }

@@ -26,6 +26,11 @@ const READERS = [
 ];
 /** Set by the owner when starting a run, not by the runner. */
 const OWNER_SET = ["PHASE_RUN_NET_HOSTS", "PHASE_RUN_NOTIFY"];
+/** A lane session's values (0.7.0 D2): run.mjs sets them from the lane's row. */
+const LANE_SET = ["PHASE_RUN_LANE", "PHASE_RUN_QA_PORT", "PHASE_RUN_QA_DATABASE", "PHASE_RUN_TEST_DB_PREFIX"];
+/** Reserved by Brigade (D16) for a project's browser scripts' fake clock: a project's tools may read it, and no runner code sets it. */
+const RESERVED = ["PHASE_RUN_FAKE_NOW"];
+const RUNNER_CODE = ["template/tools/phase-run/run.mjs", "template/tools/phase-run/lane.mjs", "template/tools/phase-run/config.mjs"];
 
 const NAME = /\bPHASE_RUN(?:_[A-Z]+)*\b/g;
 
@@ -56,8 +61,17 @@ test("every PHASE_RUN name a hook or doc-check reads is one the runner sets", ()
   assert.match(read("template/tools/phase-run/stop-tests.mjs"), /PHASE_RUN_ROOT/, "stop-tests.mjs finds the repo from the copy");
   for (const rel of READERS) {
     for (const [name] of read(rel).matchAll(NAME)) {
-      if (OWNER_SET.includes(name)) continue;
+      if (OWNER_SET.includes(name) || RESERVED.includes(name)) continue;
       assert.ok(set.has(name), `${rel} reads ${name}, which run.mjs never sets`);
     }
+  }
+});
+
+test("a lane session's PHASE_RUN names join the contract: four the runner sets, and PHASE_RUN_FAKE_NOW reserved", () => {
+  const runner = read(RUNNER);
+  const set = new Set([...runner.matchAll(/\b(PHASE_RUN(?:_[A-Z]+)*)\s*:/g)].map((m) => m[1]));
+  for (const name of LANE_SET) assert.ok(set.has(name), `run.mjs no longer sets ${name} for a lane session`);
+  for (const name of RESERVED) {
+    for (const rel of RUNNER_CODE) assert.doesNotMatch(read(rel), new RegExp(`\\b${name}\\b`), `${rel} names ${name}, which Brigade reserves and no runner code sets`);
   }
 });

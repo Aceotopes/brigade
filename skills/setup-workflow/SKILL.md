@@ -64,6 +64,10 @@ silently: show the owner what was detected and the proposed gates, and ask in on
   it must be a shared development database, never production; if named, fill `phaseRun.migrations`
   from `template/docs/guides/phase-run.md`'s "What your config sets";
 - **a browser check** for a frontend: off unless the owner wants it (`phaseRun.browserCheck`);
+- **the code review's skill**: which skill reviews a ticket's commit, by its full id
+  (`"<plugin>:code-review"`, as the session's skill list shows it), written to
+  `phaseRun.codeReview`. A bare `code-review` can start Claude Code's built-in review; verify warns
+  while it is unset;
 - **does it have screens?** (default: yes when `frontend` is not empty; ask on an empty repo). A
   project with screens gets the design rung (`docs/agents/workflow.md`): the prompt file with its
   design review (`docs/agents/phase-run-prompt.md`, named by `phaseRun.prompt`) and
@@ -132,8 +136,38 @@ before writing it.
   git ignores; typecheck leaves out scratch folders like `.phase-run`; an empty catch needs a
   reason; tool scripts are checked for undefined names; the lint cache is gitignored.
 
+**Then two lanes** (0.7.0 D4, D7, D8, D15, D16), off unless the owner says yes. A second lane builds a
+ticket beside the first, in its own worktree with its own ports and databases, so a night that waits
+on a browser isn't one ticket at a time. `plan` always proposes them (its `proposed`, and "Two lanes,
+proposed" in its summary). Show the owner what it proposes and ask yes or no; a no writes nothing:
+- the lane rows: lane 1 takes any ticket, and lane 2 takes only tickets with its label. Each
+  worktree is at `../<repo folder>-lanes/lane-<id>`, beside the repo;
+- `worktreeSetup`: the untracked files a fresh worktree lacks (`copy`), the install and any code
+  generation (`commands`), and what they must leave (`leaves`);
+- the first hotspot rows, from `tools/doc-config.mjs`'s paths: the devlog and the implementation
+  logs as `log`, the generated indexes as `generated`, and the gotchas file as `own-file`. Every
+  other file is left to git.
+
+On a yes, ask which label lane 2 takes (`docs`, say, or the project's walk label; never `any`), and
+make sure §6 creates it. Then walk the stack for lanes. Ask these three only with lanes on:
+- **the test prefix**: how do the project's tests name their test databases, and how will they read
+  `PHASE_RUN_TEST_DB_PREFIX`? Each lane's row gets its own `testDbPrefix`: lane 1's can be the
+  project's own test names' prefix, lane 2's another (`lane2_`, say). Once one lane names a value
+  (a prefix, a port named `qa`, an `env` key), every lane must, or the loader refuses the table: a
+  lane that names nothing would run on what it inherits.
+- **the browser scripts' QA address**: how do they read `PHASE_RUN_QA_PORT` and
+  `PHASE_RUN_QA_DATABASE`? With `phaseRun.qa` set, lane 2's row gets its own `qa` database, and each
+  lane's `ports` gets its own port named `qa`.
+- **the date**: do the browser scripts depend on today's date? Brigade reserves `PHASE_RUN_FAKE_NOW`
+  for a project's own fake clock, and the runner never sets it.
+
+Write each answer into the project's own tools: a small helper, a lint rule, a clock. Never use a
+file Brigade ships for this; the guide's "Two lanes" part has worked examples, never defaults. The
+lane values go in `answers.workflow`'s `phaseRun.lanes`, starting from `proposed` (a section there is
+kept as written), and the yes is `"lanes": { "takes": "<label>" }`.
+
 Write the answers to `.git/brigade/answers.json`:
-`{ "mode", "name", "summary", "workflow", "frontend"?, "prototypeDir"?, "pathRoots"?, "liveDocs"? }`.
+`{ "mode", "name", "summary", "workflow", "frontend"?, "prototypeDir"?, "pathRoots"?, "liveDocs"?, "lanes"? }`.
 
 ## 4. Show the plan, then write
 
@@ -177,7 +211,7 @@ the `domain-modeling` skill's format.
 Ask before each; the owner may skip any.
 
 - **Labels.** `gh label list --json name --jq '.[].name'`, against
-  `node "${CLAUDE_PLUGIN_ROOT}/scripts/setup.mjs" labels`. Create only the missing ones
+  `node "${CLAUDE_PLUGIN_ROOT}/scripts/setup.mjs" labels`, plus the label lane 2 takes when lanes are on. Create only the missing ones
   (`gh label create <name> --color <color> --description "<description>"`), never edit an existing
   one. The triage labels and `docs/agents/issue-tracker.md` come from `/setup-matt-pocock-skills`:
   mention it.
@@ -206,9 +240,10 @@ Ask before each; the owner may skip any.
 
 1. `node "${CLAUDE_PLUGIN_ROOT}/scripts/setup.mjs" verify <dir>`: doc-check, the template's two test
    suites, and the config through both loaders. A failure: fix it (in the config, or a doc's line),
-   never by loosening a check. A `warn` line is the unread list's honesty scan (D19): each path a
-   test file (`phaseRun.tampering.testFiles`) names that the tests row's `unread` list leaves out.
-   Say each one; if the tests do read that path, narrow the list on the owner's yes. It never fails.
+   never by loosening a check. A `warn` line is the listed-code rule's scan (0.7.0 D11): each path a
+   test file (`phaseRun.tampering.testFiles`) names that a row's `unread` list leaves out. The rule
+   puts it back, so a change there voids that check's receipt and its suite skip. With no
+   `testFiles` it is one line: there is no listed-code rule. Say each line. It never fails.
 2. Show `git status --short` and the drafted commit message:
    `chore: adopt the workflow (<mode> mode) — devlog #1`. Overwrite mode is on `adopt-workflow`: the
    owner merges it as any branch.
@@ -233,13 +268,16 @@ On a project already set up (§1.3), when the owner picks the refresh:
      (AskUserQuestion, up to 4 per call). A hand-written row is kept by default.
    - `offer`: keys a newer release gives a row the stack suggests (a check's `name`, its own
      `receipt` and `unread` list, a gate's `unreadOf`), one item per row. Asked and written the same
-     way as `change`.
+     way as `change`. On a project with `phaseRun.hotspots`, each path `tools/doc-config.mjs` has
+     gained since (a new generated index, say) is one offer too. A row the owner wrote, for that path
+     or over it, is never changed.
    - A row is matched by its exact `run`, or, when it has a name (a stop check's `name`, a gate's
      `label`), by the suggested command with flags added after it: a named row that gained a cache
      flag is still its row, never added back plain or offered for removal. A nameless stop check is
      matched by its `run` alone, and a command the stack no longer suggests (another package
      manager) is a stranger whatever its name.
-   - `warnings`: the unread list's honesty scan, as in §7. Say each; none is an item.
+   - `warnings`: the listed-code rule's scan, as in §7, and a doc-config that will not load (no
+     hotspot row can be checked). Say each; none is an item.
 3. Run it again with `--apply` and `--accept <the ids the owner said yes to>`. It writes, regenerates
    the indexes (the Stack block in `CLAUDE.md` follows), and stages.
 4. Walk §3's checklist for the parts that changed (a new database: its QA database; a new test

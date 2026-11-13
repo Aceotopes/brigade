@@ -1,7 +1,7 @@
 ---
 job: The owner's guide to the unattended phase run: evening and morning checklists, merging, undoing a ticket.
 kind: living
-max-lines: 700
+max-lines: 760
 ---
 # The phase run — the owner's practical guide
 
@@ -196,6 +196,9 @@ The runner knows only the workflow. Everything about your project is in `.claude
 - `phaseRun.prompt`: your project's own instructions to each session (how to build, how to walk a
   screen, how to review it), a markdown file in `docs/agents/` with `## Read`, `## Build`,
   `## Browser check`, `## Review` and `## Fix` sections.
+- `phaseRun.codeReview`: the review skill each session runs on its commit, by its full id
+  (`"<plugin>:code-review"`). Unset, the prompt names a bare `code-review`, which can start Claude
+  Code's built-in review instead of yours, and setup's verify warns of it.
 
 **Worked examples, never defaults.** Setup writes no tool's rows (`propose` gives only what your
 `package.json` scripts name); it asks about your tools, and Claude writes their rows. The project
@@ -234,8 +237,65 @@ Check every flag in your own tools' docs before you copy one:
   before the gates, so no gate trusts a cache a session wrote. Each goes after the script's own
   command, and the row keeps its name (a gate's is its label), so setup's refresh still knows it.
 - **The tampering rows** are Vitest's: its skip and focus calls, and `expect(` as the assertion.
-  Their `testFiles` is also the list setup's verify scans: a test file naming a path on the tests
-  row's `unread` list is a warning, as the list probably leaves out something the tests read.
+  Their `testFiles` is also the listed-code rule's: a path a test file names is put back on any
+  `unread` list, so a change there voids that check's receipt and its suite skip. Without
+  `testFiles` there is no such rule, and setup's verify says so.
+
+**Two lanes: worked examples, never defaults.** With `phaseRun.lanes`, a second runner builds a
+ticket beside the first, each in its own worktree. Setup proposes the rows, and you say yes; it
+asks for each lane's own values. Brigade ships no lane helper: a lane is a few environment variables,
+`PHASE_RUN_TEST_DB_PREFIX`, `PHASE_RUN_QA_PORT` and `PHASE_RUN_QA_DATABASE`, which any language
+reads. Your project's own code reads them. In the sketch below, each `<…>` is yours to fill:
+
+```json
+"lanes": {
+  "rows": [
+    { "id": 1, "takes": "any", "worktree": "../<repo>-lanes/lane-1",
+      "ports": [{ "port": <your QA port>, "what": "lane 1's QA server", "name": "qa" }], "testDbPrefix": "<your test names' prefix>" },
+    { "id": 2, "takes": "<lane 2's label>", "worktree": "../<repo>-lanes/lane-2", "qa": "<lane 2's QA database>",
+      "ports": [{ "port": <a free port>, "what": "lane 2's QA server", "name": "qa" }], "testDbPrefix": "lane2_" }
+  ],
+  "worktreeSetup": { "copy": [".env"], "commands": ["<your install>"], "leaves": ["node_modules"] }
+},
+"hotspots": { "rows": [{ "path": "docs/history/devlog.md", "kind": "log" }, { "path": "docs/agents/gotchas/{phase}.md", "kind": "own-file" }] }
+```
+
+The three pieces the project Brigade was lifted from wrote for itself, sketched here for a JavaScript
+app with browser scripts (written for this guide, not copied from it):
+
+```js
+// The helper, a module of your own. Outside a lane the variables are unset, and the project's own values hold.
+export const testDatabase = (name) => `${process.env.PHASE_RUN_TEST_DB_PREFIX ?? ""}${name}`;
+export const qaTarget = (own) => ({
+  port: Number(process.env.PHASE_RUN_QA_PORT ?? own.port),
+  database: process.env.PHASE_RUN_QA_DATABASE ?? own.database,
+});
+
+// The lint rule, in eslint.config.mjs: a browser script names no address of its own, so it can't reach the other lane's server.
+{ files: ["e2e/**"], rules: { "no-restricted-syntax": ["error",
+  { selector: "Literal[value=/localhost:\\d/], TemplateElement[value.raw=/localhost:\\d/]", message: "Use qaTarget() from the lane helper." }] } }
+
+// The clock, for Playwright: one fixed "today", so a screen's dates match its sample data on any night.
+export async function fixClock(page) {
+  if (process.env.PHASE_RUN_FAKE_NOW) await page.clock.setFixedTime(new Date(process.env.PHASE_RUN_FAKE_NOW));
+}
+```
+
+- **Every lane names its own values.** Once one row sets a test prefix, a port named `qa` or an
+  `env` key, every row must, or the run refuses to start. The runner hands a lane's values to its
+  session and to every gate it runs for that lane, Landing's re-gate included.
+- **The helper** is the only place that reads the lane's variables. A test or a script asks it for
+  a name or an address, so lane 2 never touches lane 1's databases or server.
+- **The lint rule** keeps it that way. It refuses a hard-coded address in a browser script.
+- **The clock** reads `PHASE_RUN_FAKE_NOW`, which Brigade reserves and never sets. Your project sets
+  it where it starts its browser scripts, to an ISO date, if their screens show dates.
+- **Hotspots** are the files every ticket writes at one spot. Landing numbers a `log` entry and
+  rebuilds a `generated` index, and it adds an `own-file` block to the end of the file. Any other
+  file is left to git. Setup's refresh offers a row when `tools/doc-config.mjs` gains a path.
+- **The gotchas file.** A lane writes its block to `.lane/<the file>`. A lane in a phase with no
+  gotchas file yet makes the file from the template, without its block. Whichever lane lands first
+  keeps its copy. In a lane, doc-check judges the file with the block folded in, so a fault fails
+  there, not at Landing.
 
 A mistake in that section stops the run before it starts (dry runs too), and says what is wrong.
 
@@ -570,7 +630,9 @@ every measured wait), tests, checks, browser, slept, reviews, the stop hook and 
 at API rates; its peak context; and its size. The cost is read from the session's transcript and
 priced with `tools/phase-run/prices.json`: what the same tokens would cost on the pay-as-you-go
 API, a gauge of your plan's allowance, not a bill. Most of a ticket's cost is the model re-reading
-its own growing conversation, so a long ticket costs more per step. "Slept" should stay near zero;
+its own growing conversation, so a long ticket costs more per step. In a lane, a ticket's landing
+counts too: its re-gate and push join the gates, and its wait for the other lane's landing is slept.
+"Slept" should stay near zero;
 size beside cost is what you retune `phaseRun.ticketSize` from. What you do spend is your plan's
 usage allowance, and a long night can reach its limit. When that
 happens the run is meant to wait and resume by itself, up to `--wait-hours`; that has never

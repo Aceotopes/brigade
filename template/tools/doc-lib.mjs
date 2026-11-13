@@ -3,10 +3,25 @@
 // Pure where it can be, so tools/doc-tools.test.mjs can test it without a repo.
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-export const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+/** Where the doc tools and their baseline sit: the repo, or inside a phase run the run's copy of them (ADR 0005, D10). */
+export const TOOLS_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+
+/**
+ * The tree the doc tools check: their own, unless they are the run's copy (PHASE_RUN_RUNNER names
+ * the folder they sit in), whose tree is PHASE_RUN_ROOT. Only the copy is pointed elsewhere, so an
+ * inherited PHASE_RUN_ROOT never sends another folder's doc tools (a test's) to the repo.
+ */
+export function checkedRoot(toolsRoot, env = process.env) {
+  const runner = env.PHASE_RUN_RUNNER && env.PHASE_RUN_ROOT ? resolve(env.PHASE_RUN_ROOT, env.PHASE_RUN_RUNNER) : null;
+  return runner !== null && relative(runner, toolsRoot) === "" ? resolve(env.PHASE_RUN_ROOT) : toolsRoot;
+}
+
+export const ROOT = checkedRoot(TOOLS_ROOT);
+/** True when these doc tools are the run's copy, judging the repo from outside it. */
+export const IN_COPY = ROOT !== TOOLS_ROOT;
 
 /** True when the module is the script node was started with, not an import. */
 export function isMain(metaUrl) {
@@ -16,6 +31,23 @@ export function isMain(metaUrl) {
 /** The working copy mixes CRLF and LF; every comparison is on LF text. */
 export function read(rel) {
   return readFileSync(join(ROOT, rel), "utf8").replace(/\r\n/g, "\n");
+}
+
+/**
+ * Where a lane (0.7.0, ADR 0006) writes a block it may not write in place: `.lane/<the file's path>`,
+ * a file each ticket adds a block to (the phase's gotchas file). Landing folds it in (foldBlock).
+ */
+export const LANE_DIR = ".lane";
+
+/**
+ * An own file with a lane's block added, the one rule Landing writes it by and doc-check judges a
+ * lane's block by: `base` (the file's text, or null when there is none yet) with `block` appended,
+ * in `base`'s line endings; the block alone when there is no base.
+ */
+export function foldBlock(base, block) {
+  if (base == null || !base.trim()) return block;
+  const eol = base.includes("\r\n") ? "\r\n" : "\n";
+  return `${base.trimEnd()}${eol}${eol}${block.trim().replace(/\r\n/g, "\n").replace(/\n/g, eol)}${eol}`;
 }
 
 /** Writes LF text back in the line endings the file already had. */
@@ -32,6 +64,11 @@ export function git(args, input) {
 }
 
 export const KINDS = ["living", "log", "record", "generated"];
+
+/** Text matched as itself inside a RegExp. */
+export function escapeRegExp(text) {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 
 /**
  * The header a doc opens with:
@@ -135,11 +172,15 @@ export function citedDevlogNumbers() {
  * The devlog's entries in file order (newest first), each with its number and
  * whether it is still open. An entry closes when a commit cites it; an entry
  * whose heading carries its hash (the older `## #N — <hash> — title` style) is closed too.
+ * Given a lane's `token`, an entry headed `## #<token>` counts too: its number is the token, and it
+ * stays open until it lands and is numbered.
  */
-export function devlogEntries(text, cited) {
+export function devlogEntries(text, cited, { token = null } = {}) {
+  const unnumbered = token ? new RegExp(`^## #${escapeRegExp(token)}(?![\\w])`) : null;
   return sections(text)
-    .filter((section) => /^## #\d+\b/.test(section.heading))
+    .filter((section) => /^## #\d+\b/.test(section.heading) || unnumbered?.test(section.heading))
     .map((section) => {
+      if (unnumbered?.test(section.heading)) return { ...section, number: token, open: true };
       const number = String(Number(section.heading.match(/^## #(\d+)/)[1]));
       const legacyClosed = !/uncommitted|HASH-PENDING/i.test(section.heading) && /—\s*`?[0-9a-f]{7,}`?\s*—/.test(section.heading);
       return { ...section, number, open: !cited.has(number) && !legacyClosed };

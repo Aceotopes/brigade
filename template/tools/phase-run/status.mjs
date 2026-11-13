@@ -19,6 +19,7 @@ import { fileURLToPath } from "node:url";
 
 import { CONFIG_PATH, DEFAULT_LEDGER, parseLedger } from "./config.mjs";
 import { forYou, liveText, makePaint, progressText, scoreboard, shortStat } from "./display.mjs";
+import { branchResults, laneState, laneStatus, resultFiles } from "./findings.mjs";
 import { LEDGER_PATH, latestPerSession, ledgerCsv, ledgerText, readLedger } from "./ledger.mjs";
 import { loadPrices, sessionCost } from "./metrics.mjs";
 
@@ -32,20 +33,21 @@ function readJson(file, fallback = null) {
   }
 }
 
-/** The phase folder whose results.json changed last. */
+/** The phase folder whose results changed last: its own results.json, or a lane's (#38). */
 function newestRunDir(state) {
   if (!existsSync(state)) return null;
+  const changed = (dir) => Math.max(...resultFiles(dir).map((file) => statSync(file).mtimeMs));
   const dirs = readdirSync(state)
     .map((name) => join(state, name))
-    .filter((dir) => existsSync(join(dir, "results.json")));
-  dirs.sort((a, b) => statSync(join(b, "results.json")).mtimeMs - statSync(join(a, "results.json")).mtimeMs);
+    .filter((dir) => statSync(dir).isDirectory() && resultFiles(dir).length > 0);
+  dirs.sort((a, b) => changed(b) - changed(a));
   return dirs[0] ?? null;
 }
 
-/** Cost and peak for a result the runner did not measure, from its build transcript. */
+/** Cost and peak for a result the runner did not measure, from its build transcript (a lane's in its own folder). */
 function backfill(result, dir, prices) {
   if (result.session?.metrics) return result;
-  const build = readJson(join(dir, `ticket-${result.number}-build.json`));
+  const build = readJson(join(result.lane != null ? join(dir, `lane-${result.lane}`) : dir, `ticket-${result.number}-build.json`));
   if (!build?.transcript || !existsSync(build.transcript)) return result;
   const cost = sessionCost(build.transcript, prices);
   return { ...result, session: { ...result.session, metrics: { costUsd: cost.costUsd, peakContext: cost.peakContext, estimated: true } } };
@@ -55,7 +57,8 @@ function card(result, paint) {
   const metrics = result.session?.metrics ?? {};
   const m = metrics.minutes;
   const fixes = Math.max(0, (result.session?.calls ?? 1) - 1);
-  const out = [paint.bold(`#${result.number} ${result.title}`), `  result   ${result.status}${result.hash ? ` ${result.hash}` : ""}${fixes ? ` · ${fixes} fix round(s)` : ""}`];
+  const lane = result.lane != null ? ` · lane ${result.lane}, ${laneState(result)}` : "";
+  const out = [paint.bold(`#${result.number} ${result.title}`), `  result   ${result.status}${result.hash ? ` ${result.hash}` : ""}${lane}${fixes ? ` · ${fixes} fix round(s)` : ""}`];
   out.push(`  time     ${m ? `${m.total} min: Claude ${m.claude} · tests ${m.tests} · checks ${m.checks} · browser ${m.browser} · slept ${m.waiting} · reviews ${m.reviewing} · hook ${m.hook} · gates ${m.gates}` : `${result.session?.minutes ?? "?"} min`}`);
   if (metrics.costUsd != null) out.push(`  cost     $${metrics.costUsd.toFixed(2)} at API rates${metrics.estimated ? " (worked out from the transcript)" : ""}`);
   if (metrics.peakContext) out.push(`  context  peak ${Math.round(metrics.peakContext / 1000)}k tokens${metrics.tokens ? ` · ${metrics.tokens.calls} model calls` : ""}`);
@@ -113,7 +116,8 @@ function main() {
   }
   const paint = makePaint(Boolean(process.stdout.isTTY) && !process.env.NO_COLOR);
   const prices = loadPrices();
-  const results = (readJson(join(dir, "results.json"), []) ?? []).map((r) => backfill(r, dir, prices));
+  // Every lane's results, each tagged with its lane; a run without lanes reads its results.json alone, as before.
+  const results = branchResults(dir).map((r) => backfill(r, dir, prices));
   const number = args.find((arg) => /^\d+$/.test(arg) && args[args.indexOf(arg) - 1] !== "--dir");
   if (number) {
     const result = [...results].reverse().find((r) => r.number === Number(number));
@@ -123,8 +127,11 @@ function main() {
 
   console.log(paint.bold(`\n  ${dir.split(/[\\/]/).pop()} · ${results.length} result(s)\n`));
   console.log(scoreboard(results, paint).join("\n"));
+  // Each lane of this branch, live or holding an unlanded pass, and what it holds (#38).
+  const lanes = laneStatus({ dir, state: join(dir, ".."), branch: dir.split(/[\\/]/).pop() });
   const live = existsSync(join(dir, "..", "lock")) ? readJson(join(dir, "live.json")) : null;
-  if (live) {
+  if (lanes.length) console.log(`\n${paint.bold(lanes[0])}\n${lanes.slice(1).map((line) => paint.cyan(line)).join("\n")}`);
+  else if (live) {
     const now = Date.now();
     console.log(`\n${paint.bold(progressText(live, now))}`);
     if (live.current) console.log(paint.cyan(liveText(live.current, now)));

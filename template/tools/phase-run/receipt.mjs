@@ -10,7 +10,8 @@
 // name share. A receipt is keyed on the working tree's content (a git tree hash, the same before and
 // after the commit) minus that check's `unread` paths (unread.mjs), on the base the checks are
 // measured from, and on each command it vouches for, with `{base}` filled in. So a devlog written
-// after the pass keeps the tests' receipt, and a change to a file lint reads voids only lint's.
+// after the pass keeps the tests' receipt, and a change to a file lint reads voids only lint's. A
+// file a test names is never left out, whatever the list says (the listed-code rule, `listedGroups`).
 // A session could forge the file with its Write tool; that only skips the Stop hook's courtesy
 // re-run. The runner's own gates trust no receipt, and are what catch a failure: no gate may ever
 // read this file (run.test.mjs checks the runner's imports never reach it).
@@ -20,6 +21,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
 import { unreadMatcher } from "./unread.mjs";
+import { listedCode, repoFiles, testNamedPaths, withListedCode } from "./unread-scan.mjs";
 
 /** Git's hash of a tree with no files, in a SHA-1 repo and a SHA-256 one. */
 const EMPTY_TREES = ["4b825dc642cb6eb9a060e54bf8d69288fbee4904", "6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321"];
@@ -43,6 +45,25 @@ export function receiptGroups(checks) {
     groups.get(name).checks.push(check);
   }
   return [...groups.values()];
+}
+
+/**
+ * receiptGroups under the listed-code rule (0.7.0 D11): each group's list with the files a test
+ * names put back on it (unread-scan.mjs), so a change to one voids that check's receipt. The test
+ * files are `testFiles` (phaseRun.tampering's); with none there is no rule, and nothing is read. A
+ * scan that fails keys every group on its whole tree (an empty list): a receipt never holds on a
+ * list that could not be checked. `files` and `read` default to the repo at `root`.
+ */
+export function listedGroups(root, checks, testFiles, { files = null, read = (file) => readFileSync(join(root, file), "utf8") } = {}) {
+  const groups = receiptGroups(checks);
+  if (!testFiles?.length || !groups.some((group) => group.unread.length)) return groups;
+  try {
+    const all = files ?? repoFiles(root);
+    const named = testNamedPaths({ testFiles, files: all, read });
+    return groups.map((group) => ({ ...group, unread: withListedCode(group.unread, listedCode(named, group.unread, all)) }));
+  } catch {
+    return groups.map((group) => ({ ...group, unread: [] }));
+  }
 }
 
 /**

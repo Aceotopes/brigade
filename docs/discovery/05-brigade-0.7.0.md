@@ -1,5 +1,42 @@
 # Discovery: Brigade 0.7.0, two lanes
 
+> **Addendum 2026-11-13: the source's later fixes, checked before the release night.** The
+> source project fixed more two-lane bugs in its own trials after the port guide this spec came
+> from. Before #41, each of its ten two-lane fixes was checked by symptom against
+> `phase-two-lanes`:
+> - **Already handled, each pinned by a test:**
+>   - a restart lands a ticket again;
+>   - "built, not landed" is read off an older row;
+>   - a park lets go of its claim before its label;
+>   - a lane's kept branch keeps a landed ticket;
+>   - a diamond of blockers is read as a loop.
+> - **Gaps**, the first two found by tracing the code:
+>   - **A phase's new gotchas file loses its header.** With no file on the tip, Landing writes the
+>     lane's block alone, so the re-gate's header check parks the ticket. Both of #41's tickets
+>     would have parked.
+>   - **A lane's gates use the other lane's test databases.** The runner's gates and Landing's
+>     re-gate never get the lane's variables, and a row may leave its test prefix out.
+>   - Landing's minutes are missing from the ticket's time.
+>   - doc-check never reads a lane's `.lane/` block, so its faults show up first at Landing.
+>   - A lane waits on one blocker while another can never be built tonight.
+>   - The run's count includes such tickets.
+>   - A ticket the runner's own error failed is never listed as parked, so the other lane can
+>     build it again.
+> - **Outside two lanes:** the ticket prompt names a bare `code-review`, which can start Claude
+>   Code's built-in review.
+>
+> **The owner's calls (2026-11-13):**
+> - All of them are fixed now, test-first, as attended commits on `phase-two-lanes` before #41,
+>   so the night proves them. A park on the night is fixed the same way, not as a new ticket.
+> - **A lane writes a new gotchas file's head:** it makes the file from the template, without its
+>   block. Landing folds the block onto the tip's copy, or else onto the lane's.
+> - **doc-check, in a lane, judges each `.lane/` block folded onto its file.**
+> - **Every lane names every lane value another lane names:** the test prefix, a `qa` port, an
+>   `env` key. The gates and the re-gate get the lane's values, as its session does.
+>
+> **Changes:** "For the spec"'s "`testDbPrefix` is optional" now holds only when no lane sets one.
+> D13's Landing, D2's names and ADR 0006 stand.
+
 > **Addendum 2026-11-09 (the probe, #28): seven yes, and the eighth names a row, so the port
 > goes on.** Run on Claude Code 2.1.319 and Brigade 0.6.2, installed from `aceotopes` at project
 > scope in a scratch repo (`claude plugin install brigade@aceotopes --scope project`, no

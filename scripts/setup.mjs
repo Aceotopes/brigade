@@ -5,11 +5,12 @@
 //   node scripts/setup.mjs detect <dir>                          what is there: git, stack, docs, compose files, a stamp
 //   node scripts/setup.mjs propose <dir>                         the .claude/workflow.json its stack suggests
 //   node scripts/setup.mjs plan <dir> --answers <f> --out <f> [--preview <d>]
-//                                                                what setup would do, summed up; --preview writes the
+//                                                                what setup would do, summed up, with the two lanes it
+//                                                                proposes (written on answers.lanes); --preview writes the
 //                                                                proposed text of each changed or conflicting file under <d>
 //   node scripts/setup.mjs apply <dir> --plan <f>                do it, if the repo is still as planned
 //   node scripts/setup.mjs verify <dir>                          doc-check, the template's tests, both config loaders, and
-//                                                                the unread list's honesty warnings (never a failure)
+//                                                                the listed-code rule's warnings (never a failure)
 //   node scripts/setup.mjs update <dir> [--apply] [--remove] [--auto-update]
 //                                                                re-copy template/ into a set-up project; --auto-update
 //                                                                also turns on auto-update for Brigade's catalog; the
@@ -18,7 +19,7 @@
 //                                                                bring the config in line with the stack (--stack: the new
 //                                                                one); --apply writes the additions and the accepted ids;
 //                                                                --only-accepted, the accepted ids alone; its `warnings`
-//                                                                are the unread list's honesty warnings, its `compose`
+//                                                                are the listed-code rule's warnings, its `compose`
 //                                                                the root's compose files (detect's)
 //   node scripts/setup.mjs docker                                is Docker installed, and running
 //   node scripts/setup.mjs automode --settings <f> --lines <f> [--apply]   the project's autoMode lines
@@ -34,9 +35,11 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { basename, dirname, join, posix } from "node:path";
+import { basename, dirname, join, posix, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import { ANY_TICKET, parseRunConfig } from "../template/tools/phase-run/config.mjs";
+import { hotspotKind } from "../template/tools/phase-run/numbering.mjs";
 import { scanLines, unreadScan } from "../template/tools/phase-run/unread-scan.mjs";
 import { MIGRATIONS } from "./migrations.mjs";
 import { STAMP, catalog, compareVersions, pluginVersion } from "./versions.mjs";
@@ -176,21 +179,20 @@ function gitIn(dir) {
 function projectFiles(dir) {
   const git = gitIn(dir);
   if (git("rev-parse", "--git-dir") === null) return walk(dir);
-  return (git("ls-files", "--cached", "--others", "--exclude-standard") ?? "").split("\n").filter(Boolean);
+  // `-z`: a non-ASCII name comes back as it is, never C-quoted (`core.quotePath`), which no glob matches.
+  return [...new Set((git("ls-files", "-z", "--cached", "--others", "--exclude-standard") ?? "").split("\0").filter(Boolean))];
 }
 
 /**
- * The unread list's honesty warnings (D19): each path a test file names on the tests row's `unread`
- * list, or the one line saying `phaseRun.tampering.testFiles` is not set. Never a failure: a scan that
- * cannot run says so as a warning too. The scan is the plugin's copy, so a project a release behind
- * gets it before /update-workflow copies it in. The tests row is the stop check in the stack's tests
- * role (`roleMatcher`), whatever its name; without one, the scan's own `testsRow`.
+ * The listed-code rule's lines (0.6.0 D19, 0.7.0 D11): each path a test file names on any row's
+ * `unread` list, which the rule puts back on that list, or the one line saying there is no rule
+ * (`phaseRun.tampering.testFiles` is not set). Never a failure: a scan that cannot run says so as a
+ * warning too. The scan is the plugin's copy, so a project a release behind gets it before
+ * /update-workflow copies it in.
  */
-export function unreadWarnings(dir, config, det = detect(dir)) {
+export function unreadWarnings(dir, config) {
   try {
-    const { stopRole } = roleMatchers(det, config);
-    const row = (config.stopGate?.checks ?? []).find((c) => stopRole(c)?.key === "test" && Array.isArray(c.unread) && c.unread.length);
-    return scanLines(unreadScan({ config, row, files: projectFiles(dir), read: (file) => readText(join(dir, file)) }));
+    return scanLines(unreadScan({ config, files: projectFiles(dir), read: (file) => readText(join(dir, file)) }));
   } catch (error) {
     return [`the unread list could not be checked: ${error.message}`];
   }
@@ -688,6 +690,83 @@ function rulesFileAfter(mode, path) {
   return archived ? `${ARCHIVE}/${path}` : path;
 }
 
+// ------------------------------------------------------------------ lanes (0.7.0 D4, D7, D8)
+
+/** Lane 2's label until the owner names one: lane 1 takes any ticket, so lane 2 takes only what carries a label (D6). */
+export const LANE_TWO_LABEL = "lane-2";
+/** Untracked files a fresh worktree lacks and a lane may need: proposed for `worktreeSetup.copy` when they exist. */
+const WORKTREE_COPY = [".env", ".env.local", ".claude/settings.local.json"];
+/** The project's doc-config, which names the files every commit writes at one spot. */
+const DOC_CONFIG = "tools/doc-config.mjs";
+/** The gotchas file of a doc-config that predates GOTCHAS_FILE: the runner's own fallback (run.mjs `gotchasFile`). */
+const GOTCHAS_DEFAULT = "docs/agents/gotchas/{phase}.md";
+/** Yarn's Plug'n'Play files: an install that leaves no node_modules. */
+const PNP_FILES = [".pnp.cjs", ".pnp.js"];
+
+/**
+ * The doc paths a doc-config names, read by importing it in a child process: the read stays
+ * synchronous, and a refresh reads the file as it is now, never a cached module. null when it will
+ * not load (or hangs past 30 seconds).
+ */
+export function docPaths(file) {
+  const script = [
+    `const m = await import(${JSON.stringify(pathToFileURL(file).href)});`,
+    "const generated = (m.GENERATED ?? []).map((g) => ({ name: g.name ?? null, target: g.target ?? null, dir: g.dir ?? null, config: Boolean(g.config) }));",
+    `console.log(JSON.stringify({ devlog: m.DEVLOG ?? null, gotchas: m.GOTCHAS_FILE ?? ${JSON.stringify(GOTCHAS_DEFAULT)}, generated }));`,
+  ].join("\n");
+  const result = spawnSync(process.execPath, ["--input-type=module", "-e", script], { cwd: dirname(file), encoding: "utf8", timeout: 30_000 });
+  if (result.status !== 0) return null;
+  try {
+    return JSON.parse(result.stdout);
+  } catch {
+    return null; // a doc-config that prints on import: the same as one that will not load
+  }
+}
+
+/**
+ * The first hotspot rows (D7), from doc-config's paths: the devlog and the implementation logs as
+ * `log`, every generated index as `generated`, the phase's gotchas file as `own-file`; everything else
+ * is left to git. A `generated` row keeps the tip's whole file at Landing, so an index driven by the
+ * config (`CLAUDE.md`'s Stack block, which sits in a hand-written file) gets no row.
+ */
+export function hotspotRows(paths) {
+  if (!paths) return [];
+  const logs = paths.generated.find((g) => g.name === "implementation-log")?.dir;
+  const indexes = unique(paths.generated.filter((g) => g.target && !g.config).map((g) => g.target));
+  return [
+    ...(paths.devlog ? [{ path: paths.devlog, kind: "log" }] : []),
+    ...(logs ? [{ path: logs, kind: "log" }] : []),
+    ...indexes.map((path) => ({ path, kind: "generated" })),
+    ...(paths.gotchas ? [{ path: paths.gotchas, kind: "own-file" }] : []),
+  ];
+}
+
+/**
+ * What setup proposes for two lanes, written only on the owner's yes: the lane rows, each worktree
+ * beside the repo (`../<repo folder>-lanes/lane-<id>`, D4); `worktreeSetup` (D8): the untracked files
+ * that exist, the install and the Prisma client, and what the install leaves; and the hotspot rows.
+ * A lane's database, ports and test prefix are the project's own (D2): the stack walk asks for them.
+ */
+export function proposeLanes(det, paths, { takes = LANE_TWO_LABEL } = {}) {
+  // The folder's own name, even when `dir` came in relative (`plan .`).
+  const worktree = (id) => `../${basename(resolve(det.dir))}-lanes/lane-${id}`;
+  const git = gitIn(det.dir);
+  const untracked = (rel) => existsSync(join(det.dir, rel)) && !git("ls-files", "--", rel);
+  const pm = det.packageJson ? det.packageManager : null;
+  const commands = pm ? [INSTALL[pm](det), ...(det.prisma ? [`${EXEC[pm]} prisma generate`] : [])] : [];
+  const nodeModules = pm && !PNP_FILES.some((file) => existsSync(join(det.dir, file)));
+  return {
+    lanes: {
+      rows: [
+        { id: 1, takes: ANY_TICKET, worktree: worktree(1) },
+        { id: 2, takes, worktree: worktree(2) },
+      ],
+      worktreeSetup: { copy: WORKTREE_COPY.filter(untracked), commands, leaves: nodeModules ? ["node_modules"] : [] },
+    },
+    hotspots: { rows: hotspotRows(paths) },
+  };
+}
+
 // ------------------------------------------------------------------ plan
 
 /**
@@ -698,6 +777,9 @@ function rulesFileAfter(mode, path) {
  *   pathRoots, liveDocs   for doc-config.mjs (default: the code folders; in merge, the top-level docs)
  *   frontend  the project has screens (default: detect found a frontend): the design rung's prompt file
  *   prototypeDir  doc-config's PROTOTYPE_DIR (default: suggested from the framework; null for none yet)
+ *   lanes     the owner's yes to two lanes: `true`, or `{ takes }`, lane 2's label (default LANE_TWO_LABEL).
+ *             The plan always proposes them (`proposed`, `proposeLanes`); only a yes writes them, and
+ *             a `phaseRun.lanes` or `phaseRun.hotspots` the owner's `workflow` holds is kept as written
  */
 export function buildPlan(dir, det, answers, plugin = PLUGIN) {
   const mode = answers.mode;
@@ -713,6 +795,25 @@ export function buildPlan(dir, det, answers, plugin = PLUGIN) {
   let workflow = answers.workflow ?? proposeWorkflow(det, plugin);
   // A project with screens gets the design review's prompt file, unless it already names its own.
   if (frontend && !workflow.phaseRun?.prompt) workflow = { ...workflow, phaseRun: { ...workflow.phaseRun, prompt: PROMPT_FILE } };
+  // Two lanes: proposed from the doc-config the project will have (its own, kept in merge), written on a yes.
+  const lanesYes = answers.lanes === true ? {} : answers.lanes && typeof answers.lanes === "object" ? answers.lanes : null;
+  if (answers.lanes && !lanesYes) problems.push(`answers.lanes is true or { "takes": "<label>" } (it is ${JSON.stringify(answers.lanes)}).`);
+  const docConfigFile = mode === "merge" && existsSync(join(dir, DOC_CONFIG)) ? join(dir, DOC_CONFIG) : join(plugin, "template", DOC_CONFIG);
+  const paths = docPaths(docConfigFile);
+  const takes = lanesYes?.takes ?? LANE_TWO_LABEL;
+  const proposed = proposeLanes(det, paths, { takes });
+  if (lanesYes) {
+    if (typeof takes !== "string" || !takes.trim() || takes === ANY_TICKET) problems.push(`lane 2 takes a label, never ${JSON.stringify(takes)}: lane 1 already takes any ticket, and only one lane may (answers.lanes.takes).`);
+    const own = workflow.phaseRun ?? {};
+    if (!paths && !own.hotspots) problems.push(`${DOC_CONFIG} did not load, so no hotspot row can be proposed: fix it, or give answers.workflow its own phaseRun.hotspots.`);
+    workflow = { ...workflow, phaseRun: { ...own, lanes: own.lanes ?? proposed.lanes, hotspots: own.hotspots ?? proposed.hotspots } };
+    // The runner's loader, now, rather than verify after apply: two rows on phaseRun.qa's database, say, when the walk's values are missing.
+    try {
+      parseRunConfig(workflow);
+    } catch (error) {
+      problems.push(`The lanes do not load yet: ${error.message} (the stack walk's values for each lane go in answers.workflow's phaseRun.lanes).`);
+    }
+  }
   const date = answers.date ?? new Date().toISOString().slice(0, 10);
   const values = {
     NAME: answers.name ?? det.name,
@@ -830,7 +931,7 @@ export function buildPlan(dir, det, answers, plugin = PLUGIN) {
   else if (settings.byHand) actions.push({ op: "manual", path: SETTINGS, note: settings.byHand });
 
   const sameJob = mode === "merge" ? sameJobPairs(det.docs) : [];
-  return { mode, head: det.git.head, problems, answers: { ...answers, date }, actions, sameJob, oldRules, oldGlossary };
+  return { mode, head: det.git.head, problems, answers: { ...answers, date }, actions, sameJob, oldRules, oldGlossary, proposed };
 }
 
 /** The workflow's CLAUDE.md sections (its commands on) after the project's own text, and a header on top if it had none. */
@@ -1058,7 +1159,8 @@ function rowOffers(current, { stopRole, gateRole }, item, rowIn) {
  *   set     the stack itself, as the owner gave it
  *   add     something the stack suggests that is missing; --apply writes it
  *   change, remove   written only when its id is in `accept`: a hand-written row is never dropped silently
- *   offer   keys a newer release gives a row the stack suggests (ROW_OFFERS), one item per row; written
+ *   offer   keys a newer release gives a row the stack suggests (ROW_OFFERS), one item per row, and,
+ *           with `phaseRun.hotspots` set, a hotspot row for each path doc-config gained (D7); written
  *           only when its id is in `accept`
  * It covers the stack, the guard's wrappers, the stop gate's checks, the runner's gates and allow
  * rules, the design rung's prompt file, PROTOTYPE_DIR, CLAUDE.md's Stack section and checks.yml.
@@ -1153,6 +1255,24 @@ export function refresh(dir, { stack, apply = false, accept = [], onlyAccepted =
   }
   rowOffers(current, roles, item, rowIn);
 
+  // Hotspot rows (D7), once the project has them: a path doc-config now names that no row settles is
+  // one offer. A row the owner wrote, for that path or over it (a folder row), is never overridden.
+  const hotspotWarnings = [];
+  const hotspots = current.phaseRun?.hotspots;
+  // A section whose rows are not a list is the loaders' to refuse: nothing is offered into it.
+  if (hotspots && Array.isArray(hotspots.rows)) {
+    const paths = docPaths(join(dir, DOC_CONFIG));
+    if (!paths) hotspotWarnings.push(`the hotspot rows could not be checked: ${DOC_CONFIG} did not load`);
+    const rows = hotspots.rows.filter((own) => typeof own?.path === "string");
+    for (const row of hotspotRows(paths)) {
+      if (hotspotKind(row.path, { rows }) !== null) continue;
+      item(`phaseRun.hotspots.offer+${row.path}`, "offer", `phaseRun.hotspots: add ${JSON.stringify(row)}, a path ${DOC_CONFIG} names that no row covers yet (only on a yes)`, (config) => {
+        const section = config.phaseRun?.hotspots;
+        if (Array.isArray(section?.rows)) section.rows.push(row);
+      });
+    }
+  }
+
   // The design rung, once the project has screens: its prompt file and the prototype folder.
   if (det.frontend.length && !current.phaseRun?.prompt) {
     item("phaseRun.prompt", "add", `phaseRun.prompt: ${PROMPT_FILE}, the design review's prompt`, (config) => {
@@ -1195,10 +1315,10 @@ export function refresh(dir, { stack, apply = false, accept = [], onlyAccepted =
     item(ciPath, ciNow === null ? "add" : "change", `${ciPath}: ${ciNow === null ? "written" : "rewritten"} from the checks`, (config, files) => files.set(ciPath, ci));
   }
 
-  // The unread list's honesty (D19), on the project's config as it is: warnings only, never an item.
+  // The listed-code rule's scan (D19, 0.7.0 D11), on the project's config as it is: warnings only, never an item.
   // The root's compose files (D20), for the skill's testDatabase step on a project that gained one:
   // the preflight row and the database's address are the skill's to propose, never an item here.
-  const report = { stack: chosen, items: items.map(({ id, op, summary }) => ({ id, op, summary })), warnings: unreadWarnings(dir, current, det), compose: det.compose, applied: [], written: [] };
+  const report = { stack: chosen, items: items.map(({ id, op, summary }) => ({ id, op, summary })), warnings: [...unreadWarnings(dir, current), ...hotspotWarnings], compose: det.compose, applied: [], written: [] };
   if (!apply) return report;
   const { config, files } = build();
   if (JSON.stringify(config) !== JSON.stringify(current)) files.set(".claude/workflow.json", `${JSON.stringify(config, null, 2)}\n`);
@@ -1382,6 +1502,17 @@ function summarize(p) {
   if (p.sameJob.length) out.push("", "Docs of yours that look like they do a job the workflow keeps elsewhere (nothing moved):", ...p.sameJob.map((s) => `  ${s.theirs}  ~  ${s.ours}`));
   if (p.oldRules.length) out.push("", "The project's old rules, to carry into CLAUDE.md after apply (read from):", ...p.oldRules.map((f) => `  ${f}`));
   if (p.oldGlossary?.length) out.push("", "The project's old glossary, its terms to carry into GLOSSARY.md after apply (read from):", ...p.oldGlossary.map((f) => `  ${f}`));
+  if (p.proposed) {
+    const { lanes, hotspots } = p.proposed;
+    const list = (items) => (items.length ? items.join(", ") : "none");
+    out.push(
+      "",
+      p.answers?.lanes ? "Two lanes, on your yes (into .claude/workflow.json, unless your config has its own):" : "Two lanes, proposed (written only on a yes, answers.lanes):",
+      ...lanes.rows.map((row) => `  lane ${row.id}: takes ${row.takes}, worktree ${row.worktree}`),
+      `  worktreeSetup: copy ${list(lanes.worktreeSetup.copy)}; commands ${list(lanes.worktreeSetup.commands)}; leaves ${list(lanes.worktreeSetup.leaves)}`,
+      ...hotspots.rows.map((row) => `  hotspot: ${row.path} (${row.kind})`),
+    );
+  }
   return out.join("\n");
 }
 
@@ -1402,7 +1533,7 @@ export async function verify(dir) {
   const { loadRunConfig } = await import(pathToFileURL(join(dir, "tools", "phase-run", "config.mjs")).href);
   const runner = loadRunConfig(dir);
   results.push({ label: "the phase runner's config", ok: !runner.error, output: runner.error ?? "" });
-  // The unread list's honesty (D19): a warning, never a failure.
+  // The listed-code rule's lines (D19, 0.7.0 D11): a warning, never a failure.
   let config = null;
   try {
     config = JSON.parse(readText(join(dir, ".claude", "workflow.json")));
@@ -1410,7 +1541,15 @@ export async function verify(dir) {
     // The loaders above already failed on a config that isn't JSON: the scan has nothing to add.
   }
   const warnings = config ? unreadWarnings(dir, config) : [];
-  results.push({ label: "the tests' unread list", ok: true, warn: warnings.length > 0, output: warnings.join("\n") });
+  results.push({ label: "the unread lists (the listed-code rule)", ok: true, warn: warnings.length > 0, output: warnings.join("\n") });
+  // A bare `code-review` can start Claude Code's built-in review, not the project's: a warning, never a failure.
+  const review = config?.phaseRun?.codeReview;
+  results.push({
+    label: "the code review's skill",
+    ok: true,
+    warn: !review,
+    output: review ? "" : "phaseRun.codeReview is not set, so a session's prompt calls a bare `code-review`, which can start Claude Code's built-in review instead of yours. Name the skill with its plugin's (\"<plugin>:code-review\").",
+  });
   return results;
 }
 

@@ -14,6 +14,14 @@
 //
 // A change that raises a doc's budget is printed; inside a phase run it is refused.
 //
+// Inside a phase run the gates run the run's copy of this file, its imports and its baseline
+// (`.phase-run/<branch>/runner/tools/`, ADR 0005, D10), pointed at the repo by PHASE_RUN_ROOT
+// (doc-lib.mjs `checkedRoot`): the docs are the repo's, the rules the copy's.
+//
+// Inside a lane (PHASE_RUN_LANE set), the token doc-config names (NUMBER_TOKEN, `NNN`) stands
+// where a number goes: a devlog heading `## #NNN · …`, a log `NNN-<slug>.md`, a message's
+// `devlog #NNN`. Landing numbers them (ADR 0006). Outside a lane each is refused, by name.
+//
 // A hit is not always drift: a doc may quote a stale phrase to teach it, or
 // name a deleted file to say it is gone. Such lines are recorded in
 // tools/doc-check-baseline.json, so only a NEW hit fails. A line that is
@@ -47,9 +55,13 @@ import {
 import * as docConfig from "./doc-config.mjs";
 import { staleIndexes } from "./doc-index.mjs";
 import { parseRoadmap } from "./roadmap-format.mjs";
-import { ROOT, budgetProblems, citedDevlogNumbers, devlogEntries, git, isMain, parseFrontmatter, read } from "./doc-lib.mjs";
+import { IN_COPY, LANE_DIR, ROOT, TOOLS_ROOT, budgetProblems, citedDevlogNumbers, devlogEntries, escapeRegExp, foldBlock, git, isMain, parseFrontmatter, read as readFile } from "./doc-lib.mjs";
 
-const BASELINE_PATH = join(ROOT, "tools", "doc-check-baseline.json");
+// Beside this file: the repo's, or inside a run the copy's, which the run took at its start (D10).
+const BASELINE_PATH = join(TOOLS_ROOT, "tools", "doc-check-baseline.json");
+// Inside a phase run: a session's (PHASE_RUN), or the run's copy, which the runner's own gate runs
+// without PHASE_RUN. What a run refuses (a baseline write, a budget raise) keys on this.
+const IN_RUN = process.env.PHASE_RUN === "1" || IN_COPY;
 /** Optional, since 0.3.0: a config written before then has no DISCOVERY_DIR and gets the default. */
 const DISCOVERY_DIR = docConfig.DISCOVERY_DIR ?? "docs/discovery";
 /** Optional, since 0.3.0: where the prototypes live, or null for a project with none yet. */
@@ -57,6 +69,57 @@ const PROTOTYPE_DIR = docConfig.PROTOTYPE_DIR ?? null;
 const PROTOTYPE_GUARD = "brigade:prototype-guard";
 /** Optional, since 0.3.0: the roadmap, whose tables /roadmap reads (tools/roadmap-format.mjs). */
 const ROADMAP = docConfig.ROADMAP ?? "docs/status/roadmap.md";
+// A lane (0.7.0, ADR 0006) writes this token where a number goes, and Landing fills it in. It is
+// accepted only while PHASE_RUN_LANE is set; outside a lane it is refused, by name.
+const TOKEN = docConfig.NUMBER_TOKEN ?? "NNN";
+const IN_LANE = Boolean(process.env.PHASE_RUN_LANE);
+const LOG_DIR = (docConfig.GENERATED ?? []).find((index) => index.name === "implementation-log")?.dir ?? null;
+/** A log file a lane named with the token, `<LOG_DIR>/NNN-<slug>.md`. */
+const isUnnumberedLog = (file) => LOG_DIR !== null && file.startsWith(`${LOG_DIR}/${TOKEN}-`) && file.endsWith(".md");
+
+/**
+ * A lane's blocks: each `.lane/<file>.md` it wrote, as `<file>` with the block folded in, the way
+ * Landing writes it (doc-lib.mjs foldBlock). Read only in a lane, so a block's stale phrase, missing
+ * path or missing header fails in the lane's own rounds, not at Landing's re-gate. Elsewhere none.
+ */
+function laneBlocks() {
+  const blocks = new Map();
+  const visit = (rel) => {
+    const abs = join(ROOT, rel);
+    if (!existsSync(abs)) return;
+    if (statSync(abs).isDirectory()) {
+      for (const name of readdirSync(abs)) visit(`${rel}/${name}`);
+      return;
+    }
+    if (!rel.endsWith(".md")) return;
+    const target = rel.slice(LANE_DIR.length + 1);
+    blocks.set(target, foldBlock(existsSync(join(ROOT, target)) ? readFile(target) : null, readFile(rel)));
+  };
+  if (IN_LANE) visit(LANE_DIR);
+  return blocks;
+}
+const LANE_BLOCKS = laneBlocks();
+
+/** A doc's text as doc-check judges it: in a lane, a file with a block waiting in `.lane/` has it folded in. */
+function read(rel) {
+  return LANE_BLOCKS.get(rel) ?? readFile(rel);
+}
+
+/** Whether a repo path is there to judge: on disk, or a lane block's file that its landing will make. */
+function exists(rel) {
+  return LANE_BLOCKS.has(rel) || existsSync(join(ROOT, rel));
+}
+
+/** Where a problem with a lane block's file comes from: the file as it will land, with the block from `.lane/`. */
+function laneNote(failure) {
+  const target = [...LANE_BLOCKS.keys()].find((path) => failure.startsWith(`${path}:`));
+  return target ? ` (judged with the lane's block, ${LANE_DIR}/${target}, folded in as Landing will add it)` : "";
+}
+
+/** The lane blocks' files under a doc-config entry (a file or a folder), for the lists walk() builds from disk. */
+function laneTargetsUnder(entry, out) {
+  for (const target of LANE_BLOCKS.keys()) if (target === entry || target.startsWith(`${entry}/`)) out.push(target);
+}
 
 const STALE_PHRASES = [
   "not yet committed",
@@ -73,7 +136,7 @@ const STALE_PHRASES = [
 // phrase list cannot catch anyway (doc-sync SKILL.md, §2).
 
 /** A repo path a doc cites: one of the project's top-level folders, then a file of a known type. No folders, no check. */
-const escape = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const escape = escapeRegExp;
 const PATH_PATTERN =
   PATH_ROOTS.length && PATH_EXTENSIONS.length
     ? new RegExp(
@@ -100,14 +163,20 @@ function walk(rel, out) {
 
 function liveFiles() {
   const out = [];
-  for (const entry of LIVE_DOCS) walk(entry, out);
+  for (const entry of LIVE_DOCS) {
+    walk(entry, out);
+    laneTargetsUnder(entry, out);
+  }
   return [...new Set(out)].sort();
 }
 
 /** HEADER_REQUIRED entries are files or folders; a folder covers every .md under it. */
 function requiredHeaderFiles() {
   const out = [];
-  for (const entry of HEADER_REQUIRED) walk(entry, out);
+  for (const entry of HEADER_REQUIRED) {
+    walk(entry, out);
+    laneTargetsUnder(entry, out);
+  }
   return out.filter((file) => file.endsWith(".md"));
 }
 
@@ -137,7 +206,7 @@ function scan() {
         const path = match[0];
         // A pattern, not a path: `docs/guides/module-N.md`, `NNN-*.md`, `001-...md`.
         if (/(^|[/_-])N([-_.]|$)|NNN|\.\.\./.test(path)) continue;
-        if (existsSync(join(ROOT, path))) {
+        if (exists(path)) {
           present.push({ file, line: index + 1, text: path, repoPath: path });
           continue;
         }
@@ -149,7 +218,7 @@ function scan() {
         const target = match[1];
         if (/^([a-z][a-z0-9+.-]*:|\/|<)/i.test(target)) continue;
         const repoPath = posix.normalize(posix.join(posix.dirname(file), decodeURI(target)));
-        if (existsSync(join(ROOT, repoPath))) {
+        if (exists(repoPath)) {
           present.push({ file, line: index + 1, text: `](${target})`, repoPath });
           continue;
         }
@@ -231,8 +300,10 @@ function machineOnly(present) {
 function headeredFiles() {
   const required = new Set(requiredHeaderFiles());
   const files = [...new Set([...liveFiles(), ...required, DEVLOG])]
-    .filter((f) => f.endsWith(".md") && existsSync(join(ROOT, f)))
+    .filter((f) => f.endsWith(".md") && exists(f))
     .filter((f) => !HEADER_EXEMPT.some((pattern) => pattern.test(f)))
+    // A lane's log is exempt as its numbered name will be; outside a lane, unnumberedProblems names it.
+    .filter((f) => !isUnnumberedLog(f))
     .sort();
   return { files, required };
 }
@@ -410,23 +481,49 @@ function supersededCitations() {
   return notes;
 }
 
+/** Outside a lane, the tree's unnumbered entries: a devlog heading or a log file name with the token. */
+function unnumberedProblems() {
+  if (IN_LANE) return [];
+  const outside = "outside a lane (PHASE_RUN_LANE unset), give it its number.";
+  const problems = [];
+  if (existsSync(join(ROOT, DEVLOG))) {
+    const heading = new RegExp(`^## #${escape(TOKEN)}(?![\\w])`);
+    read(DEVLOG)
+      .split("\n")
+      .forEach((line, index) => {
+        if (heading.test(line)) problems.push(`${DEVLOG}:${index + 1} "${line.slice(0, 80)}" is a lane's unnumbered entry (${TOKEN}): ${outside}`);
+      });
+  }
+  if (LOG_DIR && existsSync(join(ROOT, LOG_DIR))) {
+    for (const name of readdirSync(join(ROOT, LOG_DIR)).sort()) {
+      const file = `${LOG_DIR}/${name}`;
+      if (isUnnumberedLog(file)) problems.push(`${file} is named with a lane's token (${TOKEN}): ${outside}`);
+    }
+  }
+  return problems;
+}
+
 /** The devlog's top entry, read against a commit message. */
 function checkDevlogAgainst(message, { requireOpen }) {
   const problems = [];
   if (/^Merge (branch|pull request|remote-tracking)/.test(message.trimStart())) return problems;
   if (!existsSync(join(ROOT, DEVLOG))) return [`${DEVLOG} does not exist.`];
-  const [top] = devlogEntries(read(DEVLOG), citedDevlogNumbers());
+  const [top] = devlogEntries(read(DEVLOG), citedDevlogNumbers(), IN_LANE ? { token: TOKEN } : {});
   if (!top) return [`${DEVLOG} has no \`## #NNN\` entry.`];
-  if (Number(top.number) >= DEVLOG_TAGGED_FROM) {
-    const tagged = top.heading.match(/^## #\d+ · (\S+) · \S/);
+  const number = `(?:\\d+${IN_LANE ? `|${escape(TOKEN)}` : ""})`;
+  if (top.number === TOKEN || Number(top.number) >= DEVLOG_TAGGED_FROM) {
+    const tagged = top.heading.match(new RegExp(`^## #${number} · (\\S+) · \\S`));
     if (!tagged) {
       problems.push(`${DEVLOG}'s top entry heading must read "## #${top.number} · <type> · <title>": ${top.heading.slice(0, 120)}`);
     } else if (!DEVLOG_TYPES.includes(tagged[1])) {
       problems.push(`${DEVLOG}'s top entry has the type "${tagged[1]}"; use one of ${DEVLOG_TYPES.join(", ")}.`);
     }
   }
-  const cited = [...message.matchAll(/devlog #(\d+)\b/gi)].map((m) => String(Number(m[1])));
-  if (cited.length === 0) {
+  const cited = [...message.matchAll(new RegExp(`devlog #(${number})(?![\\w])`, "gi"))].map((m) => (/^\d+$/.test(m[1]) ? String(Number(m[1])) : TOKEN)); // `devlog #nnn` too, as the match ignores case
+  const tokenCited = !IN_LANE && new RegExp(`devlog #${escape(TOKEN)}(?![\\w])`, "i").test(message);
+  if (tokenCited) {
+    problems.push(`The commit message cites devlog #${TOKEN}, a lane's token: outside a lane (PHASE_RUN_LANE unset), cite the entry's number.`);
+  } else if (cited.length === 0) {
     problems.push(`The commit message names no devlog entry (expected "devlog #${top.number}").`);
   } else if (!cited.includes(top.number)) {
     problems.push(`The commit message cites devlog #${cited.join(", #")}, but the devlog's top entry is #${top.number}.`);
@@ -454,8 +551,11 @@ function main() {
 
   const adopt = flag("--adopt");
   if (adopt || flag("--update-baseline")) {
-    if (process.env.PHASE_RUN === "1") {
-      console.error("doc-check: the baseline is never updated inside a phase run. Fix the line instead.");
+    if (IN_RUN) {
+      console.error(
+        "doc-check: the baseline is never updated inside a phase run: the night's docs are judged by the baseline the run's copy took at run start " +
+          "(ADR 0005), so a night cannot change the rules its own docs are checked by. Fix the line instead.",
+      );
       process.exit(1);
     }
     const next = { note: loadBaselineNote(), stale: {}, missing: {} };
@@ -492,6 +592,7 @@ function main() {
 
   failures.push(...found.machineOnly);
   failures.push(...headerProblems(new Set(baseline.headers)));
+  failures.push(...unnumberedProblems());
   failures.push(...staleIndexes());
   failures.push(...discoveryRewrites(flag("--head") ? "HEAD~1" : "HEAD"));
   failures.push(...prototypeGuardProblems());
@@ -499,7 +600,7 @@ function main() {
   if (existsSync(join(ROOT, ROADMAP))) failures.push(...parseRoadmap(read(ROADMAP)).problems.map((problem) => `${ROADMAP}:${problem}`));
 
   const raises = budgetRaises(flag("--head") ? "HEAD~1" : "HEAD");
-  if (process.env.PHASE_RUN === "1") {
+  if (IN_RUN) {
     for (const raise of raises) failures.push(`${raise} A phase run never raises a budget: trim the doc instead.`);
   } else {
     for (const raise of raises) console.log(`  note: ${raise} Raising a budget is the owner's call.`);
@@ -530,7 +631,7 @@ function main() {
     return;
   }
   console.error(`doc-check: ${failures.length} problem(s).\n`);
-  for (const failure of failures) console.error(`  - ${failure}`);
+  for (const failure of failures) console.error(`  - ${failure}${laneNote(failure)}`);
   console.error(
     "\nFix each line. If a stale phrase or a missing path is correct as written (it quotes the phrase, or says the " +
       "file is gone), an attended session records it with: node tools/doc-check.mjs --update-baseline",

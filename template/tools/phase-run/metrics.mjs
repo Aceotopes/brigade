@@ -332,6 +332,21 @@ export function hookTime(logFile, ticket, from, to = Infinity) {
 const minutes = (ms) => Math.round(ms / 60_000);
 
 /**
+ * A lane ticket's metrics with its landing added (0.7.0, ADR 0008): the wait for the landing lock
+ * as slept (`waiting`), the landing itself (the replay, the rebuild, the re-gate, the push) as
+ * `gates`, and both in `total`. `claude`, the rest of the session's own time, is unchanged. A new
+ * object; null metrics stay null.
+ */
+export function withLanding(metrics, { waitedMs = 0, landingMs = 0 }) {
+  if (!metrics?.minutes) return metrics ?? null;
+  const m = metrics.minutes;
+  return {
+    ...metrics,
+    minutes: { ...m, total: m.total + minutes(waitedMs + landingMs), waiting: m.waiting + minutes(waitedMs), gates: m.gates + minutes(landingMs) },
+  };
+}
+
+/**
  * One ticket's numbers, as the report, the terminal table and status.mjs show them.
  * Minutes: total = start to the end; the named buckets are measured; claude is the rest.
  */

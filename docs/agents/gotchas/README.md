@@ -26,4 +26,18 @@ plain. The index below is generated.
 - `#25` one run, one Brigade version, `template/tools/phase-run/brigade.mjs` `brigadeCatalog` / `withAutoUpdateOff` / `installedBrigade` / `versionStop`, `run.mjs` `sessionSettings` / `main`, `snapshot.mjs` `takeSnapshot`
 - `#23` the compose scan, `scripts/setup.mjs` `parseCompose` / `composeLines` / `COMPOSE_FILES`, `detect` `compose`, `refresh`'s `compose`
 - `#24` the finish: the guard's own part, `hooks/workflow-config.mjs` `parseGuard` / `loadJudgeGuard`, `version-check.mjs` `configLine`, `run.mjs` `runnerFile`, `tampering.mjs` `givesReason`
+
+**[Gotchas — Phase two-lanes: Brigade 0.7.0, two lanes](two-lanes.md)**
+- `#29` the lane table, `template/tools/phase-run/config.mjs` `parseLanes` / `parseLane` / `parsePorts` / `parseHotspots`
+- `#30` hotspots and unnumbered entries, `template/tools/phase-run/numbering.mjs` `numberLane` / `scratchFor`, `template/tools/doc-check.mjs` `unnumberedProblems`, `run.mjs` `laneNumbers` / `runVariables`
+- `#31` the snapshot carries doc-check, `template/tools/phase-run/snapshot.mjs` `docTools` / `runnerCode`, `template/tools/doc-lib.mjs` `TOOLS_ROOT` / `checkedRoot`, `run.mjs` `docCheck`, `hooks/guard-shell.mjs`
+- `#32` the lane declaration, `template/tools/phase-run/ticket-size.mjs` `laneProblems`, `skills/ticket-check/SKILL.md`, the ticket template
+- `#33` the worktree, `template/tools/phase-run/lane.mjs`, `run.mjs` `work` / `sessionState` / `runVariables` / `main`, `config.mjs` `laneQaUrl`
+- `#34` the claim and the frontier, `template/tools/phase-run/claim.mjs` `withClaimLock` / `takeClaim` / `laneChoice` / `claimNext` / `builtOn`, `run.mjs` `nextTicket` / `builtRef`
+- `#35` the fingerprint, `template/tools/phase-run/fingerprint.mjs` `takeFingerprint` / `compareFingerprint`, `run.mjs` `browserCheckVerdict` / `runGates` / `finishBuilt`
+- `#36` Landing, `template/tools/phase-run/landing.mjs` `landingPlan` / `land` / `lastNumbers` / `commandStep`, `numbering.mjs` `hotspotKind`
+- `#37` the landing lock, `template/tools/phase-run/landing-lock.mjs` `underLandingLock` / `handBack` / `keepUnlanded` / `unlandedCommits`, `claim.mjs` `lockTaker` / `releaseClaim`, `lane.mjs` `resetWorktree`, `run.mjs` `landPass` / `landUnlanded`
+- `#38` findings and the lane reading, `template/tools/phase-run/findings.mjs` `recordFindings` / `branchResults` / `laneState` / `laneStatus`, `run.mjs` `recordFound` / `nightOf` / `report` / `ensurePullRequest`, `status.mjs`
+- `#39` the listed-code rule, `template/tools/phase-run/unread-scan.mjs` `testNamedPaths` / `listedCode` / `withListedCode` / `listRows`, `receipt.mjs` `listedGroups`, `run.mjs` `gatePlan` / `testNamedIn`, `hooks/workflow-config.mjs` `testFiles`, `hooks/stop-gate.mjs` `perCheckReceipts`
+- `#40` setup's lane checklist, `scripts/setup.mjs` `proposeLanes` / `docPaths` / `hotspotRows` / `buildPlan` `proposed` / `refresh`'s hotspot offers, `skills/setup-workflow/SKILL.md`, `template/docs/guides/phase-run.md`
 <!-- generated:end gotchas -->

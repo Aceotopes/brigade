@@ -64,7 +64,11 @@ const TYPECHECK = "node -e \"require('fs').writeFileSync('.phase-run/typecheck-r
  * one exactly as 0.5.2's hook did, so every case below runs under both.
  */
 const RECEIPT_CODES = {
-  "0.6.0": { "tools/phase-run/receipt.mjs": RECEIPT_SOURCE, "tools/phase-run/unread.mjs": join(PLUGIN, "template/tools/phase-run/unread.mjs") },
+  "0.6.0": {
+    "tools/phase-run/receipt.mjs": RECEIPT_SOURCE,
+    "tools/phase-run/unread.mjs": join(PLUGIN, "template/tools/phase-run/unread.mjs"),
+    "tools/phase-run/unread-scan.mjs": join(PLUGIN, "template/tools/phase-run/unread-scan.mjs"),
+  },
   "0.5.2": { "tools/phase-run/receipt.mjs": join(PLUGIN, "tests/fixtures/receipt-0.5.2.mjs") },
 };
 
@@ -163,7 +167,7 @@ test("a project without the receipt code has every check run", async () => {
 
 // 0.6.0 (#17, ADR 0004): each receipt check keeps its own receipt, keyed on the tree minus its own
 // list, so a file one check never reads voids only the others' receipts.
-const STOP_TESTS_FILES = ["stop-tests.mjs", "receipt.mjs", "unread.mjs", "config.mjs", "metrics.mjs", "ticket-size.mjs", "prices.json"];
+const STOP_TESTS_FILES = ["stop-tests.mjs", "receipt.mjs", "unread.mjs", "unread-scan.mjs", "config.mjs", "metrics.mjs", "ticket-size.mjs", "prices.json"];
 const ran = (name) => `node -e "require('fs').writeFileSync('.phase-run/${name}-ran', '')"`;
 
 /** Typecheck and lint (named, `**\/*.md` unread) and the tests (nameless, docs unread), all passing. */
@@ -229,6 +233,96 @@ test("0.6.0: the hook writes no receipt, and stops at the first failing uncovere
   assert.deepEqual(["typecheck", "lint", "test"].map((name) => existsSync(join(dir, ".phase-run", `${name}-receipt-7.json`))), [false, false, false]);
 });
 
+// 0.7.0 (#39, D11): the listed-code rule. A file a test names (a quoted path, a relative import
+// included), on a check's unread list, is put back into that check's key: a change there voids its
+// receipt. The test files are the ones phaseRun.tampering.testFiles matches, and only those.
+/**
+ * Lint (docs and scripts unread) and the tests (docs and root .md unread), both named and passing.
+ * The one test file names docs/fixture.json and imports ../scripts/tool.mjs; docs/guide.md no test names.
+ */
+async function listedProject({ testFiles = ["tests/**/*.test.mjs"] } = {}) {
+  const rows = [
+    { name: "lint", label: "Lint", run: ran("lint"), receipt: true, unread: ["docs/**", "scripts/**"] },
+    { name: "tests", label: "Tests", run: ran("tests"), receipt: true, unread: ["docs/**", "*.md"] },
+  ];
+  const { dir, git } = repo("brigade-project-", {
+    ".gitignore": ".phase-run/\n",
+    ".claude/workflow.json": JSON.stringify({ version: 1, stopGate: { checks: rows }, ...(testFiles ? { phaseRun: { tampering: { testFiles } } } : {}) }),
+    "tests/a.test.mjs": 'import { tool } from "../scripts/tool.mjs";\nconst fixture = readFileSync("docs/fixture.json", "utf8");\n',
+    "docs/fixture.json": "{}\n",
+    "docs/guide.md": "# Guide\n",
+    "scripts/tool.mjs": "export const tool = 1;\n",
+    "src/a.js": "1\n",
+    ...Object.fromEntries(STOP_TESTS_FILES.map((name) => [`tools/phase-run/${name}`, readFileSync(join(PLUGIN, "template/tools/phase-run", name), "utf8")])),
+  });
+  const base = git("rev-parse", "HEAD");
+  write(dir, { "src/a.js": "the ticket's work\n", ".phase-run/.keep": "" });
+  const fullPass = () => {
+    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^PHASE_RUN/.test(key)));
+    const result = spawnSync(process.execPath, [join(dir, "tools/phase-run/stop-tests.mjs"), base], { cwd: dir, encoding: "utf8", env: { ...env, PHASE_RUN_TICKET: "7" } });
+    assert.equal(result.status, 0, result.stdout);
+    return result.stdout;
+  };
+  const check = () => {
+    for (const name of ["lint", "tests"]) rmSync(join(dir, ".phase-run", `${name}-ran`), { force: true });
+    const result = stop(dir, { PHASE_RUN: "1", PHASE_RUN_TICKET: "7", PHASE_RUN_BASE: base });
+    return { status: result.status, ran: ["lint", "tests"].filter((name) => existsSync(join(dir, ".phase-run", `${name}-ran`))) };
+  };
+  return { dir, fullPass, check };
+}
+
+test("the listed-code rule: a change to a file a test names, on the tests row's list, voids its receipt", async () => {
+  const { dir, fullPass, check } = await listedProject();
+  fullPass();
+  write(dir, { "docs/fixture.json": '{ "edited": true }\n' });
+  assert.deepEqual(check(), { status: 0, ran: ["lint", "tests"] }, "on both rows' lists, and both run again");
+  // The session's own second run agrees with the hook: nothing is skipped on the changed code.
+  assert.doesNotMatch(fullPass(), /already passed/);
+});
+
+test("the listed-code rule: a change to an unread file no test names keeps every receipt, as before", async () => {
+  const { dir, fullPass, check } = await listedProject();
+  fullPass();
+  write(dir, { "docs/guide.md": "# Guide, edited\n" });
+  assert.deepEqual(check(), { status: 0, ran: [] });
+  const receipt = JSON.parse(readFileSync(join(dir, ".phase-run", "tests-receipt-7.json"), "utf8"));
+  assert.deepEqual(receipt.unread, ["docs/**", "*.md", "!docs/fixture.json"], "the list it was keyed on: the owner's, and the named file put back");
+});
+
+test("the listed-code rule holds on every row with a list: an imported file on lint's list reruns lint", async () => {
+  const { dir, fullPass, check } = await listedProject();
+  fullPass();
+  write(dir, { "scripts/tool.mjs": "export const tool = 2;\n" });
+  // The tests never left scripts/ out; lint did, and a test imports the file.
+  assert.deepEqual(check(), { status: 0, ran: ["lint", "tests"] });
+});
+
+test("the listed-code rule: with no phaseRun.tampering.testFiles there is no rule, and the receipts hold as before", async () => {
+  const { dir, fullPass, check } = await listedProject({ testFiles: null });
+  fullPass();
+  write(dir, { "docs/fixture.json": '{ "edited": true }\n' });
+  assert.deepEqual(check(), { status: 0, ran: [] });
+  const receipt = JSON.parse(readFileSync(join(dir, ".phase-run", "tests-receipt-7.json"), "utf8"));
+  assert.deepEqual(receipt.unread, ["docs/**", "*.md"]);
+});
+
+test("the listed-code rule fails closed: a scan that cannot read the test files keys each check on its whole tree", async () => {
+  const receipts = await import(pathToFileURL(RECEIPT_SOURCE).href);
+  const checks = [{ name: "tests", label: "Tests", run: "t", receipt: true, unread: ["docs/**"] }];
+  const broken = () => {
+    throw Object.assign(new Error("EACCES"), { code: "EACCES" });
+  };
+  const groups = receipts.listedGroups(".", checks, ["tests/**/*.test.mjs"], { files: ["tests/a.test.mjs", "docs/a.json"], read: broken });
+  assert.deepEqual(groups.map((g) => g.unread), [[]], "nothing left out: the receipt never holds on a list it could not check");
+  // A test file that is gone (deleted, still in the index) reads nothing, and is no failure.
+  const gone = () => {
+    throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+  };
+  assert.deepEqual(receipts.listedGroups(".", checks, ["tests/**/*.test.mjs"], { files: ["tests/a.test.mjs"], read: gone }).map((g) => g.unread), [["docs/**"]]);
+  // No test files, no scan: nothing is read.
+  assert.deepEqual(receipts.listedGroups(".", checks, [], { files: ["tests/a.test.mjs"], read: broken }).map((g) => g.unread), [["docs/**"]]);
+});
+
 // ------------------------------------------------------ the frozen runner copy (#16)
 
 const PASSING = { version: 1, stopGate: { checks: [{ label: "Fine", run: "node -e 0" }] } };
@@ -272,6 +366,28 @@ test("with PHASE_RUN_RUNNER set the stop gate imports the copy's receipt code, n
   assert.equal(check().status, 2, "live receipt code: no receipt, the failing tests run");
   assert.equal(check({ PHASE_RUN_RUNNER: runner }).status, 0, "the copy's code held the receipt");
   assert.equal(lastLog().testsSkipped, true);
+});
+
+// #33 (ADR 0007): a lane's stop check judges its own worktree with the primary's shared copy: the
+// receipt it reads, the tree it keys and its log are the worktree's.
+test("in a lane's worktree the stop gate reads the worktree's receipt, with the primary's runner copy", async () => {
+  const workflow = JSON.stringify({ version: 1, stopGate: { checks: [{ label: "Tests", run: FAILING_TESTS, receipt: true }] } });
+  const { dir, git } = repo("brigade-project-", { ".gitignore": ".phase-run/\n", ".claude/workflow.json": workflow });
+  write(dir, { [`${COPY}/.claude/workflow.json`]: workflow, ...Object.fromEntries(Object.entries(RECEIPT_CODES["0.6.0"]).map(([rel, source]) => [`${COPY}/${rel}`, readFileSync(source, "utf8")])) });
+  const worktree = `${dir}-lanes-2`;
+  git("worktree", "add", "-q", "-b", "phase-x-lane-2", worktree);
+  const base = git("rev-parse", "HEAD");
+  write(worktree, { "changed.txt": "the lane's work\n", ".phase-run/.keep": "" });
+  const receipts = await import(pathToFileURL(RECEIPT_SOURCE).href);
+  const vouch = (root) => receipts.writeReceipt(receipts.receiptPath(root, "7"), { base, tree: receipts.treeKey(worktree, []), commands: [FAILING_TESTS], passed: true, passedAt: "now" });
+  const check = () => stop(worktree, { PHASE_RUN: "1", PHASE_RUN_TICKET: "7", PHASE_RUN_BASE: base, PHASE_RUN_RUNNER: join(dir, COPY), PHASE_RUN_ROOT: worktree });
+  vouch(dir);
+  assert.equal(check().status, 2, "a receipt in the primary checkout vouches for nothing in the worktree");
+  vouch(worktree);
+  assert.equal(check().status, 0, "the worktree's own receipt held");
+  const log = JSON.parse(readFileSync(join(worktree, ".phase-run", "stop-check-log.jsonl"), "utf8").trim().split("\n").at(-1));
+  assert.deepEqual([log.testsSkipped, log.receipt], [true, "held"]);
+  assert.equal(existsSync(join(dir, ".phase-run", "stop-check-log.jsonl")), false, "nothing of the session's is written in the primary");
 });
 
 test("a PHASE_RUN_RUNNER that names no folder, or a copy that lost its config, fails the stop gate", () => {

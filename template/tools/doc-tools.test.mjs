@@ -504,3 +504,160 @@ test("doc-check refuses a roadmap table out of format, and leaves an unconverted
   writeFileSync(path, "---\njob: Where things stand.\nkind: living\nmax-lines: 60\n---\n# Roadmap\n\n| Phase | Stands |\n|---|---|\n| 2 | almost |\n");
   assert.equal(node("doc-check.mjs").status, 0, "an older roadmap without the markers is not checked");
 });
+
+// ------------------------------------------------- a lane's unnumbered entry (#30, ADR 0006)
+
+/** The test repo with an implementation-log folder and its generated index, committed. */
+function withLog({ token = true } = {}) {
+  const repository = repo();
+  const { dir, run } = repository;
+  const config = CONFIG.replace(
+    "export const GENERATED = [",
+    'export const GENERATED = [{ name: "implementation-log", target: "docs/log/README.md", dir: "docs/log" }, ',
+  ).replace("export const HEADER_EXEMPT = [", "export const HEADER_EXEMPT = [/^docs\\/log\\/\\d/, ");
+  writeFileSync(join(dir, "tools", "doc-config.mjs"), token ? `${config}export const NUMBER_TOKEN = "NNN";\n` : config);
+  mkdirSync(join(dir, "docs", "log"));
+  writeFileSync(join(dir, "docs", "log", "README.md"), "---\njob: The logs.\nkind: generated\n---\n# Log\n\n<!-- generated:start implementation-log -->\n<!-- generated:end implementation-log -->\n");
+  spawnSync(process.execPath, ["tools/doc-index.mjs"], { cwd: dir });
+  run("add", "-A");
+  run("commit", "-q", "-m", "chore: the log — devlog #1");
+  const lane = (...args) => spawnSync(process.execPath, ["tools/doc-check.mjs", ...args], { cwd: dir, encoding: "utf8", env: { ...process.env, PHASE_RUN: "1", PHASE_RUN_LANE: "2" } });
+  const unnumbered = (type = "feat") => {
+    repository.addEntry("NNN", type);
+    writeFileSync(join(dir, "docs", "log", "NNN-lane-work.md"), "# #NNN — The lane's work\n\n**Ticket:** `#5` · **Devlog:** `#NNN`\n");
+  };
+  return { ...repository, lane, unnumbered };
+}
+
+test("inside a lane, an unnumbered entry, its log's file name and devlog #NNN all pass", () => {
+  const { run, lane, unnumbered } = withLog();
+  unnumbered();
+  const tree = lane();
+  assert.equal(tree.status, 0, tree.stderr);
+  const message = lane("--message", "feat: the lane's work — devlog #NNN, Closes #5");
+  assert.equal(message.status, 0, message.stderr);
+  assert.match(lane("--message", "feat: the lane's work — devlog #2").stderr, /cites devlog #2, but the devlog's top entry is #NNN/);
+  assert.equal(lane("--message", "feat: the lane's work — Devlog #nnn").status, 0, "the match ignores case, as for a number");
+  run("add", "-A");
+  run("commit", "-q", "-m", "feat: the lane's work — devlog #NNN, Closes #5");
+  const head = lane("--head");
+  assert.equal(head.status, 0, head.stderr);
+});
+
+test("outside a lane, the same tree and message fail, naming the token", () => {
+  const { node, unnumbered } = withLog();
+  unnumbered();
+  const tree = node("doc-check.mjs").stderr;
+  assert.match(tree, /docs\/devlog\.md:\d+ "## #NNN · feat · work" is a lane's unnumbered entry \(NNN\)/);
+  assert.match(tree, /docs\/log\/NNN-lane-work\.md is named with a lane's token \(NNN\)/);
+  assert.doesNotMatch(tree, /NNN-lane-work\.md: has no header/, "one problem, the token's, not a missing header too");
+  assert.match(node("doc-check.mjs", "--message", "feat: the lane's work — devlog #NNN").stderr, /The commit message cites devlog #NNN, a lane's token/);
+});
+
+test("a lane's entry still needs its type tag; an older doc-config without the token constant still works", () => {
+  const { lane, unnumbered } = withLog({ token: false });
+  unnumbered("party");
+  assert.match(lane("--message", "x — devlog #NNN").stderr, /type "party"/);
+});
+
+// A lane's gotchas block (the source's later fix): it waits in `.lane/<file>` until Landing folds it
+// into `<file>`, so doc-check in the lane judges the file as it will land, not after.
+
+/** withLog's repo, with a live gotchas folder whose files are read for stale phrases and paths. */
+function withGotchas() {
+  const repository = withLog();
+  const { dir } = repository;
+  const config = readFileSync(join(dir, "tools", "doc-config.mjs"), "utf8")
+    .replace('export const LIVE_DOCS = ["docs/roadmap.md"];', 'export const LIVE_DOCS = ["docs/roadmap.md", "docs/gotchas"];')
+    .replace("export const STATUS_DOCS = /^docs\\/roadmap\\.md$/;", "export const STATUS_DOCS = /^docs\\/(roadmap\\.md|gotchas\\/.+)$/;");
+  writeFileSync(join(dir, "tools", "doc-config.mjs"), config);
+  const head = "---\njob: Phase p: the traps.\nkind: living\nmax-lines: 40\n---\n# Gotchas — Phase p\n\n## The blocks\n";
+  const block = (line) => {
+    mkdirSync(join(dir, ".lane", "docs", "gotchas"), { recursive: true });
+    writeFileSync(join(dir, ".lane", "docs", "gotchas", "p.md"), `**\`#5\` — the lane's block:**\n- ${line}\n`);
+  };
+  const file = (text) => {
+    mkdirSync(join(dir, "docs", "gotchas"), { recursive: true });
+    writeFileSync(join(dir, "docs", "gotchas", "p.md"), text);
+  };
+  return { ...repository, head, block, file };
+}
+
+test("in a lane, a gotchas block in .lane/ is judged as the file it lands in: a stale phrase, a missing path", () => {
+  const { lane, block, file, head } = withGotchas();
+  file(head);
+  block("the fix is not yet pushed");
+  const stale = lane();
+  assert.equal(stale.status, 1);
+  assert.match(stale.stderr, /docs\/gotchas\/p\.md:\d+ reads as stale: - the fix is not yet pushed/);
+  assert.match(stale.stderr, /\.lane\/docs\/gotchas\/p\.md/, "the problem says where the block is");
+  block("see docs/nowhere.md");
+  assert.match(lane().stderr, /docs\/gotchas\/p\.md:\d+ names a file that does not exist: docs\/nowhere\.md/);
+  block("a plain trap");
+  const clean = lane();
+  assert.equal(clean.status, 0, clean.stderr);
+});
+
+test("in a lane, a block whose file is new needs the lane's own copy, made from the template, for its header", () => {
+  const { lane, block, file, head } = withGotchas();
+  block("a plain trap");
+  assert.match(lane().stderr, /docs\/gotchas\/p\.md: has no header/, "no file yet: the block alone would land");
+  file(head);
+  const copied = lane();
+  assert.equal(copied.status, 0, copied.stderr);
+});
+
+test("outside a lane, .lane/ is never read: the tree is judged as before", () => {
+  const { node, block, file, head } = withGotchas();
+  file(head);
+  block("the fix is not yet pushed");
+  const outside = node("doc-check.mjs");
+  assert.equal(outside.status, 0, outside.stderr);
+});
+
+// D10 (#31): inside a run doc-check runs from the run's copy of tools/, and checks the repo.
+
+/** The repo's doc tools copied to its run's copy, `.phase-run/phase-x/runner/tools/`, and a way to run that copy. */
+function withCopy() {
+  const project = repo();
+  const copy = join(project.dir, ".phase-run", "phase-x", "runner");
+  mkdirSync(join(copy, "tools"), { recursive: true });
+  for (const name of ["doc-check.mjs", "doc-index.mjs", "doc-lib.mjs", "roadmap-format.mjs", "doc-config.mjs"]) copyFileSync(join(project.dir, "tools", name), join(copy, "tools", name));
+  writeFileSync(join(copy, "tools", "doc-check-baseline.json"), JSON.stringify({ stale: { "docs/roadmap.md": ["not yet pushed"] }, missing: {} }));
+  const env = { ...process.env, PHASE_RUN: "1", PHASE_RUN_RUNNER: copy, PHASE_RUN_ROOT: project.dir };
+  const fromCopy = (args = [], childEnv = env) => spawnSync(process.execPath, [join(copy, "tools", "doc-check.mjs"), ...args], { cwd: project.dir, encoding: "utf8", env: childEnv });
+  return { ...project, copy, env, fromCopy };
+}
+
+const STALE_ROADMAP = "---\njob: Where things stand.\nkind: living\nmax-lines: 20\n---\n# Roadmap\nnot yet pushed\n";
+
+test("run from the copy, doc-check reads the repo's docs against the copy's baseline", () => {
+  const { dir, node, fromCopy } = withCopy();
+  writeFileSync(join(dir, "docs", "roadmap.md"), `${STALE_ROADMAP}uncommitted\n`);
+  const check = fromCopy();
+  assert.equal(check.status, 1);
+  assert.match(check.stderr, /docs\/roadmap\.md:8 reads as stale: uncommitted/, "it read the repo's roadmap");
+  assert.doesNotMatch(check.stderr, /roadmap\.md:7/, "the copy's baseline took line 7's phrase");
+  assert.match(node("doc-check.mjs").stderr, /docs\/roadmap\.md:7 reads as stale/, "the repo's own baseline never took it");
+});
+
+test("an inherited PHASE_RUN_ROOT never points a doc-check outside the run's copy at another tree", () => {
+  const { dir, env } = withCopy();
+  const other = repo();
+  writeFileSync(join(other.dir, "docs", "roadmap.md"), STALE_ROADMAP);
+  // The other repo's own doc-check, in a session whose run points at the first repo and its copy:
+  const check = spawnSync(process.execPath, ["tools/doc-check.mjs"], { cwd: other.dir, encoding: "utf8", env: { ...env, PHASE_RUN_ROOT: dir } });
+  assert.match(check.stderr, /docs\/roadmap\.md:7 reads as stale/, "it checked its own tree, not the one PHASE_RUN_ROOT names");
+});
+
+test("run from the copy, the baseline is never written, even without PHASE_RUN, and the refusal names why", () => {
+  const { copy, env, fromCopy } = withCopy();
+  const before = readFileSync(join(copy, "tools", "doc-check-baseline.json"), "utf8");
+  const { PHASE_RUN: _, ...withoutPhaseRun } = env;
+  for (const childEnv of [env, withoutPhaseRun]) {
+    const refused = fromCopy(["--update-baseline"], childEnv);
+    assert.equal(refused.status, 1, "the runner's own gate has no PHASE_RUN; the copy still refuses");
+    assert.match(refused.stderr, /never updated inside a phase run: the night's docs are judged by the baseline the run's copy took at run start/);
+  }
+  assert.equal(readFileSync(join(copy, "tools", "doc-check-baseline.json"), "utf8"), before);
+});

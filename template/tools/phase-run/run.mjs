@@ -4,6 +4,13 @@
 //   node tools/phase-run/run.mjs --spec <N> --branch phase-6b [--max 4]
 //   node tools/phase-run/run.mjs --only <ticket> --branch phase-trial
 //   node tools/phase-run/run.mjs --spec <N> --dry-run
+//   node tools/phase-run/run.mjs --spec <N> --branch phase-6b --lane 2
+//
+// With --lane, the tickets are built in that lane's own git worktree (phaseRun.lanes, lane.mjs),
+// with its ports, QA database, test prefix and env, and a passing ticket's commit stays on the
+// lane's branch, then lands on the phase branch under the landing lock (landing.mjs, landing-lock.mjs):
+// replayed onto the newest tip, re-gated there, and fast-forwarded, or parked. Its results and logs
+// go in the primary checkout's `.phase-run/<branch>/lane-<id>/` (ADR 0007).
 //
 // A ticket's session is a Claude Code background session, so it can be
 // watched while it works: `claude agents` lists them, `claude attach <id>`
@@ -26,33 +33,53 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
 import net from "node:net";
 import { homedir } from "node:os";
-import { dirname, join, relative, resolve } from "node:path";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { BROWSER_CHECK, fill, fillEnv, loadRunConfig, qaUrl, sessionEnv as pinnedEnv, targetFingerprint, targetUrl } from "./config.mjs";
+import { BROWSER_CHECK, HOTSPOT_TOKEN, fill, fillEnv, laneQaUrl, loadRunConfig, sessionEnv as pinnedEnv, targetFingerprint, targetUrl } from "./config.mjs";
+import { afterPass, ignoredImports, ignoredImportsProblem, joinBranch, laneLockPath, lanePortProblems, laneRoots, laneRow, laneValues, liveLanes, mayFinishCopy, prepareWorktree, resetWorktree, setupWorktree, writeLaneLock } from "./lane.mjs";
+import { buildableTonight, builtOn, claimNext, clearParked, laneChoice, releaseClaim, takeClaim, takesTicket } from "./claim.mjs";
+import { keepParked, land } from "./landing.mjs";
+import { dropUnlanded, handBack, keepUnlanded, restartSteps, underLandingLock, unlandedCommits, unlandedRef } from "./landing-lock.mjs";
+import { takeFingerprint } from "./fingerprint.mjs";
+import { branchResults, findingText, findingsPath, laneState, onBranch, readFindings, recordFindings } from "./findings.mjs";
 import { Screen, notify, ticketMinutes } from "./display.mjs";
 import { brigadeCatalog, readInstalledBrigade, versionStop, withAutoUpdateOff } from "./brigade.mjs";
 import { LEDGER_PATH, appendRow, ledgerRow, stampVersion } from "./ledger.mjs";
-import { hookTime, loadPrices, sessionCost, stepKind, stepRules, ticketMetrics } from "./metrics.mjs";
+import { hookTime, loadPrices, sessionCost, stepKind, stepRules, ticketMetrics, withLanding } from "./metrics.mjs";
 import { finishSnapshot, takeSnapshot } from "./snapshot.mjs";
 import { DEFAULT_RULES as DEFAULT_SIZE, measureTicket as ticketSize } from "./ticket-size.mjs";
 import { PATCH_ARGS, tamperingVerdict } from "./tampering.mjs";
 import { projectKeeps, readTrim, trimEntries, trimPath, withTrim } from "./trim.mjs";
+import { LANE_DIR, scratchFor } from "./numbering.mjs";
 import { unreadMatcher } from "./unread.mjs";
+import { repoFiles, testNamedPaths, withListedCode } from "./unread-scan.mjs";
 import * as docConfig from "../doc-config.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
+/** The primary checkout: the run's state (its lock, results, logs, runner copy) lives here (ADR 0007). */
 const ROOT = resolve(HERE, "..", "..");
 const STATE = join(ROOT, ".phase-run");
 const WINDOWS = process.platform === "win32";
-/** The gates' `{cache}`: emptied before each gate run, so no tool trusts a cache a session wrote (D14). */
-const GATE_CACHE = join(STATE, "gate-cache").replaceAll("\\", "/");
+/**
+ * The session's root: where its git, its shell, its gates and its files (verdicts, receipts, the
+ * stop check's log, scratch) are. A lane's worktree (`--lane`, ADR 0007), else ROOT, so a run
+ * without --lane reads every path as before. Set by main() once the worktree is ready.
+ */
+let work = ROOT;
+/** The `.phase-run/` folder of the session's root. */
+const sessionState = () => join(work, ".phase-run");
+/** The gates' `{cache}`: emptied before each gate run, so no tool trusts a cache a session wrote (D14). Each lane has its own. */
+const gateCache = () => join(sessionState(), "gate-cache").replaceAll("\\", "/");
+/** The lane's row (`--lane <id>`, config.mjs parseLane), or null: a one-lane run. Set by preflight. */
+let lane = null;
 /** How often the gates' parallel group is looked at: a failure stops the rest on the next look. */
 const GATE_TICK_MS = 250;
 
@@ -82,9 +109,10 @@ function parseArgs(argv) {
     model: null,
     print: false,
     dryRun: false,
+    lane: null, // --lane <id>: build in that lane's worktree (lane.mjs), keeping each pass unlanded
   };
   const numeric = { "--spec": "spec", "--only": "only", "--until": "until", "--max": "max", "--fix-rounds": "fixRounds", "--minutes": "minutes", "--wait-hours": "waitHours" };
-  const text = { "--branch": "branch", "--permission-mode": "permissionMode", "--model": "model" };
+  const text = { "--branch": "branch", "--permission-mode": "permissionMode", "--model": "model", "--lane": "lane" };
   let maxGiven = false;
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -154,7 +182,7 @@ function die(message) {
 /** Runs a program directly (no shell). Returns status and trimmed output. */
 function exec(command, args, extra = {}) {
   const result = spawnSync(command, args, {
-    cwd: ROOT,
+    cwd: work,
     encoding: "utf8",
     maxBuffer: 256 * 1024 * 1024,
     ...extra,
@@ -168,9 +196,9 @@ function exec(command, args, extra = {}) {
 }
 
 /** A project command, run as written: through the shell, since `pnpm`, `npm` and the like are .cmd shims on Windows. */
-function shell(commandLine, env = {}) {
+function shell(commandLine, env = {}, cwd = work) {
   const result = spawnSync(commandLine, {
-    cwd: ROOT,
+    cwd,
     encoding: "utf8",
     shell: true,
     maxBuffer: 256 * 1024 * 1024,
@@ -194,6 +222,20 @@ function gitTry(...args) {
 function atCommit(rev, path) {
   const result = gitTry("show", `${rev}:${path}`);
   return result.ok ? result.stdout : null;
+}
+
+/**
+ * The listed-code rule's reader for gatePlan (#39): the paths the run's test files
+ * (phaseRun.tampering.testFiles) name, read from `tree`, the checkout the gates run in: runGates
+ * refuses a dirty tree before it plans, and the re-gate checks out the landed commit, so its files
+ * are the commit's. No tampering section, no test files: no rule, and nothing (git included) is read.
+ */
+function testNamedIn(tree) {
+  return () => {
+    const testFiles = config.tampering?.testFiles ?? [];
+    if (testFiles.length === 0) return [];
+    return testNamedPaths({ testFiles, files: repoFiles(tree), read: (file) => readFileSync(join(tree, file), "utf8") });
+  };
 }
 
 function gh(...args) {
@@ -257,12 +299,22 @@ let migrationTargetUrl = null;
  * This stops accidents, not a session that reads `.env` on purpose.
  */
 function sessionEnv() {
-  return pinnedEnv(config, lookup);
+  return pinnedEnv(config, lookup, lane);
+}
+
+/** The QA database's address this run's sessions and gates use: the lane's, in a lane (D4). */
+function runQaUrl() {
+  return laneQaUrl(config, lane, lookup);
+}
+
+/** The ports this run owns: a lane's row's, else phaseRun.ports (the other lane may hold those). */
+function runPorts() {
+  return lane ? lane.ports : config.ports;
 }
 
 /** A port the project names, freed after every ticket: a ticket's QA server must not block the next one. */
 async function freeTicketPorts() {
-  for (const { port } of config.ports.filter((p) => p.freeAfterEachTicket)) await freePort(port);
+  for (const { port } of runPorts().filter((p) => p.freeAfterEachTicket)) await freePort(port);
 }
 
 function listening(port) {
@@ -358,7 +410,7 @@ function killTree(child) {
  * terminal's Ctrl-C, so every job still open is killed when the runner exits.
  */
 function startJob(commandLine, env = {}) {
-  const child = spawn(commandLine, { cwd: ROOT, shell: true, env: { ...process.env, ...env }, detached: !WINDOWS, windowsHide: true });
+  const child = spawn(commandLine, { cwd: work, shell: true, env: { ...process.env, ...env }, detached: !WINDOWS, windowsHide: true });
   let stdout = "";
   let stderr = "";
   let closed = false;
@@ -457,12 +509,17 @@ async function fetchBlockers(number) {
 // ------------------------------------------------------------------ tickets
 
 /**
+ * Where "built" is read (claim.mjs builtOn): HEAD, the checked-out phase branch, in a one-lane run,
+ * as before; the phase branch itself in a lane, whose HEAD is its own branch of unlanded passes.
+ */
+let builtRef = "HEAD";
+
+/**
  * Issues stay open until the pull request merges, so on a phase branch
  * "done" is: closed, or a commit on this branch carries `Closes #N`.
  */
 function builtOnBranch(number) {
-  const result = gitTry("log", "main..HEAD", "-i", "-E", `--grep=Closes #${number}([^0-9]|$)`, "--format=%h");
-  return result.ok && result.stdout !== "";
+  return builtOn(gitTry, builtRef, number);
 }
 
 function isDone(ticket) {
@@ -495,10 +552,56 @@ function holdReason(ticket, byNumber) {
   }
   for (const blocker of ticket.blockers) {
     const known = byNumber.get(blocker.number);
-    const done = known ? isDone(known) : blocker.state === "closed" || builtOnBranch(blocker.number);
+    const done = known ? isDone(known) : blockerDone(blocker);
     if (!done) return `waiting on #${blocker.number}`;
   }
   return null;
+}
+
+/** A blocker outside the run's tickets, as `{ number, state }`: closed, or built on the branch. */
+function blockerDone(blocker) {
+  return blocker.state === "closed" || builtOnBranch(blocker.number);
+}
+
+/**
+ * The next ticket to build, or none. A one-lane run takes the first ready ticket in order, as
+ * before. A lane takes the first of its frontier under a claim both lanes share (claim.mjs, #34):
+ * ready, a ticket its row takes, and claimed by no live lane. With none, it waits while another
+ * live lane may still land a ticket one of its own waits on, and stops when none can.
+ */
+async function nextTicket(inScope, byNumber, run) {
+  if (!lane) return inScope.find((ticket) => holdReason(ticket, byNumber) === null);
+  // The other lanes of this branch still running, as their rows: what each may still take.
+  const others = () => {
+    const live = liveLanes(STATE).filter((other) => other.branch === run.branch && other.lane !== String(lane.id));
+    return config.lanes.rows.filter((row) => live.some((other) => other.lane === String(row.id)));
+  };
+  let said = "";
+  const { ticket } = await claimNext({
+    dir: run.claims,
+    lane: lane.id,
+    sleep,
+    // A ticket a lane parked tonight is held here too: this lane read its labels at its own start (#37).
+    choose: (claims, idle, parked = []) =>
+      laneChoice({
+        tickets: inScope,
+        byNumber,
+        hold: (ticket) => (parked.includes(ticket.number) ? "parked tonight, in a lane" : holdReason(ticket, byNumber)),
+        done: blockerDone,
+        takes: lane.takes,
+        claims,
+        self: lane.id,
+        others: others(),
+        idle,
+      }),
+    onWait: (waitOn) => {
+      const line = waitOn.map((w) => (w.claimed ? `lane ${w.lane}'s #${w.ticket}` : `#${w.ticket}, which lane ${w.lane} may take`)).join(", ");
+      if (line !== said) log(`Lane ${lane.id}: nothing it takes is ready; waiting on ${line}.`);
+      said = line;
+    },
+  });
+  if (ticket === null) log(`Lane ${lane.id}: nothing it takes is ready, and no other live lane can unblock one.`, { routine: true });
+  return ticket === null ? undefined : inScope.find((candidate) => candidate.number === ticket);
 }
 
 // ---------------------------------------------------------------- preflight
@@ -549,13 +652,32 @@ async function preflight(options) {
   if (config.gates.length === 0) {
     console.log("No project gates in .claude/workflow.json (phaseRun.gates): each ticket gets the runner's own checks only.");
   }
+  if (options.lane !== null) {
+    try {
+      lane = laneRow(config, options.lane);
+      runQaUrl(); // a url with no place for the lane's database is refused here, not at the first ticket
+    } catch (error) {
+      die(`Not ready to run: ${error.message}`);
+    }
+  }
 
   const current = git("branch", "--show-current");
   let branch = options.branch;
   if (!branch && current.startsWith("phase-")) branch = current;
+  // A lane started without --branch on a detached checkout (another lane is landing) joins the
+  // branch a live lane's lock names (D13).
+  if (!branch && lane && current === "") {
+    try {
+      branch = joinBranch(STATE);
+    } catch (error) {
+      problems.push(error.message);
+    }
+    if (branch) console.log(`Joining ${branch}, the branch a live lane runs on.`);
+  }
   if (!branch) problems.push("No phase branch named. Add --branch phase-<name> (for example --branch phase-6b).");
   else if (!/^phase-[a-z0-9][a-z0-9-]*$/.test(branch)) problems.push(`"${branch}" must look like phase-6b.`);
-  else if (current !== branch && current !== "main") {
+  // A lane builds in its own worktree and never checks a branch out here, so the primary may be anywhere.
+  else if (!lane && current !== branch && current !== "main") {
     problems.push(`You are on "${current}". Start a run from main, or from the phase branch itself.`);
   }
 
@@ -577,12 +699,16 @@ async function preflight(options) {
   }
 
   for (const row of config.preflight) {
-    const result = shell(fill(row.run, { qaUrl: qaUrl(config, lookup) }));
+    const result = shell(fill(row.run, { qaUrl: runQaUrl() }));
     if (!result.ok) problems.push(`${row.label} failed (\`${row.run}\`).${row.hint ? ` ${row.hint}` : ""}\n${tail(result.output, 600)}`);
   }
 
-  for (const { port, what } of config.ports) {
-    if (await listening(port)) problems.push(`Something is listening on :${port} (${what}). Stop it before a run.`);
+  // A lane checks its own row's ports: the other lane may be holding phaseRun.ports.
+  if (lane) problems.push(...(await lanePortProblems(lane, listening)));
+  else {
+    for (const { port, what } of config.ports) {
+      if (await listening(port)) problems.push(`Something is listening on :${port} (${what}). Stop it before a run.`);
+    }
   }
 
   // Trust on first use: the migration target's host is remembered, and a
@@ -620,6 +746,13 @@ async function preflight(options) {
   const lock = join(STATE, "lock");
   if (existsSync(lock)) {
     problems.push(`A run is already going (or one crashed): ${readFileSync(lock, "utf8").trim()}. If none is running, delete .phase-run/lock.`);
+  }
+  if (lane && existsSync(laneLockPath(STATE, lane.id))) {
+    const mine = laneLockPath(STATE, lane.id);
+    problems.push(`Lane ${lane.id} is already going (or it crashed): ${readFileSync(mine, "utf8").trim()}. If it is not running, delete ${relative(ROOT, mine).replaceAll("\\", "/")}.`);
+  }
+  if (lane && branch && !gitTry("rev-parse", "--verify", "--quiet", `refs/heads/${branch}`).ok) {
+    problems.push(`${branch} does not exist yet: a lane cuts its branch from it. Start the phase branch first (a run without --lane makes it from main), then start the lane.`);
   }
 
   if (problems.length > 0) {
@@ -739,7 +872,40 @@ function promptValues(project, prose, ticket) {
     BROWSER_GATE: check
       ? `The runner checks this itself: a ticket labelled \`frontend\`, or one that changes a screen's file, does not pass without at least ${check.minimum} screenshots saved to \`${fill(check.screenshots, { N })}/\` **after your last edit to a source file**. A fix you make after the walk (the code review's, a fix round's) means walking again.`
       : "The runner has no screenshot gate for this project; say in the implementation log what you checked.",
+    LANE_NUMBERS: ticket.LANE ? laneNumbers(ticket.LANE, laneToken(project.hotspots), ticket.GOTCHAS_FILE) : "",
+    // The review skill, by the project's full id (phaseRun.codeReview); unset, today's bare name.
+    CODE_REVIEW: `\`${project.codeReview ?? "code-review"}\``,
   };
+}
+
+/**
+ * The token a lane writes: `phaseRun.hotspots.token`, else HOTSPOT_TOKEN. doc-check accepts only
+ * doc-config's NUMBER_TOKEN, so a token the two disagree on is refused before a lane is told to write it.
+ */
+function laneToken(hotspots, docToken = docConfig.NUMBER_TOKEN ?? HOTSPOT_TOKEN) {
+  const token = hotspots?.token ?? HOTSPOT_TOKEN;
+  if (token !== docToken) {
+    throw new Error(`phaseRun.hotspots.token is "${token}", but tools/doc-config.mjs's NUMBER_TOKEN is "${docToken}", the only token doc-check accepts. Make them the same.`);
+  }
+  return token;
+}
+
+/**
+ * A lane session's numbering paragraph (ADR 0006): it writes the token itself where a number goes,
+ * and its gotchas block to the scratch file numbering.mjs folds in. Empty for a one-lane run, whose
+ * prompt is then today's, byte for byte.
+ */
+function laneNumbers(lane, token, gotchasFile) {
+  return (
+    `\n\n**You are lane \`${lane}\`: write \`${token}\` where a number goes, literally.** Another lane builds beside you, ` +
+    `so neither takes the next number; the runner fills them in when your commit lands on the phase branch. Above, ` +
+    `\`${token}\` stood for "your number"; here it is the text you write: the devlog heading \`## #${token} · <type> · <title>\`, ` +
+    `the log's file name \`${token}-<slug>.md\`, its title \`# #${token} — …\` and its Devlog line's \`#${token}\`, ` +
+    `the devlog entry's \`implementation log ${token}\`, and \`devlog #${token}\` in the commit message. Your gotchas block goes in \`${scratchFor(gotchasFile)}\`, ` +
+    `not in \`${gotchasFile}\`: it is added to that file when your commit lands. If \`${gotchasFile}\` does not exist yet, make it from the template with no block of yours ` +
+    `(its header and opening only), in this commit: the other lane may make it too, and Landing keeps whichever lands first. ` +
+    `doc-check, in a lane, judges the file with your block folded in. doc-check accepts \`${token}\` only in a lane.`
+  );
 }
 
 /** A `-p` call's arguments. Each call is a process of its own, so trim's flags go on a resume too. */
@@ -777,7 +943,7 @@ const LIMIT_PATTERN = /usage limit|rate.?limit|limit reached|hit your (\w+ )?lim
 function runPrint({ prompt, sessionId, resume, options, env, settings, transcript, flags }) {
   const args = printArgs({ sessionId, resume, options, settings, flags });
   return new Promise((done) => {
-    const child = spawn("claude", args, { cwd: ROOT, env: { ...process.env, ...env }, stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawn("claude", args, { cwd: work, env: { ...process.env, ...env }, stdio: ["pipe", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
     let timedOut = false;
@@ -870,7 +1036,7 @@ const SETTLE_MS = 2 * 60_000;
 /** Whether the ticket's verdict file was written at or after `since` (ms): this turn's, not an earlier round's. */
 function verdictWrittenSince(number, since) {
   try {
-    return statSync(join(STATE, `verdict-${number}.json`)).mtimeMs >= since;
+    return statSync(join(sessionState(), `verdict-${number}.json`)).mtimeMs >= since;
   } catch {
     return false;
   }
@@ -919,7 +1085,7 @@ function stopBackground(id) {
 }
 
 function stopCheckMarker(number) {
-  return join(STATE, `stop-check-${number}.json`);
+  return join(sessionState(), `stop-check-${number}.json`);
 }
 
 /** True while the ticket's stop check is running: its marker names a live process (point 6). */
@@ -946,7 +1112,7 @@ function stopStray(when) {
   if (!pattern) return 0;
   let pids = [];
   if (WINDOWS) {
-    const modules = `${ROOT}\\node_modules\\`.toLowerCase().replace(/'/g, "''");
+    const modules = `${work}\\node_modules\\`.toLowerCase().replace(/'/g, "''"); // a lane's own install: never the other lane's
     const match = pattern.source.replace(/'/g, "''");
     const found = exec("powershell", [
       "-NoProfile",
@@ -959,7 +1125,7 @@ function stopStray(when) {
     const found = exec("ps", ["-eo", "pid=,args="]);
     pids = found.stdout
       .split("\n")
-      .filter((line) => line.includes(`${ROOT}/node_modules/`) && pattern.test(line))
+      .filter((line) => line.includes(`${work}/node_modules/`) && pattern.test(line))
       .map((line) => line.trim().split(/\s+/)[0]);
     for (const pid of pids) exec("kill", ["-9", pid]);
   }
@@ -977,8 +1143,12 @@ function stopStray(when) {
  * for a person or move the work somewhere else. `catalog` (brigade.mjs brigadeCatalog, read at run
  * start) switches Brigade's auto-update off for the session, keeping its catalog entry's `source`.
  */
-function sessionSettings(base, project, { branch, env, background, prompt, catalog = null }) {
+function sessionSettings(base, project, { branch, env, background, prompt, catalog = null, runFolder = null }) {
   const allow = [...(base.permissions?.allow ?? []), ...project.allow];
+  // A lane's session runs in its worktree, so `./` names the worktree; the run's folder with the
+  // shared runner copy sits in the primary checkout, denied by its absolute path (`//`, the POSIX
+  // form Claude Code matches a Windows path in: D:\a becomes /d/a).
+  const absolute = runFolder ? `/${resolve(runFolder).replaceAll("\\", "/").replace(/^([A-Za-z]):/, (_, drive) => `/${drive.toLowerCase()}`)}` : null;
   return withAutoUpdateOff({
     ...base,
     permissions: {
@@ -992,6 +1162,7 @@ function sessionSettings(base, project, { branch, env, background, prompt, catal
         "Edit(./.claude/spec-issues.json)",
         ...(prompt ? [`Edit(./${prompt})`] : []),
         `Edit(./.phase-run/${branch}/**)`,
+        ...(absolute ? [`Edit(${absolute}/**)`] : []),
         "AskUserQuestion",
         "EnterPlanMode",
         "EnterWorktree",
@@ -1011,11 +1182,23 @@ function runnerFile(runner, name) {
   return runner ? join(runner, "tools", "phase-run", name) : join(HERE, name);
 }
 
+/**
+ * doc-check as the runner runs it (D10): the run's copy's, with its imports and its baseline,
+ * pointed at the repo it checks (`root`, doc-lib.mjs `checkedRoot`), so a change to the live doc
+ * tools mid-night changes no later ticket's verdict. With no copy yet (a dry run), the live one, as
+ * before. `env` is the environment it runs in, this process's unless a test gives another.
+ */
+function docCheck(runner, root, args, env = process.env) {
+  if (!runner) return exec("node", [join("tools", "doc-check.mjs"), ...args], { cwd: root, env });
+  return exec("node", [join(runner, "tools", "doc-check.mjs"), ...args], { cwd: root, env: { ...env, PHASE_RUN_RUNNER: runner, PHASE_RUN_ROOT: root } });
+}
+
 function writeSessionSettings(run, number, env, { background = true } = {}) {
   const base = JSON.parse(readFileSync(runnerFile(run.runner, "settings.json"), "utf8"));
-  const settings = sessionSettings(base, config.permissions, { branch: run.branch, env, background, prompt: config.prompt, catalog: run.catalog });
+  const settings = sessionSettings(base, config.permissions, { branch: run.branch, env, background, prompt: config.prompt, catalog: run.catalog, runFolder: lane ? join(STATE, run.branch) : null });
   const path = join(run.dir, `settings-${number}.json`);
-  writeFileSync(path, `${JSON.stringify(trimmedSettings(settings, run.trim, ROOT, config.keep), null, 2)}\n`);
+  // What the session's own project enables: a lane session loads its worktree's settings (#28's probe, answer 5).
+  writeFileSync(path, `${JSON.stringify(trimmedSettings(settings, run.trim, work, config.keep), null, 2)}\n`);
   return path;
 }
 
@@ -1101,7 +1284,7 @@ function readTurn(sessionId, fromLine) {
         const what = String(input.command ?? input.file_path ?? input.pattern ?? input.skill ?? input.description ?? "").replace(/\s+/g, " ");
         used.set(block.id, `${block.name} ${what}`.trim());
         turn.steps += 1;
-        turn.lastStep = `${block.name} ${what.replace(ROOT, "").replace(/^[\\/]/, "")}`.slice(0, 90);
+        turn.lastStep = `${block.name} ${what.replace(work, "").replace(/^[\\/]/, "")}`.slice(0, 90);
         turn.apiError = false;
         turn.apiStatus = null;
       }
@@ -1126,9 +1309,12 @@ function readTurn(sessionId, fromLine) {
  * a fix round, and a stopped session can still be opened and read.
  */
 async function runBackground({ prompt, sessionId, resume, options, settings, name, transcript, number, flags }) {
-  const promptFile = transcript.replace(/\.json$/, ".prompt.md");
+  // The prompt is the session's file, in its own root (a lane's worktree), where it may read it;
+  // the transcript beside it in the run's folder is run state (ADR 0007). One lane: the same path.
+  const promptFile = join(sessionState(), relative(STATE, transcript)).replace(/\.json$/, ".prompt.md");
+  mkdirSync(dirname(promptFile), { recursive: true });
   writeFileSync(promptFile, prompt);
-  const ask = `Read the file ${relative(ROOT, promptFile).replace(/\\/g, "/")} and follow it exactly. It is your whole task for this turn.`;
+  const ask = `Read the file ${relative(work, promptFile).replace(/\\/g, "/")} and follow it exactly. It is your whole task for this turn.`;
 
   let id = null;
   let fromLine = 0;
@@ -1356,7 +1542,7 @@ const TRAILER = /co-authored-by:|claude-session:|generated with \[?claude|🤖 g
 
 function specNumbers(options) {
   const numbers = new Set();
-  const path = join(ROOT, ".claude", "spec-issues.json");
+  const path = join(work, ".claude", "spec-issues.json");
   if (existsSync(path)) for (const n of JSON.parse(readFileSync(path, "utf8")).specs ?? []) numbers.add(String(n));
   if (options.spec) numbers.add(String(options.spec));
   return numbers;
@@ -1433,16 +1619,27 @@ function screenshotsSince(root, rel, startedAt, changed, sourceFiles) {
 }
 
 /**
- * The browser check's gate (phaseRun.browserCheck), or null when it passes.
- * The check is the session's own work, so its word is not enough: the
- * screenshots it was told to save must be there, and be from this build.
+ * The browser check's gate (phaseRun.browserCheck, `check`) on the tree at `root`:
+ * `{ problem, fingerprint }`. The check is the session's own work, so its word is
+ * not enough: the screenshots it was told to save must be there, and be from this
+ * build. A pass records the fingerprint of what it judged (fingerprint.mjs, D12);
+ * a ticket the check does not apply to, or a failed check, has none.
  */
-function browserCheckProblem(ticket, changed, startedAt) {
-  const check = config.browserCheck;
-  if (!ticket.labels.includes("frontend") && !changed.some((file) => check.screenFiles.test(file))) return null;
+function browserCheckVerdict({ check, ticket, changed, startedAt, root }) {
+  if (!check) return { problem: null, fingerprint: null };
+  if (!ticket.labels.includes("frontend") && !changed.some((file) => check.screenFiles.test(file))) return { problem: null, fingerprint: null };
   const dir = fill(check.screenshots, { N: ticket.number });
-  const shots = screenshotsSince(ROOT, dir, startedAt, changed, check.sourceFiles);
-  if (shots.fresh.length >= check.minimum) return null;
+  const shots = screenshotsSince(root, dir, startedAt, changed, check.sourceFiles);
+  if (shots.fresh.length >= check.minimum) {
+    // readdirSync names a subfolder's file with the platform's separator; the fingerprint keeps `/`.
+    const counted = shots.fresh.map((file) => `${dir.replace(/\/+$/, "")}/${file.split(sep).join("/")}`);
+    return { problem: null, fingerprint: takeFingerprint({ root, changed, sourceFiles: check.sourceFiles, shots: counted }) };
+  }
+  return { problem: browserCheckProblem(check, dir, shots), fingerprint: null };
+}
+
+/** What a failed browser check tells the session. */
+function browserCheckProblem(check, dir, shots) {
   return (
     `This ticket changes what a screen shows, and ${dir}/ holds ${shots.fresh.length} screenshot(s) saved after your last edit to a source file` +
     `${shots.stale ? ` (${shots.stale} older one(s) do not count: a source file changed after them, so they show code that is no longer there)` : ""}; ` +
@@ -1473,18 +1670,36 @@ function diffPaths(nameStatus) {
  * decision function. `diff` is `git diff --name-status -M -z <base>..HEAD`.
  * A gate skips on `when` when no changed path matches it, and on `unreadOf` (the suite skip, D13)
  * when the diff is non-empty and every path is on that stop check's `unread` list, through the
- * one matcher (unread.mjs). An empty diff never takes the suite skip.
+ * one matcher (unread.mjs). An empty diff never takes the suite skip. Under the listed-code rule
+ * (0.7.0 D11) the list first gets back each path a test names, from `testNamed()` (unread-scan.mjs's
+ * `testNamedPaths`, read only when a skip is in reach), so a changed file a test names runs the gate;
+ * a `testNamed` that throws refuses the skip. Without one there is no rule.
  * `tampering` (D15, tampering.mjs) is null when the run has no tampering section; its rules are read
  * at `base` through `readAt(rev, path)`, from the `patch` (PATCH_ARGS), the ticket `body` as fetched
  * at run start and the commit `message`.
  */
-function gatePlan({ base, diff, config: { gates, stopChecks = [], tampering = null }, patch = "", readAt = null, body = "", message = "" }) {
+function gatePlan({ base, diff, config: { gates, stopChecks = [], tampering = null }, patch = "", readAt = null, body = "", message = "", testNamed = () => [] }) {
   const paths = diffPaths(diff);
-  const unread = new Map(stopChecks.filter((check) => check.name).map((check) => [check.name, unreadMatcher(check.unread)]));
+  const unread = new Map(stopChecks.filter((check) => check.name).map((check) => [check.name, check.unread]));
+  let scan; // `{ named }`, read once and only for a diff wholly on some list; `named` is null when it failed
+  const testNamedOnce = () => (scan ??= (() => {
+    try {
+      return { named: testNamed() };
+    } catch {
+      return { named: null }; // the scan failed: no skip on a list it could not check
+    }
+  })());
+  const onListOf = (name) => {
+    const list = unread.get(name) ?? [];
+    if (!paths.every(unreadMatcher(list))) return false;
+    const { named } = testNamedOnce();
+    // Every changed path is on the list, so each named one among them is listed code: put it back.
+    return named !== null && paths.every(unreadMatcher(withListedCode(list, named)));
+  };
   const skipOf = (gate) => {
     if (gate.builtin) return null;
     if (gate.when && !paths.some((path) => gate.when.test(path))) return "when";
-    if (gate.unreadOf && paths.length > 0 && paths.every(unread.get(gate.unreadOf))) return "unreadOf";
+    if (gate.unreadOf && paths.length > 0 && onListOf(gate.unreadOf)) return "unreadOf";
     return null;
   };
   return {
@@ -1507,7 +1722,7 @@ const SKIP_REASONS = {
  * up). Finished jobs are collected each tick; on a failure, every failure of that tick is reported,
  * the jobs still running are killed and waited for, and the ones not started never start.
  */
-async function gateGroup(gates, { values, start, tickMs }) {
+async function gateGroup(gates, { values, start, tickMs, laneEnv = {} }) {
   const labels = new Set(gates.map((gate) => gate.label));
   const passed = new Set();
   const running = new Map();
@@ -1515,7 +1730,8 @@ async function gateGroup(gates, { values, start, tickMs }) {
   const startReady = () => {
     const ready = (gate) => !gate.after || !labels.has(gate.after) || passed.has(gate.after);
     for (const gate of waiting.filter(ready)) {
-      const entry = { job: start(fill(gate.run, values), fillEnv(gate.env, values)), result: null };
+      // A lane's variables over the gate's own env: a lane's suite names its own test databases.
+      const entry = { job: start(fill(gate.run, values), { ...fillEnv(gate.env, values), ...laneEnv }), result: null };
       entry.job.done.then((result) => (entry.result = result));
       running.set(gate, entry);
     }
@@ -1552,10 +1768,10 @@ async function gateGroup(gates, { values, start, tickMs }) {
  * The project's gates (phaseRun.gates), as `gatePlan` decided them: the tampering verdict first (D12),
  * then the parallel group, then each `alone` gate by itself (strays stopped first), then the browser
  * check, wherever the config places it. The first failure is returned as `{ gate, output }`, or null.
- * `{cache}` is emptied before any gate starts. The job starter and the side jobs are parameters, so
- * a test can stand in for them.
+ * `{cache}` is emptied before any gate starts. `laneEnv` is a lane's variables (laneVariables), none
+ * without a lane. The job starter and the side jobs are parameters, so a test can stand in for them.
  */
-async function projectGates(plan, { values, browserCheck, start = startJob, tickMs = GATE_TICK_MS, freePorts = freeTicketPorts, stopStray: stop = () => 0 }) {
+async function projectGates(plan, { values, browserCheck, start = startJob, tickMs = GATE_TICK_MS, freePorts = freeTicketPorts, stopStray: stop = () => 0, laneEnv = {} }) {
   if (plan.tampering && !plan.tampering.ok) return { gate: "tampering", output: plan.tampering.output };
   if (values.cache) {
     rmSync(values.cache, { recursive: true, force: true });
@@ -1564,12 +1780,12 @@ async function projectGates(plan, { values, browserCheck, start = startJob, tick
   const live = plan.gates.filter(({ gate, skip }) => !gate.builtin && !skip).map(({ gate }) => gate);
   const group = live.filter((gate) => !gate.alone);
   if (group.some((gate) => gate.freePorts)) await freePorts();
-  const failed = await gateGroup(group, { values, start, tickMs });
+  const failed = await gateGroup(group, { values, start, tickMs, laneEnv });
   if (failed) return failed;
   for (const gate of live.filter((g) => g.alone)) {
     if (gate.freePorts) await freePorts();
     stop(`before the ${gate.label} gate`);
-    const alone = await gateGroup([gate], { values, start, tickMs });
+    const alone = await gateGroup([gate], { values, start, tickMs, laneEnv });
     if (alone) return alone;
   }
   if (plan.gates.some(({ gate }) => gate.builtin === BROWSER_CHECK)) {
@@ -1577,6 +1793,16 @@ async function projectGates(plan, { values, browserCheck, start = startJob, tick
     if (problem) return { gate: "browser check", output: problem };
   }
   return null;
+}
+
+/**
+ * Whether a commit's added files (`git diff --name-only --diff-filter=A`) hold an implementation
+ * log: `NNN-<slug>.md` with a number, or in a lane (`token` set) the number token, which Landing
+ * numbers (ADR 0006).
+ */
+function implementationLogAdded(added, token = null) {
+  const number = token ? `(?:\\d{3}|${token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})` : "\\d{3}";
+  return new RegExp(`^docs/history/implementation-log/${number}-.+\\.md$`, "m").test(added);
 }
 
 /** Each gate is checked by this script. The first failure is returned. */
@@ -1608,7 +1834,7 @@ async function runGates(ticket, base, options, run, startedAt) {
   if (dirty) return fail("clean tree", `Files were left uncommitted. Amend them into the ticket's commit, or delete them:\n${dirty}`);
 
   const added = git("diff", "--name-only", "--diff-filter=A", `${base}..HEAD`);
-  if (!/^docs\/history\/implementation-log\/\d{3}-.+\.md$/m.test(added)) {
+  if (!implementationLogAdded(added, lane ? laneToken(config.hotspots) : null)) {
     return fail("docs", "The commit adds no docs/history/implementation-log/NNN-*.md entry. Every ticket gets one, in full.");
   }
 
@@ -1619,6 +1845,7 @@ async function runGates(ticket, base, options, run, startedAt) {
     diff: git("diff", "--name-status", "-M", "-z", `${base}..HEAD`),
     config,
     ...(config.tampering ? { patch: git(...PATCH_ARGS, `${base}..HEAD`), readAt: atCommit, body: ticket.body ?? "", message } : {}),
+    testNamed: testNamedIn(work),
   });
   const changed = plan.paths;
   for (const { gate, skip } of plan.gates.filter((g) => g.skip)) {
@@ -1630,16 +1857,30 @@ async function runGates(ticket, base, options, run, startedAt) {
     run.tamperingNotes ??= new Map();
     run.tamperingNotes.set(n, plan.tampering.refusedNote);
   }
+  // A browser-check pass's fingerprint, for the ticket's result (finishBuilt) and Landing (#36).
+  let fingerprint = null;
   const failed = await projectGates(plan, {
-    values: { base, N: n, qaUrl: qaUrl(config, lookup), cache: GATE_CACHE },
-    browserCheck: () => browserCheckProblem(ticket, changed, startedAt),
+    values: { base, N: n, qaUrl: runQaUrl(), cache: gateCache() },
+    laneEnv: laneVariables(lane ? laneValues(lane, config) : null),
+    browserCheck: () => {
+      const verdict = browserCheckVerdict({ check: config.browserCheck, ticket, changed, startedAt, root: work });
+      fingerprint = verdict.fingerprint;
+      return verdict.problem;
+    },
     stopStray: (when) => stopStray(`${when} for #${n}`),
   });
   if (failed) return fail(failed.gate, failed.output);
 
-  const docs = exec("node", ["tools/doc-check.mjs", "--head"]);
+  // In a lane, doc-check accepts the number token only with PHASE_RUN_LANE set (ADR 0006).
+  const docs = docCheck(run.runner, work, ["--head"], lane ? { ...process.env, PHASE_RUN_LANE: String(lane.id) } : process.env);
   if (!docs.ok) return fail("doc-check", `${docs.stdout}\n${docs.stderr}`);
 
+  // A lane's migration waits for Landing's re-gate, never its own pass (ADR 0008).
+  if (!afterPass(lane).migrate) {
+    const waiting = newMigrations(base);
+    if (waiting.length) log(`#${n}: ${waiting.join(", ")} not applied: in a lane, Landing applies it as the re-gate's last step.`);
+    return { ok: true, fingerprint };
+  }
   // Last on purpose: nothing reaches the migration target until everything else is green.
   const migrations = newMigrations(base).filter((name) => !run.migrationsApplied.has(name));
   if (migrations.length > 0) {
@@ -1660,13 +1901,13 @@ async function runGates(ticket, base, options, run, startedAt) {
       );
     }
   }
-  return { ok: true };
+  return { ok: true, fingerprint };
 }
 
 // ------------------------------------------------------- finishing a ticket
 
 function readVerdict(number) {
-  const path = join(STATE, `verdict-${number}.json`);
+  const path = join(sessionState(), `verdict-${number}.json`);
   if (!existsSync(path)) return null;
   try {
     return JSON.parse(readFileSync(path, "utf8"));
@@ -1688,7 +1929,7 @@ function ticketAreas(body) {
  * its shared registries (the ones nearly every ticket touches, which would
  * otherwise teach the owner to ignore the ⚠ line) as phaseRun.alwaysInScope.
  */
-const ALWAYS_IN_SCOPE = [/^docs\//, /^CLAUDE\.md$/, /^GLOSSARY\.md$/];
+const ALWAYS_IN_SCOPE = [/^docs\//, /^CLAUDE\.md$/, /^GLOSSARY\.md$/, new RegExp(`^${LANE_DIR.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/`)]; // a lane's own-file scratch (numbering.mjs), always (D13)
 
 function outsideAreas(files, areas, alwaysInScope = []) {
   if (!areas) return [];
@@ -1706,7 +1947,7 @@ function destructive(names) {
   if (!pattern) return [];
   return names.filter((name) => {
     const file = migrationFiles.get(name);
-    return file && existsSync(join(ROOT, file)) && pattern.test(readFileSync(join(ROOT, file), "utf8"));
+    return file && existsSync(join(work, file)) && pattern.test(readFileSync(join(work, file), "utf8"));
   });
 }
 
@@ -1734,8 +1975,11 @@ function resultsFile(run) {
   return join(run.dir, "results.json");
 }
 
+/** Written whole and renamed into place: the other lane reads this file (findings.mjs branchResults), and a half-written one would read as no results (#38). */
 function saveResults(run) {
-  writeFileSync(resultsFile(run), `${JSON.stringify(run.all, null, 2)}\n`);
+  const part = `${resultsFile(run)}.${process.pid}.part`;
+  writeFileSync(part, `${JSON.stringify(run.all, null, 2)}\n`);
+  renameSync(part, resultsFile(run));
 }
 
 /**
@@ -1744,8 +1988,10 @@ function saveResults(run) {
  * runner's own error.
  */
 function recordResult(run, result, at = Date.now()) {
-  const stamped = { ...withTamperingNote(run, result), runId: run.runId, reported: false };
+  // A lane's result names its night (the shared runner copy's run), so every lane's report reads the same night (#38).
+  const stamped = { ...withTamperingNote(run, result), runId: run.runId, ...(run.night ? { night: run.night } : {}), reported: false };
   recordNight(run, stamped, at);
+  recordFound(run, stamped, at);
   run.results.push(stamped);
   run.all.push(stamped);
   saveResults(run);
@@ -1786,6 +2032,20 @@ function recordNight(run, result, at) {
   }
 }
 
+/**
+ * The result's findings (`foundElsewhere`) in the phase branch's one record (findings.mjs, D14): the
+ * branch folder in the primary checkout, which a lane shares (`run.claims`) and a run without lanes
+ * is (`run.dir`). A record that cannot be written leaves a note and never stops the run.
+ */
+function recordFound(run, result, at) {
+  if (!result.foundElsewhere?.length) return;
+  try {
+    recordFindings({ dir: run.claims ?? run.dir, ticket: result.number, lane: result.lane ?? null, night: run.night ?? null, items: result.foundElsewhere, at });
+  } catch (error) {
+    (result.notes ??= []).push(`The findings record could not be written (${error.message}): this ticket's findings are only in its result.`);
+  }
+}
+
 /** The report's line for a result whose night row was lost, or nothing. */
 const ledgerNote = (r) => (r.ledger === "not written" ? [`⚠ ledger: not written (${r.ledgerError ?? "no reason recorded"}). This ticket's cost is missing from .phase-run/ledger.jsonl.`] : []);
 
@@ -1799,16 +2059,19 @@ function pullRequestBody(all, options) {
     "**Merge with a merge commit, never squash or rebase**: a devlog entry reads as closed once a commit message cites it, and a squash would drop those messages.",
     "",
     "Built on this branch:",
-    ...[...latest.values()].map((r) => `- #${r.number} ${r.title} (\`${r.hash}\`)`),
+    ...[...latest.values()].map((r) => `- #${r.number} ${r.title} (\`${r.hash}\`)${r.lane != null ? ` · lane ${r.lane}` : ""}`),
     "",
   ].join("\n");
 }
 
 function ensurePullRequest(run, options) {
   const bodyFile = join(run.dir, "pr-body.md");
+  // A lane's body reads every lane's landed results (findings.mjs), checked against the phase branch: its own HEAD is its worktree's.
+  const all = lane ? onBranch(branchResults(run.claims)) : run.all;
+  const tip = lane ? `refs/heads/${run.branch}` : "HEAD";
   // Only commits still on the branch: results.json outlives a branch deleted or rebuilt by hand.
-  const onBranch = run.all.filter((r) => r.status !== "built" || gitTry("merge-base", "--is-ancestor", r.hash, "HEAD").ok);
-  writeFileSync(bodyFile, pullRequestBody(onBranch, options));
+  const listed = all.filter((r) => r.status !== "built" || gitTry("merge-base", "--is-ancestor", r.hash, tip).ok);
+  writeFileSync(bodyFile, pullRequestBody(listed, options));
   const existing = exec("gh", ["pr", "view", run.branch, "--json", "number,url", "-q", ".url"]);
   if (existing.ok && existing.stdout) {
     exec("gh", ["pr", "edit", run.branch, "--body-file", bodyFile]);
@@ -1822,18 +2085,20 @@ function ensurePullRequest(run, options) {
 function screenshotFolder(number) {
   if (!config.browserCheck) return null;
   const dir = fill(config.browserCheck.screenshots, { N: number });
-  return existsSync(join(ROOT, dir)) ? `${dir}/` : null;
+  return existsSync(join(work, dir)) ? `${dir}/` : null;
 }
 
-async function finishBuilt(ticket, base, options, run, session) {
+async function finishBuilt(ticket, base, options, run, session, fingerprint = null) {
   const hash = git("rev-parse", "--short", "HEAD");
   const stat = git("diff", "--shortstat", `${base}..HEAD`);
   const files = git("diff", "--name-only", `${base}..HEAD`).split("\n").filter(Boolean);
   const migrations = newMigrations(base);
   const verdict = readVerdict(ticket.number) ?? {};
 
-  await waitForInternet(waitDeadline(options), `before pushing #${ticket.number}`); // a failed push is noted below
-  const push = gitTry("push", "-u", "origin", run.branch);
+  // A lane's pass stays on its own branch, unpushed, for Landing (ADR 0008): the phase branch never moves here.
+  const pushing = afterPass(lane).push;
+  if (pushing) await waitForInternet(waitDeadline(options), `before pushing #${ticket.number}`); // a failed push is noted below
+  const push = pushing ? gitTry("push", "-u", "origin", run.branch) : null;
 
   const result = {
     number: ticket.number,
@@ -1850,14 +2115,229 @@ async function finishBuilt(ticket, base, options, run, session) {
     handedForward: verdict.handedForward ?? [],
     summary: verdict.summary ?? "",
     screenshots: screenshotFolder(ticket.number),
+    // What a browser-check pass judged (fingerprint.mjs), for Landing (#36); no key without one.
+    ...(fingerprint ? { fingerprint } : {}),
     notes: [],
     session,
+    // Unlanded: the commit is on the lane's branch, and Landing puts it on the phase branch (landPass).
+    ...(lane ? { lane: String(lane.id), laneBranch: run.laneBranch, commit: git("rev-parse", "HEAD"), landed: false } : {}),
   };
-  if (!push.ok) result.notes.push(`The push failed: ${tail(push.stderr, 400)}`);
+  if (push && !push.ok) result.notes.push(`The push failed: ${tail(push.stderr, 400)}`);
   const stamped = recordResult(run, result);
-  if (push.ok) run.pullRequest = ensurePullRequest(run, options);
-  log(`#${ticket.number} built: ${hash} (${stat || "no diff"}).`, { routine: true });
+  if (push?.ok) run.pullRequest = ensurePullRequest(run, options);
+  log(`#${ticket.number} built: ${hash} (${stat || "no diff"})${lane ? `, kept on ${run.laneBranch} for Landing` : ""}.`, { routine: true });
+  // A lane lands its pass at once (#37). The result is on disk first, unlanded, so a lane that dies
+  // mid-landing leaves exactly what its restart lands (landUnlanded).
+  const outcome = lane ? await landPass(ticket, stamped, stamped.commit, run, options) : "continue";
   ticketFinished(stamped);
+  return outcome;
+}
+
+// ------------------------------------------------------------ landing (a lane)
+
+/**
+ * A lane's pass put on the phase branch (#37, D13, ADR 0008): Landing (landing.mjs) under the
+ * landing lock (landing-lock.mjs), with the run's real gates as its re-gate. `result` is the pass's
+ * recorded result, changed in place and saved: landed (its new hash, its numbers, the push), or
+ * parked on `<branch>-parked-<N>` and posted as a park. Either way the lane's worktree is put back on
+ * the phase branch's tip and its claim released. A lock that is never freed leaves the pass unlanded
+ * on the lane's branch, for its restart, and stops the lane. Returns "continue" or "stop".
+ */
+async function landPass(ticket, result, commit, run, options) {
+  const n = ticket.number;
+  result.notes ??= [];
+  setCurrent({ stage: "landing" });
+  showProgress();
+  await waitForInternet(waitDeadline(options), `before landing #${n}`); // the push needs it; a failed push is noted below
+  log(`#${n}: landing on ${run.branch}.`, { routine: true });
+  const appliedBefore = new Set(run.migrationsApplied); // a park after the migration leaves it on the target
+  let landing;
+  // The ticket's time takes its landing too (metrics.mjs withLanding): the lock's wait, then the landing.
+  const askedAt = Date.now();
+  let heldAt = null;
+  try {
+    const held = await underLandingLock(
+      { dir: run.claims, root: ROOT, branch: run.branch, lane: lane.id, onWait: (holder) => log(`#${n}: waiting for ${holder?.lane ? `lane ${holder.lane}'s` : "another"} landing to finish.`) },
+      () => {
+        heldAt = Date.now();
+        return land({
+          repo: ROOT,
+          branch: run.branch,
+          ticket: n,
+          commit,
+          hotspots: config.hotspots,
+          phase: run.branch.replace(/^phase-/, ""),
+          rebuild: (dir) => rebuildGenerated(dir),
+          regate: (dir, at) => regateLanded(ticket, at, run),
+          fingerprint: result.fingerprint ?? null,
+          shotsRoot: work,
+          // The check is a session's walk of the screens: the runner can't redo it on the new tip.
+          browserCheck: () => `The runner can't walk the screens itself, so the check was not run again on ${run.branch}'s tip: build #${n} again from there.`,
+          migration: config.migrations ? { added: config.migrations.added, apply: (dir, names) => migrateLanded(names, run) } : null,
+          remote: "origin",
+        });
+      },
+    );
+    landing = held.value;
+    result.notes.push(...held.notes);
+  } catch (error) {
+    landing = { status: "unlanded", detail: error.message };
+  }
+  const endedAt = Date.now();
+  if (result.session?.metrics) {
+    result.session.metrics = withLanding(result.session.metrics, { waitedMs: (heldAt ?? endedAt) - askedAt, landingMs: heldAt === null ? 0 : endedAt - heldAt });
+  }
+  if (landing.cleanup) result.notes.push(landing.cleanup);
+
+  if (landing.status === "unlanded") {
+    result.notes.push(`Not landed: ${landing.detail} The pass stays on ${run.laneBranch}; the lane's next start lands it first.`);
+    saveResults(run);
+    run.stopped = `#${n} could not be landed: ${landing.detail}`;
+    log(run.stopped);
+    return "stop";
+  }
+  if (landing.status === "landed") {
+    Object.assign(result, { landed: true, laneHash: result.hash, hash: landing.commit.slice(0, 7), commit: landing.commit, numbers: landing.numbers, pushed: landing.pushed });
+    if (landing.browserCheck?.verdict === "carry") result.notes.push(landing.browserCheck.note);
+    if (!landing.pushed) result.notes.push(`Landed, but the push failed: ${tail(landing.pushOutput ?? "", 400)}`);
+    saveResults(run);
+    if (landing.pushed) run.pullRequest = ensurePullRequest(run, options);
+    log(`#${n} landed on ${run.branch}: ${result.hash}, devlog #${landing.numbers.devlog}${landing.pushed ? ", pushed" : ""}.`, { routine: true });
+  } else {
+    const attempt = landing.attempt ? `\n\nThe numbered commit it tried was ${landing.attempt.slice(0, 9)} (on no branch).` : "";
+    const detail = `Landing parked #${n} at its ${landing.step} step, with ${run.branch} unmoved.\n\n${landing.detail}${attempt}`;
+    const leftOnTarget = [...run.migrationsApplied].filter((name) => !appliedBefore.has(name));
+    Object.assign(result, { status: "failed", landed: false, detail, keptOn: landing.keptOn, leftOnTarget, landing: { step: landing.step, attempt: landing.attempt ?? null, branchMoved: landing.branchMoved } });
+    result.notPosted = postPark(ticket, "failure", detail, landing.keptOn, run);
+    saveResults(run);
+    log(`#${n} parked at Landing (${landing.step})${landing.keptOn ? `, kept on ${landing.keptOn}` : ""}.`);
+    // Kept on no parked branch: the lane's branch is its only home, so it is not reset, and the lane stops.
+    if (!landing.keptOn) {
+      run.stopped = `#${n} parked at Landing, and its pass could not be kept on a parked branch: it stays on ${run.laneBranch}, which was left as it is.`;
+      log(run.stopped);
+      return "stop";
+    }
+  }
+  // The pass is on the branch, or kept parked: the lane starts its next ticket from the new tip.
+  let outcome = "continue";
+  try {
+    resetWorktree({ tree: work, ownBranch: run.laneBranch, tip: git("rev-parse", `refs/heads/${run.branch}`) });
+  } catch (error) {
+    run.stopped = `After #${n}'s landing, the lane's worktree could not be put back on ${run.branch}'s tip: ${error.message}`;
+    log(run.stopped);
+    outcome = "stop";
+  }
+  try {
+    releaseClaim({ dir: run.claims, ticket: n, lane: lane.id, parked: landing.status !== "landed" });
+  } catch (error) {
+    log(`#${n}'s claim could not be released (it lapses when this lane exits): ${error.message}`);
+  }
+  return outcome;
+}
+
+/**
+ * Landing's re-gate (ADR 0008): the run's real gates on the landed commit, run in the lane's own
+ * worktree, which holds its install (Landing's scratch tree has only tracked files). The worktree is
+ * checked out at `head`, detached; landPass puts it back on the lane's branch. The real gates, the
+ * tampering verdict included (ADR 0008); only the browser check is left to Landing, which judges it
+ * by its fingerprint. Null on a pass, else `{ gate, output }`.
+ */
+async function regateLanded(ticket, { base, head }, run) {
+  const n = ticket.number;
+  const moved = gitTry("checkout", "-q", "--detach", head);
+  if (!moved.ok) return { gate: "re-gate", output: `The lane's worktree could not be checked out at the landed commit:\n${moved.stderr}` };
+  // The tampering verdict reads its rules at the tip it lands on, never from the landed tree.
+  const plan = gatePlan({
+    base,
+    diff: git("diff", "--name-status", "-M", "-z", `${base}..${head}`),
+    config,
+    ...(config.tampering ? { patch: git(...PATCH_ARGS, `${base}..${head}`), readAt: atCommit, body: ticket.body ?? "", message: git("log", "-1", "--format=%B", head) } : {}),
+    testNamed: testNamedIn(work),
+  });
+  const failed = await projectGates(plan, {
+    values: { base, N: n, qaUrl: runQaUrl(), cache: gateCache() },
+    laneEnv: laneVariables(lane ? laneValues(lane, config) : null),
+    browserCheck: () => null,
+    stopStray: (when) => stopStray(`${when} for #${n}'s landing`),
+  });
+  if (failed) return failed;
+  const docs = docCheck(run.runner, work, ["--head"]);
+  return docs.ok ? null : { gate: "doc-check", output: `${docs.stdout}\n${docs.stderr}` };
+}
+
+/** Landing's migration, the re-gate's last step: the landed commit's new migrations, applied from the lane's worktree at it. */
+function migrateLanded(names, run) {
+  const pending = names.filter((name) => !run.migrationsApplied.has(name));
+  if (pending.length === 0) return null;
+  log(`Applying ${pending.join(", ")} to ${targetName()}, the landing's last gate.`);
+  const applied = applyMigrations(pending, run.migrationsApplied, { migrations: config.migrations, values: { targetUrl: migrationTargetUrl, base: git("rev-parse", "HEAD^") } });
+  return applied.ok ? null : { gate: `migration on ${targetName()}`, output: applied.output };
+}
+
+/**
+ * Landing's rebuild of the generated rows, on the numbered tree: the doc indexes, as a session writes
+ * them (`node tools/doc-index.mjs`). No hotspot row names a command of its own.
+ */
+function rebuildGenerated(dir) {
+  if (!existsSync(join(dir, "tools", "doc-index.mjs"))) return { gate: "rebuild", output: "The landed tree has no tools/doc-index.mjs to rebuild its generated files with." };
+  const built = exec("node", [join("tools", "doc-index.mjs")], { cwd: dir });
+  return built.ok ? null : { gate: "rebuild", output: `${built.stdout}\n${built.stderr}` };
+}
+
+/**
+ * A restarted lane's unlanded passes, landed before it claims new work (D13): the commits its branch
+ * held, kept past the worktree's reset (keepUnlanded), oldest first, each given its action by
+ * landing-lock.mjs `restartSteps`. A recorded pass is landed as any pass is, under a claim taken
+ * first: while this lane was down its claim lapsed, and the other lane may be building it again. One
+ * never recorded as a pass is kept on a parked branch, never landed; one the last start landed or
+ * parked but died before recording has its result finished. The keep is dropped only once every
+ * commit is on the phase branch or a parked branch. "continue" or "stop".
+ */
+async function landUnlanded(byNumber, run, options) {
+  const self = String(lane.id);
+  const found = unlandedCommits({ root: ROOT, branch: run.branch, laneBranch: run.laneBranch });
+  let kept = true; // every commit is somewhere other than the keep
+  const keep = (commit, n, why) => {
+    const parked = keepParked(ROOT, run.branch, n ?? "unknown", commit);
+    if (!parked.keptOn) kept = false;
+    log(`${commit.slice(0, 7)}${n ? ` (#${n})` : ""} ${why}, so it was not landed${parked.keptOn ? `; it is kept on ${parked.keptOn}` : `, and could not be kept on a parked branch (${parked.output}); it stays on ${unlandedRef(run.laneBranch)}`}.`);
+    return parked.keptOn;
+  };
+  for (const { commit, ticket: n, action, result, keptOn } of restartSteps({ found, results: run.all, lane: self })) {
+    const ticket = byNumber.get(n) ?? { number: n, title: result?.title ?? `#${n}`, labels: [], body: "" };
+    if (action === "skip") continue;
+    if (action === "keep") {
+      keep(commit, n, `was on ${run.laneBranch} with no recorded pass`);
+      continue;
+    }
+    if (action === "record-landed") {
+      const landedAs = gitTry("log", "-1", "--format=%H", "-i", "-E", `--grep=Closes #${n}([^0-9]|$)`, run.branch).stdout;
+      Object.assign(result, { landed: true, laneHash: result.hash, hash: landedAs.slice(0, 7), commit: landedAs });
+      (result.notes ??= []).push("Landed by the lane's last start, which stopped before it recorded the landing (its numbers and push are not known).");
+      saveResults(run);
+      continue;
+    }
+    if (action === "record-parked") {
+      const detail = `Landing parked #${n} on the lane's last start, which stopped before it posted the park. ${run.branch} is unmoved; the pass is kept as it passed.`;
+      Object.assign(result, { status: "failed", landed: false, detail, keptOn, leftOnTarget: [] });
+      result.notPosted = postPark(ticket, "failure", detail, keptOn, run);
+      saveResults(run);
+      continue;
+    }
+    // "land": claimed first, unless the other lane holds the ticket now.
+    const claim = takeClaim({ dir: run.claims, lane: self, choose: (claims) => (claims.some((c) => c.ticket === n && c.lane !== self) ? null : n) });
+    if (claim.ticket === null) {
+      const other = claim.claims.find((c) => c.ticket === n)?.lane;
+      const on = keep(commit, n, `is being built again by lane ${other}, which claimed it while this lane was down`);
+      Object.assign(result, { status: "failed", landed: false, keptOn: on, detail: `Lane ${other} claimed and built #${n} again while lane ${self} was down, so this lane's pass was not landed${on ? `; it is kept on ${on}` : ""}.` });
+      saveResults(run);
+      continue;
+    }
+    log(`#${n}: a pass the lane's last start never landed (${commit.slice(0, 7)}); landing it before any new ticket.`);
+    if ((await landPass(ticket, result, commit, run, options)) === "stop") return "stop";
+  }
+  if (kept) dropUnlanded({ root: ROOT, laneBranch: run.laneBranch });
+  return "continue";
 }
 
 /** A ticket is over: its row goes into the table, the live row moves on, and a failure or a park says so on the desktop. */
@@ -1873,6 +2353,20 @@ function ticketFinished(result) {
   if (result.status !== "built") notify(`#${result.number} ${result.status}`, `${result.title}${result.status === "parked" ? ": it needs your answer." : ": read the report."}`);
 }
 
+/**
+ * A lane's claim on `n` goes, and the ticket is listed as parked tonight (claim.mjs releaseClaim): the
+ * other lane read its labels at its own start, so without the list it would build it again (#37).
+ * For a park, and for a ticket the runner's own error failed. A claim that can't be released lapses
+ * when this lane exits, and the list then lacks it, as the log says.
+ */
+function releaseParked(run, n) {
+  try {
+    releaseClaim({ dir: run.claims, ticket: n, lane: lane.id, parked: true });
+  } catch (error) {
+    log(`#${n}'s claim could not be released (it lapses when this lane exits): ${error.message}`);
+  }
+}
+
 async function park(ticket, base, kind, detail, run, session) {
   const n = ticket.number;
   let keptOn = null;
@@ -1886,7 +2380,31 @@ async function park(ticket, base, kind, detail, run, session) {
     git("reset", "--hard", base);
   }
   await freeTicketPorts();
+  const notPosted = postPark(ticket, kind, detail, keptOn, run);
+  if (lane) releaseParked(run, n);
 
+  // Applied to the target, but its file went with the reset: the target holds what the branch does not.
+  const leftOnTarget = [...run.migrationsApplied].filter((name) => migrationFiles.has(name) && !existsSync(join(work, migrationFiles.get(name))));
+  const stamped = recordResult(run, {
+    number: n,
+    title: ticket.title,
+    status: kind === "question" ? "parked" : "failed",
+    detail,
+    keptOn,
+    leftOnTarget,
+    notPosted,
+    session,
+  });
+  log(`#${n} ${kind === "question" ? "parked (needs the owner)" : "failed"}${keptOn ? `, kept on ${keptOn}` : ""}.`, { routine: true });
+  ticketFinished(stamped);
+}
+
+/**
+ * A park told on GitHub: the issue's comment and its label (`kind`, "question" or "failure"), and the
+ * ticket set aside for this run. Returns true when either call did not get through (`notPosted`).
+ */
+function postPark(ticket, kind, detail, keptOn, run) {
+  const n = ticket.number;
   const heading = kind === "question" ? "The phase run parked this ticket: it needs your decision." : "The phase run could not finish this ticket.";
   const body = [
     heading,
@@ -1904,21 +2422,7 @@ async function park(ticket, base, kind, detail, run, session) {
   const labelled = exec("gh", ["issue", "edit", String(n), "--add-label", PARK_LABEL[kind], "--remove-label", READY_LABEL]).ok;
   // Set aside for this run either way; GitHub only knows if the two calls got through.
   ticket.labels = [...ticket.labels.filter((label) => label !== READY_LABEL), PARK_LABEL[kind]];
-
-  // Applied to the target, but its file went with the reset: the target holds what the branch does not.
-  const leftOnTarget = [...run.migrationsApplied].filter((name) => migrationFiles.has(name) && !existsSync(join(ROOT, migrationFiles.get(name))));
-  const stamped = recordResult(run, {
-    number: n,
-    title: ticket.title,
-    status: kind === "question" ? "parked" : "failed",
-    detail,
-    keptOn,
-    leftOnTarget,
-    notPosted: !(commented && labelled),
-    session,
-  });
-  log(`#${n} ${kind === "question" ? "parked (needs the owner)" : "failed"}${keptOn ? `, kept on ${keptOn}` : ""}.`, { routine: true });
-  ticketFinished(stamped);
+  return !(commented && labelled);
 }
 
 /**
@@ -1932,7 +2436,7 @@ function measureTicketRun(ticket, startedAt, sessionId, gatesMs) {
       startedAt,
       endedAt: Date.now(),
       gatesMs,
-      hookMs: hookTime(join(STATE, "stop-check-log.jsonl"), ticket.number, startedAt),
+      hookMs: hookTime(join(sessionState(), "stop-check-log.jsonl"), ticket.number, startedAt),
       prices: loadPrices(),
       rules: stepRules(config),
     });
@@ -1963,7 +2467,7 @@ function sessionFacts(result, previous) {
  * run's frozen copy of the runner and its config (snapshot.mjs, ADR 0005); PHASE_RUN_ROOT points
  * the copy's own scripts (stop-tests.mjs) back at the repo they check.
  */
-function runVariables({ ticket, base, spec, runner, root }) {
+function runVariables({ ticket, base, spec, runner, root, lane = null }) {
   return {
     PHASE_RUN: "1",
     PHASE_RUN_TICKET: String(ticket),
@@ -1971,6 +2475,26 @@ function runVariables({ ticket, base, spec, runner, root }) {
     ...(spec ? { PHASE_RUN_SPEC: String(spec) } : {}),
     PHASE_RUN_RUNNER: runner,
     PHASE_RUN_ROOT: root,
+    ...laneVariables(lane),
+  };
+}
+
+/**
+ * A lane's own variables (0.7.0, D2, D4), from lane.mjs laneValues: its row's env, then
+ * PHASE_RUN_LANE (doc-check then accepts the number token, ADR 0006) and the QA port, QA database
+ * and test prefix the project's tools read. Empty without a lane. The session gets them
+ * (runVariables), and so does every gate the runner runs for the lane, Landing's re-gate included
+ * (projectGates). Every lane names every value another lane names (config.mjs parseLanes), so none
+ * is left to what a lane inherits. A row's env never names a PHASE_RUN_* variable (the loader).
+ */
+function laneVariables(lane) {
+  if (!lane) return {};
+  return {
+    ...(lane.env ?? {}),
+    PHASE_RUN_LANE: lane.id,
+    ...(lane.qaPort ? { PHASE_RUN_QA_PORT: lane.qaPort } : {}),
+    ...(lane.qaDatabase ? { PHASE_RUN_QA_DATABASE: lane.qaDatabase } : {}),
+    ...(lane.testDbPrefix ? { PHASE_RUN_TEST_DB_PREFIX: lane.testDbPrefix } : {}),
   };
 }
 
@@ -1981,8 +2505,9 @@ async function runTicket(ticket, options, run) {
   let sessionId = randomUUID();
   // The session the ticket's night row prices, however the ticket ends (recordNight).
   run.ticketSession = { number: n, sessionId };
-  const env = { ...sessionEnv(), ...runVariables({ ticket: n, base, spec: options.spec, runner: run.runner, root: ROOT }) };
-  rmSync(join(STATE, `verdict-${n}.json`), { force: true });
+  // The session's root is the lane's worktree (ADR 0007): its hooks, receipts and stop check judge its own tree.
+  const env = { ...sessionEnv(), ...runVariables({ ticket: n, base, spec: options.spec, runner: run.runner, root: work, lane: lane ? laneValues(lane, config) : null }) };
+  rmSync(join(sessionState(), `verdict-${n}.json`), { force: true });
   rmSync(stopCheckMarker(n), { force: true });
   // What every call for this ticket shares. Its settings file (the run's
   // rules, the project's, the run's variables) is written for either kind of
@@ -2005,7 +2530,8 @@ async function runTicket(ticket, options, run) {
     SPEC: options.spec ? `#${options.spec}` : "none (a one-off ticket)",
     BASE: base,
     FRONTEND: ticket.labels.includes("frontend") ? "yes" : "no",
-    RUNNER: relative(ROOT, run.runner).replaceAll("\\", "/"), // the copy, as the session's shell names it
+    RUNNER: relative(work, run.runner).replaceAll("\\", "/"), // the copy, as the session's shell names it (from a lane's worktree, a ../ path)
+    ...(lane ? { LANE: String(lane.id) } : {}), // the numbering paragraph (promptValues LANE_NUMBERS)
   };
   Object.assign(values, promptValues(config, projectProse, values));
 
@@ -2060,8 +2586,7 @@ async function runTicket(ticket, options, run) {
     gatesMs += Date.now() - gatesFrom;
     if (gates.ok) {
       await freeTicketPorts();
-      await finishBuilt(ticket, base, options, run, measured(facts));
-      return "continue";
+      return await finishBuilt(ticket, base, options, run, measured(facts), gates.fingerprint);
     }
     if (round >= options.fixRounds) {
       await park(
@@ -2098,7 +2623,8 @@ async function runTicket(ticket, options, run) {
 
 /** The lines for one result that a person must act on: its assumptions, steps, findings and hand-offs. */
 function actionLines(results) {
-  const pick = (key) => results.flatMap((r) => (r[key] ?? []).map((line) => `#${r.number}: ${line}`));
+  // A lane's result says which lane built it (#38); a `foundElsewhere` item may be `{ finding, outcome }` (findings.mjs).
+  const pick = (key) => results.flatMap((r) => (r[key] ?? []).map((line) => `#${r.number}${r.lane != null ? ` (lane ${r.lane})` : ""}: ${findingText(line)}`));
   return {
     assumptions: pick("assumptions"),
     byHand: pick("runByHand"),
@@ -2132,18 +2658,20 @@ function docHealthSection(table) {
  * context and its size. Size beside cost is what the size budget
  * (phaseRun.ticketSize) is retuned from.
  */
-function scoreboardSection(results) {
+function scoreboardSection(results, { lanes = false } = {}) {
   const out = ["### Scoreboard", ""];
-  out.push("| # | Ticket | Result | Min | Claude | Tests | Checks | Browser | Slept | Reviews | Hook | Gates | Cost | Peak | Criteria | Areas | Words |");
-  out.push("|---|---|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|");
+  // With lanes, a Lane column, and each result as where it stands (landed, unlanded, parked at Landing).
+  out.push(`| # |${lanes ? " Lane |" : ""} Ticket | Result | Min | Claude | Tests | Checks | Browser | Slept | Reviews | Hook | Gates | Cost | Peak | Criteria | Areas | Words |`);
+  out.push(`|---|${lanes ? "---|" : ""}---|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|`);
   const cell = (value) => (value == null ? "—" : String(value));
   for (const r of results) {
     const m = r.session?.metrics ?? {};
     const t = m.minutes ?? {};
     const fixes = Math.max(0, (r.session?.calls ?? 1) - 1);
-    const result = r.status === "built" ? `built${fixes ? `, ${fixes} fix` : ""}` : r.status;
+    const status = lanes ? laneState(r) : r.status;
+    const result = r.status === "built" ? `${status}${fixes ? `, ${fixes} fix` : ""}` : status;
     out.push(
-      `| ${r.number} | ${r.title.replace(/\|/g, "/").slice(0, 48)} | ${result} | ${cell(ticketMinutes(r))} | ${cell(t.claude)} | ${cell(t.tests)} | ${cell(t.checks)} | ${cell(t.browser)} | ${cell(t.waiting)} | ${cell(t.reviewing)} | ${cell(t.hook)} | ${cell(t.gates)} | ${m.costUsd == null ? "—" : `$${m.costUsd.toFixed(2)}`} | ${m.peakContext ? `${Math.round(m.peakContext / 1000)}K` : "—"} | ${cell(m.size?.criteria)} | ${cell(m.size?.areas)} | ${cell(m.size?.words)} |`,
+      `| ${r.number} |${lanes ? ` ${cell(r.lane)} |` : ""} ${r.title.replace(/\|/g, "/").slice(0, 48)} | ${result} | ${cell(ticketMinutes(r))} | ${cell(t.claude)} | ${cell(t.tests)} | ${cell(t.checks)} | ${cell(t.browser)} | ${cell(t.waiting)} | ${cell(t.reviewing)} | ${cell(t.hook)} | ${cell(t.gates)} | ${m.costUsd == null ? "—" : `$${m.costUsd.toFixed(2)}`} | ${m.peakContext ? `${Math.round(m.peakContext / 1000)}K` : "—"} | ${cell(m.size?.criteria)} | ${cell(m.size?.areas)} | ${cell(m.size?.words)} |`,
     );
   }
   const costs = results.map((r) => r.session?.metrics?.costUsd).filter((c) => c != null);
@@ -2152,10 +2680,33 @@ function scoreboardSection(results) {
   return out;
 }
 
+/**
+ * A lane's night across every lane (#38, D14): the results every lane recorded under this night (the
+ * shared runner copy's run), read from the branch folder, and the night's findings from its record.
+ * Null for a run without lanes, whose report reads its own results only.
+ */
+function nightOf(run) {
+  if (!run.night) return null;
+  const results = branchResults(run.claims).filter((r) => r.night === run.night);
+  let findings = [];
+  let problem = null;
+  try {
+    findings = readFindings(run.claims).filter((row) => row.night === run.night);
+  } catch (error) {
+    problem = error.message;
+  }
+  const lanes = [...new Set(results.map((r) => r.lane))].sort();
+  return { results, findings, problem, lanes };
+}
+
 function report(run, options, remaining, { final = true } = {}) {
-  const built = run.results.filter((r) => r.status === "built");
-  const parked = run.results.filter((r) => r.status === "parked");
-  const failed = run.results.filter((r) => r.status === "failed");
+  const night = nightOf(run);
+  const results = night ? night.results : run.results;
+  const atLanding = (r) => night && laneState(r) === "parked at Landing";
+  const built = results.filter((r) => r.status === "built");
+  const parked = results.filter((r) => r.status === "parked" || atLanding(r));
+  const failed = results.filter((r) => r.status === "failed" && !atLanding(r));
+  const laneOf = (r) => (night && r.lane != null ? ` · lane ${r.lane}` : "");
   const out = [];
   const thousands = (tokens) => `${Math.round(tokens / 1000)}K`;
   const money = (facts) =>
@@ -2171,17 +2722,24 @@ function report(run, options, remaining, { final = true } = {}) {
   out.push(`## Phase run report: ${run.branch}`, "");
   // The Brigade version whose hooks judged every ticket (brigade.mjs, D14).
   const version = run.brigade ? ` · Brigade ${run.brigade}` : "";
-  out.push(`${new Date().toISOString().slice(0, 16).replace("T", " ")} UTC${version} · built ${built.length} · parked ${parked.length} · failed ${failed.length}`, "");
+  const count = (state) => results.filter((r) => laneState(r) === state).length;
+  const counts = night
+    ? `lanes ${night.lanes.join(", ") || "none yet"} · landed ${count("landed")} · unlanded ${count("unlanded")} · parked ${parked.length} · failed ${failed.length}`
+    : `built ${built.length} · parked ${parked.length} · failed ${failed.length}`;
+  out.push(`${new Date().toISOString().slice(0, 16).replace("T", " ")} UTC${version} · ${counts}`, "");
+  // Only the last lane out writes the night's whole report; an earlier lane's says who is still building.
+  for (const other of run.othersLive ?? []) out.push(`🕒 Lane ${other} is still running: its report, written when the last lane stops, is the night's whole report.`, "");
   if (run.brigade && run.stamp && run.stamp !== run.brigade) {
     out.push(`This project's runner is stamped ${run.stamp}; Brigade ${run.brigade} judged the run. \`/update-workflow\` brings the runner to the plugin's version.`, "");
   }
   if (run.catalog && !run.catalog.catalog) out.push(`⚠ Brigade's auto-update was not switched off for this run: ${run.catalog.why}`, "");
   if (!final) out.push("🕒 **In progress.** This file is rewritten after each ticket; the run had not finished when it was saved. If no later version exists, the run stopped here.", "");
   if (run.stopped) out.push(`🚨 **The run stopped early.** ${run.stopped}`, "");
-  if (run.results.length) out.push(...scoreboardSection(run.results));
+  if (results.length) out.push(...scoreboardSection(results, { lanes: Boolean(night) }));
 
-  // A ticket this run built again is reported once, under this run's own sections.
-  const carried = (run.carried ?? []).filter((c) => !run.results.some((r) => r.number === c.number));
+  // A ticket this run built again is reported once, under this run's own sections; with lanes, a
+  // restart's earlier results of the same night are tonight's, never carried.
+  const carried = (run.carried ?? []).filter((c) => !results.some((r) => r.number === c.number) && !(night && c.night === run.night));
   if (carried.length) {
     out.push("### From an earlier run that stopped before writing its report", "");
     for (const r of carried) {
@@ -2202,9 +2760,7 @@ function report(run, options, remaining, { final = true } = {}) {
     out.push("");
   }
 
-  if (built.length) out.push("### Built", "");
-  for (const r of built) {
-    out.push(`**#${r.number} ${r.title}** · \`${r.hash}\``);
+  const builtLines = (r) => {
     if (r.summary) out.push(`- ${r.summary}`);
     out.push(`- Size: ${r.stat || "no diff"}`);
     if (r.outside.length) out.push(`- ⚠ Files outside the areas the ticket named: ${r.outside.map((f) => `\`${f}\``).join(", ")}`);
@@ -2216,13 +2772,35 @@ function report(run, options, remaining, { final = true } = {}) {
     for (const note of ledgerNote(r)) out.push(`- ${note}`);
     if (r.session?.watch) out.push(`- The whole session, to read back: \`claude attach ${r.session.watch}\``);
     out.push(`- Effort: ${effort(r.session)}`, "");
+  };
+  if (night) {
+    // A lane's pass is landed (on the branch) or unlanded (still on its lane's branch, for its restart).
+    const landed = built.filter((r) => laneState(r) === "landed");
+    const unlanded = built.filter((r) => laneState(r) === "unlanded");
+    if (landed.length) out.push("### Landed", "");
+    for (const r of landed) {
+      out.push(`**#${r.number} ${r.title}**${laneOf(r)} · \`${r.hash}\``);
+      builtLines(r);
+    }
+    if (unlanded.length) out.push("### Unlanded: passed, not on the branch yet", "");
+    for (const r of unlanded) {
+      out.push(`**#${r.number} ${r.title}**${laneOf(r)} · \`${r.hash}\`${r.laneBranch ? ` on \`${r.laneBranch}\`` : ""}`);
+      builtLines(r);
+    }
+  } else {
+    if (built.length) out.push("### Built", "");
+    for (const r of built) {
+      out.push(`**#${r.number} ${r.title}** · \`${r.hash}\``);
+      builtLines(r);
+    }
   }
 
   const lines = actionLines(built);
   for (const [title, list] of [
     ["Assumptions made (confirm or reverse each)", lines.assumptions],
     ["Run by hand", lines.byHand],
-    ["Found in other tickets' code (for the finish, or a ticket of its own)", lines.elsewhere],
+    // With lanes, the findings section below lists these from the record, with their outcomes.
+    ["Found in other tickets' code (for the finish, or a ticket of its own)", night ? [] : lines.elsewhere],
     ["Handed forward (owed by a later ticket: check it took it)", lines.handed],
   ]) {
     if (!list.length) continue;
@@ -2231,17 +2809,24 @@ function report(run, options, remaining, { final = true } = {}) {
     out.push("");
   }
 
+  if (night && (night.findings.length || night.problem)) {
+    out.push("### Findings", "", `What the night's sessions found in other tickets' code, from the record (\`${relative(ROOT, findingsPath(run.claims)).replaceAll("\\", "/")}\`). Give each open one its outcome: fixed, ticketed, taken or dropped.`, "");
+    if (night.problem) out.push(`⚠ The findings record can't be read: ${night.problem}`, "");
+    for (const row of night.findings) out.push(`- #${row.ticket}${row.lane != null ? ` (lane ${row.lane})` : ""}: ${row.finding} · ${row.outcome ?? "**open**"}`);
+    if (night.findings.length) out.push("");
+  }
+
   const unposted = (r) =>
     r.notPosted
       ? `⚠ GitHub could not be reached, so this was not posted on the issue. The ticket still carries \`${READY_LABEL}\` there, and the next run will try it again from the start.`
       : "";
 
   if (parked.length) out.push("### Parked: your decision is needed", "");
-  for (const r of parked) out.push(`**#${r.number} ${r.title}**`, "", r.detail, "", r.keptOn ? `Work kept on \`${r.keptOn}\`.` : "", unposted(r), ...ledgerNote(r), "");
+  for (const r of parked) out.push(`**#${r.number} ${r.title}**${laneOf(r)}`, "", r.detail, "", r.keptOn ? `Work kept on \`${r.keptOn}\`.` : "", unposted(r), ...ledgerNote(r), "");
 
   if (failed.length) out.push("### Failed", "");
   for (const r of failed) {
-    out.push(`**#${r.number} ${r.title}**`, "", r.detail, "", r.keptOn ? `Work kept on \`${r.keptOn}\`.` : "", unposted(r), ...ledgerNote(r));
+    out.push(`**#${r.number} ${r.title}**${laneOf(r)}`, "", r.detail, "", r.keptOn ? `Work kept on \`${r.keptOn}\`.` : "", unposted(r), ...ledgerNote(r));
     if (r.leftOnTarget?.length) out.push(`🚨 ${targetName()} holds ${r.leftOnTarget.join(", ")} from this ticket, which is not on the phase branch.`);
     if (r.session?.watch) out.push(`The whole session, to read back: \`claude attach ${r.session.watch}\``);
     out.push(`Effort: ${effort(r.session)}`, "");
@@ -2267,6 +2852,8 @@ function report(run, options, remaining, { final = true } = {}) {
 async function main() {
   const options = parseArgs(process.argv.slice(2));
   const { branch, current, remote, trim } = await preflight(options);
+  // A lane reads "built" off the phase branch: its own HEAD holds passes not landed yet (#34).
+  if (lane) builtRef = branch;
   // Only a dry run gets here without a remote, and its tickets are on GitHub.
   if (!remote) {
     console.log("\nNo tickets listed: they are read from GitHub, and this repo has no remote yet.\n");
@@ -2309,10 +2896,20 @@ async function main() {
   if (!installed) die(`Brigade is not installed for this repo: \`claude plugin list --json\` lists no brigade@… install for ${ROOT}, and none at user scope. Install it, then start the run again.`);
 
   mkdirSync(STATE, { recursive: true });
-  const lock = join(STATE, "lock");
-  writeFileSync(lock, `pid ${process.pid}, started ${new Date().toISOString()}, branch ${branch}\n`);
+  // A lane's lock sits under .phase-run/ itself, so a lane started on a detached checkout finds its branch (lane.mjs joinBranch).
+  const lock = lane ? laneLockPath(STATE, lane.id) : join(STATE, "lock");
+  if (lane) writeLaneLock(STATE, { id: lane.id, pid: process.pid, branch, at: Date.now() });
+  else writeFileSync(lock, `pid ${process.pid}, started ${new Date().toISOString()}, branch ${branch}\n`);
   const release = () => rmSync(lock, { force: true });
   process.on("exit", release);
+  // The hand-back (D13): the last lane out, its own lock gone first, leaves the primary checkout on
+  // the phase branch's tip, however it exits. While another lane runs, the checkout is left alone.
+  if (lane) {
+    process.on("exit", () => {
+      const back = handBack({ root: ROOT, state: STATE, branch, lane: lane.id });
+      log(`Hand-back: ${back.why}`, { routine: back.handedBack });
+    });
+  }
   process.on("exit", () => screen?.clearLive()); // a run stopped mid-ticket leaves no half-drawn live row
   // A background session outlives this script (it belongs to Claude Code's
   // background service), so a run that ends for any reason stops its own.
@@ -2323,7 +2920,9 @@ async function main() {
   });
   process.on("SIGINT", () => process.exit(130));
 
-  if (current !== branch) {
+  // A lane never checks a branch out in the primary checkout: it builds in its own worktree (below).
+  const roots = lane ? laneRoots({ root: ROOT, branch, lane }) : null;
+  if (!lane && current !== branch) {
     if (gitTry("rev-parse", "--verify", "--quiet", branch).ok) git("checkout", branch);
     else {
       // A new phase branch starts from main as GitHub has it, or the pull
@@ -2338,7 +2937,10 @@ async function main() {
 
   const run = {
     branch,
-    dir: join(STATE, branch),
+    // Two roots (ADR 0007): a lane's results and logs are its own folder in the primary checkout.
+    dir: roots ? roots.runDir : join(STATE, branch),
+    laneBranch: roots?.branch ?? null, // where a lane's passing commits stay, unlanded
+    claims: roots ? roots.copyDir : null, // the branch's folder in the primary checkout, whose claim file both lanes share (claim.mjs)
     runId: new Date().toISOString(),
     results: [], // this run's
     all: [], // every run's on this branch, as results.json holds them
@@ -2357,13 +2959,29 @@ async function main() {
   run.all = loadResults(resultsFile(run));
   run.carried = run.all.filter((result) => !result.reported);
   const reportFile = join(run.dir, `report-${run.runId.slice(0, 16).replace(/[:T]/g, "-")}.md`);
-  mkdirSync(join(STATE, "tmp"), { recursive: true }); // where a session keeps its scratch files
   logFile = join(run.dir, "run.log");
   // One frozen copy of the runner and its config judges the whole run (snapshot.mjs, ADR 0005):
   // a restart after a crash reuses it, and is refused when the live runner's code changed since.
+  // Both lanes share the branch's one copy: the first to start takes it, the second reuses it. A
+  // lane's live runner is the phase branch's tip, as its worktree holds it, never whatever the
+  // primary checkout has out (main, or detached by a landing).
+  let made = null;
+  if (lane) {
+    try {
+      // A lane with no other lane live starts a new night: the last night's parks are cleared.
+      if (mayFinishCopy(STATE, { id: lane.id, branch })) clearParked(run.claims);
+      // A restart's unlanded passes are kept on a hidden ref, so the reset to the tip loses none (#37).
+      const { kept } = keepUnlanded({ root: ROOT, branch, laneBranch: roots.branch });
+      made = prepareWorktree({ root: ROOT, tree: roots.tree, branch, ownBranch: roots.branch, kept });
+    } catch (error) {
+      die(`Lane ${lane.id} can't start: ${error.message}`);
+    }
+  }
   try {
-    const snapshot = takeSnapshot({ root: ROOT, runDir: run.dir, runId: run.runId, commit: git("rev-parse", "HEAD"), at: Date.now(), brigade: run.brigade });
+    const snapshot = takeSnapshot({ root: roots ? roots.tree : ROOT, runDir: roots ? roots.copyDir : run.dir, runId: run.runId, commit: made ? made.tip : git("rev-parse", "HEAD"), at: Date.now(), brigade: run.brigade });
     run.runner = snapshot.dir;
+    // A lane's night is the shared copy's run (ADR 0005): both lanes, and a restart, stamp the same one (#38).
+    if (lane) run.night = snapshot.manifest.runId;
     log(snapshot.reused ? `Restarted on the runner copy taken ${snapshot.manifest.takenAt} (run ${snapshot.manifest.runId}).` : `Runner copy taken at ${snapshot.manifest.commit.slice(0, 7)}.`, { routine: true });
   } catch (error) {
     die(error.message);
@@ -2373,6 +2991,27 @@ async function main() {
   const frozen = loadRunConfig(run.runner);
   if (frozen.error) die(`The run's copy of the config cannot be read (${run.runner}): ${frozen.error}`);
   config = frozen.config;
+  // The lane's worktree, now at the phase branch's tip, set up by the copy's rules (D8). Every
+  // refusal names what to fix. From here on the session's root is the worktree.
+  if (lane) {
+    try {
+      const live = lane;
+      lane = laneRow(config, live.id); // the copy's row judges the night
+      if (resolve(ROOT, lane.worktree) !== roots.tree) {
+        throw new Error(`the run's copy names its worktree ${lane.worktree}, and the live config ${live.worktree}. A restart keeps the copy's rules: put the row back, or delete the copy to start fresh.`);
+      }
+      runQaUrl();
+      const setup = config.lanes.worktreeSetup;
+      const problem = ignoredImportsProblem(ignoredImports(roots.tree, [...setup.copy, ...setup.leaves]));
+      if (problem) throw new Error(problem);
+      setupWorktree({ root: ROOT, tree: roots.tree, setup, shell: (command, cwd) => shell(command, {}, cwd) });
+      log(`Lane ${lane.id}: ${made.reused ? "reused" : "made"} ${roots.tree} on ${roots.branch}, at ${made.tip.slice(0, 7)}.`);
+    } catch (error) {
+      die(`Lane ${lane.id} can't start: ${error.message}`);
+    }
+    work = roots.tree;
+  }
+  mkdirSync(join(sessionState(), "tmp"), { recursive: true }); // where a session keeps its scratch files
   liveFile = join(run.dir, "live.json");
   const appliedFile = join(run.dir, "migrations-applied.json");
   if (existsSync(appliedFile)) for (const name of JSON.parse(readFileSync(appliedFile, "utf8"))) run.migrationsApplied.add(name);
@@ -2380,8 +3019,11 @@ async function main() {
   // "6 of 10": the tickets this run can reach (ready now, or waiting only on
   // another ticket), up to --max. The time per ticket starts at the branch's
   // own average, then follows this run's.
+  const tonight = buildableTonight({ byNumber, hold: (ticket) => holdReason(ticket, byNumber), done: blockerDone });
   const reachable = inScope.filter((ticket) => {
     const reason = holdReason(ticket, byNumber);
+    // A lane counts what its row takes and can be built tonight (claim.mjs buildableTonight): never a ticket behind a park.
+    if (lane) return takesTicket(lane.takes, ticket) && tonight(ticket);
     return reason === null || reason.startsWith("waiting on #");
   });
   const earlier = run.all.map(ticketMinutes).filter((minutes) => minutes != null);
@@ -2398,7 +3040,7 @@ async function main() {
   screen.begin(progress);
 
   log(
-    `Run started on ${branch}: ${limit} ticket(s)${options.until ? `, stopping after #${options.until}` : ""}, ` +
+    `Run started on ${branch}${lane ? ` as lane ${lane.id}, in ${work}` : ""}: ${limit} ticket(s)${options.until ? `, stopping after #${options.until}` : ""}, ` +
       `${options.minutes} min each, ${options.fixRounds} fix rounds, Brigade ${run.brigade}.`,
     { routine: true },
   );
@@ -2406,8 +3048,27 @@ async function main() {
   showProgress();
 
   let outcome = "continue";
+  // A restarted lane lands its own unlanded passes before it claims new work (D13).
+  if (lane) {
+    try {
+      outcome = await landUnlanded(byNumber, run, options);
+    } catch (error) {
+      run.stopped = `The lane's unlanded passes could not be landed: ${error.message}`;
+      log(run.stopped);
+      outcome = "stop";
+    }
+    writeFileSync(appliedFile, JSON.stringify([...run.migrationsApplied], null, 2)); // a landing may have migrated
+  }
   while (outcome === "continue" && run.results.length < options.max) {
-    const next = inScope.find((ticket) => holdReason(ticket, byNumber) === null);
+    let next;
+    try {
+      next = await nextTicket(inScope, byNumber, run);
+    } catch (error) {
+      // A lane's claim file or its lock refused (claim.mjs): the run still reaches its report.
+      run.stopped = `No ticket could be claimed: ${error.message}`;
+      log(run.stopped);
+      break;
+    }
     if (!next) break;
     if (!(await waitForInternet(waitDeadline(options), `before #${next.number}`))) {
       run.stopped = `The internet connection did not come back within ${options.waitHours} hours, so #${next.number} was never started.`;
@@ -2426,6 +3087,8 @@ async function main() {
     } catch (error) {
       log(`#${next.number}: the runner itself hit an error and stopped: ${error.message}`);
       ticketFinished(recordResult(run, { number: next.number, title: next.title, status: "failed", detail: `The runner stopped on an error of its own:\n\n\`\`\`\n${error.stack ?? error.message}\n\`\`\`\n\nThe branch was left as it was. Look before running again.`, keptOn: null, session: null }));
+      // "Look before running again": the other lane, still live, must not build it tonight either.
+      if (lane) releaseParked(run, next.number);
       outcome = "stop";
     }
     writeFileSync(appliedFile, JSON.stringify([...run.migrationsApplied], null, 2));
@@ -2439,19 +3102,26 @@ async function main() {
     .filter(({ ticket }) => !run.results.some((r) => r.number === ticket.number))
     .map(({ ticket, reason }) => `#${ticket.number} ${ticket.title}: ${beyond(ticket) ? AFTER_UNTIL : (reason ?? "ready, not reached this run")}`);
 
-  const health = exec("node", ["tools/doc-check.mjs", "--report"]);
+  const health = docCheck(run.runner, work, ["--report"]);
   run.docHealth = health.ok ? health.stdout : null;
   // A night that pushed nothing still reports on an earlier night's pull request.
   if (!run.pullRequest) {
     const existing = exec("gh", ["pr", "view", branch, "--json", "url", "-q", ".url"]);
     if (existing.ok && existing.stdout) run.pullRequest = existing.stdout;
   }
+  // A lane's report reads every lane's night (#38). Only the last lane out posts it: an earlier
+  // lane's is the night so far, and says which lanes still run. Its own lock goes first, so of two
+  // lanes reaching here together the second sees the first gone; at worst both post, never neither.
+  if (lane) release();
+  if (lane) run.othersLive = liveLanes(STATE).filter((lock) => lock.branch === branch && String(lock.lane) !== String(lane.id)).map((lock) => String(lock.lane));
+  const lastOut = !lane || run.othersLive.length === 0;
   const text = report(run, options, remaining);
   writeFileSync(reportFile, text);
   for (const result of run.all) result.reported = true;
   saveResults(run);
-  finishSnapshot(run.runner); // the run reached its report: the next one takes a fresh copy
-  if (run.pullRequest) exec("gh", ["pr", "comment", branch, "--body-file", reportFile]);
+  // The run reached its report: the next one takes a fresh copy. Both lanes share it, so only the last lane out marks it.
+  if (lastOut) finishSnapshot(run.runner);
+  if (run.pullRequest && lastOut) exec("gh", ["pr", "comment", branch, "--body-file", reportFile]);
   log(`Run finished. Report: ${reportFile}${run.pullRequest ? ` · pull request: ${run.pullRequest}` : ""}`);
   rmSync(liveFile, { force: true });
   const counts = ["built", "parked", "failed"].map((status) => `${status} ${run.results.filter((r) => r.status === status).length}`).join(" · ");
@@ -2466,10 +3136,13 @@ export {
   SETTLE_MS,
   applyMigrations,
   backgroundArgs,
+  browserCheckVerdict,
+  docCheck,
   fetchBlockers,
   gatePlan,
   gotchasFile,
   holdReason,
+  implementationLogAdded,
   loadResults,
   online,
   outsideAreas,
@@ -2483,6 +3156,7 @@ export {
   report,
   runSession,
   runVariables,
+  laneVariables,
   runnerFile,
   screenshotsSince,
   sessionEnv,

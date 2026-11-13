@@ -51,6 +51,10 @@ The end-to-end behaviour this ticket makes work, from the person's side. Not a l
   `.impeccable/surfaces/<slug>.md`).
 - The states of it this ticket builds, if not all of them.
 
+## Lane                                 <!-- a ticket for a lane that takes a label only -->
+
+- 2                                      <!-- the lane's id first; the ticket carries its label -->
+
 ## Areas
 
 - `src/app/checkout/`                    <!-- folders or simple globs the change should stay inside -->
@@ -85,6 +89,9 @@ The end-to-end behaviour this ticket makes work, from the person's side. Not a l
   `CLAUDE.md` and `GLOSSARY.md` are always in scope, and so is whatever the project lists in
   `phaseRun.alwaysInScope` (`.claude/workflow.json`): its tests, its design files, and the shared
   registries nearly every ticket touches.
+- **Lane** only on a ticket meant for a lane whose `phaseRun.lanes` row `takes` a label: the ticket
+  carries that label, and `/ticket-check` refuses the section without it, or for a lane no row has.
+  Leave it off every other ticket: the lane that takes `any` builds those.
 - **Handed forward** is written when the tickets are drafted, from what each ticket's "Not in this
   ticket" sends on; a session adds to it through its verdict, never by editing the issue.
 - **One schema ticket per migration.** A ticket that adds a migration says so in What to build; the

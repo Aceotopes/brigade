@@ -1,20 +1,24 @@
 // Tests for the phase runner's own logic (#194). Plain node:test: no database, no
 // GitHub, no Claude session. Run: pnpm test:runner (node --test tools/phase-run/).
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { BROWSER_CHECK, fill, loadRunConfig, parseRunConfig, qaUrl, sessionEnv, targetFingerprint, targetUrl } from "./config.mjs";
+import { BROWSER_CHECK, fill, laneQaUrl, loadRunConfig, parseRunConfig, qaUrl, sessionEnv, targetFingerprint, targetUrl } from "./config.mjs";
+import { afterPass, ignoredImports, ignoredImportsProblem, joinBranch, laneLockPath, lanePortProblems, laneRoots, laneRow, laneValues, liveLanes, mayFinishCopy, prepareWorktree, setupWorktree, writeLaneLock } from "./lane.mjs";
+import { CLAIMS_LOCK, UNREADABLE_GRACE_MS, buildableTonight, builtOn, claimNext, claimsPath, laneChoice, liveClaims, readClaims, takeClaim, takesTicket, withClaimLock } from "./claim.mjs";
+import { compareFingerprint } from "./fingerprint.mjs";
 import { brigadeCatalog, installedBrigade, parsePluginList, readInstalledBrigade, versionStop } from "./brigade.mjs";
 import { readLedger } from "./ledger.mjs";
-import { QUIET_MS, SETTLE_MS, applyMigrations, backgroundArgs, folderTrusted, gatePlan, gotchasFile, holdReason, loadResults, outsideAreas, printArgs, projectGates, promptValues, pullRequestBody, recordResult, render, report, runSession, runVariables, runnerFile, screenshotsSince, sessionSettings, trimmedSettings, turnOver } from "./run.mjs";
+import { QUIET_MS, SETTLE_MS, applyMigrations, backgroundArgs, browserCheckVerdict, docCheck, folderTrusted, gatePlan, gotchasFile, holdReason, implementationLogAdded, laneVariables, loadResults, outsideAreas, printArgs, projectGates, promptValues, pullRequestBody, recordResult, render, report, runSession, runVariables, runnerFile, screenshotsSince, sessionSettings, trimmedSettings, turnOver } from "./run.mjs";
 import { finishSnapshot, readManifest, runnerChanges, takeSnapshot } from "./snapshot.mjs";
 import { PATCH_ARGS } from "./tampering.mjs";
 import { TRIM_FLAGS, readTrim, trimPath } from "./trim.mjs";
+import { listedCode, repoFiles, testNamedPaths, withListedCode } from "./unread-scan.mjs";
 
 const options = { minutes: 120, waitHours: 6, print: true, spec: 179 };
 const call = (claude, extra = {}) => ({ options, prompt: "Build it.", sessionId: "s-1", resume: false, claude, online: async () => true, sleep: async () => {}, ...extra });
@@ -224,6 +228,12 @@ test("the shared registries are never out of a ticket's areas, but the audit log
   // Without the project's list, only the workflow's own files are always in scope.
   assert.equal(outsideAreas(files, ["src/lib/task*.ts"]).length, 6);
   assert.deepEqual(outsideAreas(["docs/x.md", "CLAUDE.md", "src/a.ts"], ["src/a.ts"]), []);
+});
+
+test("a lane's own .lane/ scratch files are never out of a ticket's areas (#37, D13), with or without the project's list", () => {
+  const files = [".lane/docs/agents/gotchas/two-lanes.md", ".lane/src/notes.md", "src/a.ts", "lane/other.md"];
+  assert.deepEqual(outsideAreas(files, ["src/a.ts"]), ["lane/other.md"], "only the folder itself, not a lookalike");
+  assert.deepEqual(outsideAreas(files, ["src/a.ts"], [/^lane\//]), []);
 });
 
 test("results.json that cannot be read starts empty rather than stopping the run", () => {
@@ -449,6 +459,34 @@ test("the project's gates start with their env and {base} filled in, the alone g
   assert.deepEqual(jobs, ["freed ports", "stray before the tests gate"], "the group's ports are freed once, before it starts");
 });
 
+// The source's later fix: a lane's suite ran on the other lane's test databases. Here the runner's
+// own gates, and Landing's re-gate (the same projectGates), got only each gate's env.
+// The source's later fix: Landing's minutes were left out of the ticket's gate time (metrics.mjs withLanding).
+test("a lane's landing adds its lock wait and its own time to the ticket's minutes, before any outcome is saved", () => {
+  const source = readFileSync(join(HERE, "run.mjs"), "utf8").replace(/\r\n/g, "\n");
+  const body = source.slice(source.indexOf("async function landPass("), source.indexOf("async function regateLanded("));
+  const added = body.indexOf("result.session.metrics = withLanding(result.session.metrics, { waitedMs: (heldAt ?? endedAt) - askedAt, landingMs: heldAt === null ? 0 : endedAt - heldAt });");
+  assert.ok(added > 0, "landPass applies withLanding");
+  assert.ok(added < body.indexOf("saveResults(run)"), "before the first save, so every outcome (landed, parked, unlanded) carries it");
+  assert.ok(body.indexOf("heldAt = Date.now();") > body.indexOf("const askedAt = Date.now();"), "the landing's clock starts once the lock is held");
+});
+
+test("in a lane, every gate starts with the lane's variables over its own env; without a lane its env is today's", async () => {
+  const laneEnv = laneVariables({ id: "2", qaPort: "4402", qaDatabase: "app_qa_2", testDbPrefix: "lane2_", env: { CACHE_DB: "2" } });
+  assert.deepEqual(laneEnv, { CACHE_DB: "2", PHASE_RUN_LANE: "2", PHASE_RUN_QA_PORT: "4402", PHASE_RUN_QA_DATABASE: "app_qa_2", PHASE_RUN_TEST_DB_PREFIX: "lane2_" });
+  assert.deepEqual(laneVariables(null), {}, "no lane, no variables");
+  const config = runConfig({ gates: [{ label: "tests", run: "npm test", env: { PHASE_RUN_TEST_DB_PREFIX: "a gate's own", OTHER: "x" } }] });
+  const inLane = fakeStart();
+  await projectGates(gatePlan({ base: "b", diff: modified("src/a.ts"), config }), { values: { base: "b" }, browserCheck: () => null, start: inLane.start, tickMs: 5, laneEnv });
+  assert.deepEqual(inLane.ran[0].env, { OTHER: "x", ...laneEnv }, "the lane's value wins over a gate's own");
+  const alone = fakeStart();
+  await projectGates(gatePlan({ base: "b", diff: modified("src/a.ts"), config }), { values: { base: "b" }, browserCheck: () => null, start: alone.start, tickMs: 5 });
+  assert.deepEqual(alone.ran[0].env, { PHASE_RUN_TEST_DB_PREFIX: "a gate's own", OTHER: "x" });
+  // Both of the runner's gate runs pass the lane's variables: the ticket's gates and Landing's re-gate.
+  const source = readFileSync(join(HERE, "run.mjs"), "utf8").replace(/\r\n/g, "\n");
+  assert.equal(source.match(/await projectGates\(plan, \{\n    values: [^\n]+\n    laneEnv: laneVariables\(lane \? laneValues\(lane, config\) : null\),/g)?.length, 2);
+});
+
 test("a gate whose when matches no changed file is skipped, and a failure in the group keeps the alone gates from starting", async () => {
   const docsOnly = fakeStart();
   await projectGates(planFor(modified("docs/x.md")), { values: { base: "b" }, browserCheck: () => null, start: docsOnly.start, tickMs: 5 });
@@ -495,6 +533,92 @@ test("the decision function skips a gate on a non-empty diff wholly on its check
   // A copy names two paths too, and a path with a tab or a space is read whole.
   assert.deepEqual(planFor(nameStatus(["C075", "src/a.ts", "docs/a b.md"], ["A", "src/x\ty.ts"])).paths, ["src/a.ts", "docs/a b.md", "src/x\ty.ts"]);
   assert.equal(planFor("").base, "abc123");
+});
+
+// #39 (D11): the listed-code rule. A file a test names (testNamedPaths, from the files
+// phaseRun.tampering.testFiles matches) that sits on a check's unread list is put back on that list.
+test("the scan names every repo path a test file quotes or imports, from the test files alone", () => {
+  const text = {
+    "tests/sub/a.test.mjs": 'import { x } from "../../src/x";\nconst f = readFileSync("docs/fixture.json", "utf8");\nconst g = ["docs/**"];\n',
+    "scripts/b.mjs": 'const doc = "docs/guide.md";\n',
+  };
+  const read = (file) => text[file];
+  assert.deepEqual(testNamedPaths({ testFiles: ["tests/**/*.test.mjs"], files: Object.keys(text), read }), ["docs/fixture.json", "src/x"]);
+  assert.deepEqual(testNamedPaths({ testFiles: [], files: Object.keys(text), read: () => assert.fail("no test files, nothing read") }), []);
+  // A test file gone from the tree (deleted, still in the index) names nothing; any other read error is thrown.
+  const enoent = () => {
+    throw Object.assign(new Error("gone"), { code: "ENOENT" });
+  };
+  assert.deepEqual(testNamedPaths({ testFiles: ["**/*.test.mjs"], files: ["a.test.mjs"], read: enoent }), []);
+  assert.throws(() => testNamedPaths({ testFiles: ["**/*.test.mjs"], files: ["a.test.mjs"], read: () => assert.fail("EACCES") }));
+});
+
+test("listed code is a named path on the list, a named folder's listed files, or an import without its extension", () => {
+  const files = ["docs/fixture.json", "docs/fixtures/a.json", "src/x.ts", "src/y.ts", "docs/guide.md"];
+  assert.deepEqual(listedCode(["docs/fixture.json", "src/x"], ["docs/**"], files), ["docs/fixture.json"]);
+  assert.deepEqual(listedCode(["docs/fixtures"], ["**/*.json"], files), ["docs/fixtures"], "a folder whose files are listed");
+  assert.deepEqual(listedCode(["src/x"], ["**/*.ts"], files), ["src/x"], "../src/x imports src/x.ts");
+  assert.deepEqual(listedCode(["docs/missing.json"], ["docs/**"], files), ["docs/missing.json"], "a path not there yet is still named");
+  assert.deepEqual(listedCode(["src/a.ts"], ["docs/**"], files), []);
+  // The list it widens to: the owner's, unchanged when nothing is listed, else each path put back.
+  assert.deepEqual(withListedCode(["docs/**"], []), ["docs/**"]);
+  assert.deepEqual(withListedCode(["src/**"], ["docs/a.json", "src/x"]), ["src/**", "!docs/a.json", "!src/x", "!src/x.*"]);
+});
+
+const named = (paths) => () => paths;
+const listedSkips = (diff, testNamed, config = SKIP_CONFIG) => gatePlan({ base: "abc123", diff, config, testNamed }).gates.map(({ gate, skip }) => `${gate.label}${skip ? ` (${skip})` : ""}`);
+
+test("the listed-code rule voids the suite skip when a changed file is one a test names, and only then", () => {
+  assert.deepEqual(listedSkips(modified("docs/fixture.json", "README.md"), named(["docs/fixture.json"])), ["typecheck", "suite", "build (when)"]);
+  assert.deepEqual(listedSkips(modified("docs/guide.md", "README.md"), named(["docs/fixture.json"])), ["typecheck", "suite (unreadOf)", "build (when)"], "no test names what changed: the skip, as today");
+  assert.deepEqual(listedSkips(modified("docs/fixtures/a.json"), named(["docs/fixtures"])), ["typecheck", "suite", "build (when)"], "under a named folder");
+  assert.deepEqual(listedSkips(modified("docs/helper.mjs"), named(["docs/helper"])), ["typecheck", "suite", "build (when)"], "an import without its extension");
+  // A scan that fails refuses the skip; a plan with no skip to judge never reads the scan.
+  let reads = 0;
+  const broken = () => {
+    reads += 1;
+    throw new Error("unreadable");
+  };
+  assert.deepEqual(listedSkips(modified("docs/guide.md"), broken), ["typecheck", "suite", "build (when)"]);
+  assert.equal(reads, 1);
+  assert.deepEqual(listedSkips(modified("src/a.ts", "docs/guide.md"), broken), ["typecheck", "suite", "build"]);
+  assert.equal(reads, 1, "a diff off the list never reads the scan");
+  assert.deepEqual(skipped(modified("docs/guide.md")), ["typecheck", "suite (unreadOf)", "build (when)"], "no reader: no rule");
+});
+
+test("the listed-code rule holds for every gate's unreadOf, whichever check's list it points at", () => {
+  const config = runConfig(
+    { gates: [{ label: "suite", run: "npm test", unreadOf: "tests" }, { label: "lint", run: "eslint", unreadOf: "lint" }] },
+    { stopGate: { checks: [{ name: "tests", label: "Tests", run: "npm test", receipt: true, unread: ["docs/**"] }, { name: "lint", label: "Lint", run: "eslint", receipt: true, unread: ["docs/**", "scripts/**"] }] } },
+  );
+  assert.deepEqual(listedSkips(modified("docs/a.md"), named(["scripts/tool.mjs"]), config), ["suite (unreadOf)", "lint (unreadOf)"]);
+  assert.deepEqual(listedSkips(modified("docs/a.md", "scripts/tool.mjs"), named(["scripts/tool.mjs"]), config), ["suite", "lint"]);
+  assert.deepEqual(listedSkips(modified("docs/data.json"), named(["docs/data.json"]), config), ["suite", "lint"]);
+  // One plan reads the scan once, for all its gates, even when it fails.
+  let reads = 0;
+  const failing = () => {
+    reads += 1;
+    throw new Error("unreadable");
+  };
+  assert.deepEqual(listedSkips(modified("docs/a.md"), failing, config), ["suite", "lint"]);
+  assert.equal(reads, 1);
+});
+
+test("the repo's files come back unquoted, a non-ASCII name included, so the test-file globs match it", () => {
+  const dir = mkdtempSync(join(tmpdir(), "brigade-files-"));
+  spawnSync("git", ["init", "-q"], { cwd: dir });
+  spawnSync("git", ["config", "core.quotePath", "true"], { cwd: dir });
+  mkdirSync(join(dir, "tests"));
+  writeFileSync(join(dir, "tests", "café.test.mjs"), 'readFileSync("docs/a.json");\n');
+  assert.deepEqual(repoFiles(dir), ["tests/café.test.mjs"]);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("both gate plans, the ticket's and Landing's re-gate, read the listed code from the tree the gates run in", () => {
+  const source = readFileSync(join(HERE, "run.mjs"), "utf8").replace(/\r\n/g, "\n");
+  const calls = [...source.matchAll(/gatePlan\(\{\n([\s\S]*?)\n {2}\}\);/g)].map((m) => m[1]);
+  assert.equal(calls.length, 2, "runGates and regateLanded");
+  for (const call of calls) assert.match(call, /testNamed: testNamedIn\(work\)/);
 });
 
 // D15 (#20): the tampering gate. Fixture diffs as `git diff -U0` prints them (tampering.mjs's
@@ -972,6 +1096,15 @@ function snapshotProject() {
   put("tools/phase-run/run.test.mjs", "// its tests\n");
   put("tools/phase-run/ticket-prompt.md", "the prompt\n");
   put(".claude/workflow.json", '{ "version": 1 }\n');
+  // The doc tools (#31): doc-check, what it imports (some of it through another tool), and its baseline.
+  put("tools/doc-check.mjs", 'import { a } from "./doc-lib.mjs";\nimport * as config from "./doc-config.mjs";\nimport "./doc-side.mjs";\n');
+  put("tools/doc-side.mjs", "// imported for its side effect\n");
+  put("tools/doc-lib.mjs", 'export { b } from "./roadmap-format.mjs";\n');
+  put("tools/doc-config.mjs", "// the doc config\n");
+  put("tools/roadmap-format.mjs", "// the roadmap's format\n");
+  put("tools/doc-rotate.mjs", 'import { a } from "./doc-lib.mjs";\n');
+  put("tools/doc-tools.test.mjs", "// the doc tools' tests\n");
+  put("tools/doc-check-baseline.json", '{ "stale": {}, "missing": {} }\n');
   const runDir = join(root, ".phase-run", "phase-x");
   const take = (runId, at = AT, brigade = "0.6.0") => takeSnapshot({ root, runDir, runId, commit: "abc123", at, brigade });
   return { root, runDir, put, take };
@@ -982,7 +1115,7 @@ test("at run start the copy is taken: the runner folder and the config, with its
   const copy = take("run-1");
   assert.equal(copy.dir, join(runDir, "runner"));
   assert.equal(copy.reused, false);
-  assert.deepEqual(copy.manifest, { takenAt: new Date(AT).toISOString(), commit: "abc123", runId: "run-1", brigade: "0.6.0", finished: false });
+  assert.deepEqual(copy.manifest, { takenAt: new Date(AT).toISOString(), commit: "abc123", runId: "run-1", brigade: "0.6.0", docCheck: true, finished: false });
   assert.deepEqual(readManifest(copy.dir), copy.manifest);
   assert.equal(readFileSync(join(copy.dir, "tools/phase-run/run.mjs"), "utf8"), "// the runner\n");
   assert.equal(readFileSync(join(copy.dir, "tools/phase-run/ticket-prompt.md"), "utf8"), "the prompt\n");
@@ -1025,7 +1158,7 @@ test("a finished run marks its copy finished, and the next run takes a fresh one
   writeFileSync(join(first.dir, "tools/phase-run/left-over.mjs"), "// only in the old copy\n");
   const next = take("run-2", AT + 86_400_000);
   assert.equal(next.reused, false);
-  assert.deepEqual(next.manifest, { takenAt: new Date(AT + 86_400_000).toISOString(), commit: "abc123", runId: "run-2", brigade: "0.6.0", finished: false });
+  assert.deepEqual(next.manifest, { takenAt: new Date(AT + 86_400_000).toISOString(), commit: "abc123", runId: "run-2", brigade: "0.6.0", docCheck: true, finished: false });
   assert.equal(readFileSync(join(next.dir, "tools/phase-run/run.mjs"), "utf8"), "// the next release\n");
   assert.equal(existsSync(join(next.dir, "tools/phase-run/left-over.mjs")), false, "nothing of the old copy is left");
 });
@@ -1049,6 +1182,122 @@ test("each ticket's env points the hooks at the copy and the copy at the repo", 
   const settings = sessionSettings({}, { allow: [], deny: [] }, { branch: "phase-2", env, background: true, prompt: null });
   assert.equal(settings.env.PHASE_RUN_RUNNER, "/repo/.phase-run/phase-2/runner");
   for (const rule of ["Edit(./tools/phase-run/**)", "Edit(./.claude/workflow.json)", "Edit(./.phase-run/phase-2/**)"]) assert.ok(settings.permissions.deny.includes(rule), rule);
+});
+
+// D10 (#31): the copy carries doc-check too, so a night can't change the rules its own docs are checked by.
+
+test("the copy holds doc-check, every doc tool it imports, and its baseline, and nothing else of tools/", () => {
+  const { take } = snapshotProject();
+  const copy = take("run-1");
+  for (const name of ["doc-check.mjs", "doc-lib.mjs", "doc-config.mjs", "roadmap-format.mjs", "doc-side.mjs", "doc-check-baseline.json"]) {
+    assert.equal(readFileSync(join(copy.dir, "tools", name), "utf8"), readFileSync(join(copy.dir, "..", "..", "..", "tools", name), "utf8"), name);
+  }
+  assert.equal(existsSync(join(copy.dir, "tools/doc-rotate.mjs")), false, "doc-check does not import it");
+  assert.equal(existsSync(join(copy.dir, "tools/doc-tools.test.mjs")), false);
+});
+
+test("a restart keeps the copy's doc-check, baseline and doc config: a doc tool's change refuses it, the configs' do not", () => {
+  const { root, put, take } = snapshotProject();
+  take("run-1");
+  put("tools/doc-check-baseline.json", '{ "stale": { "docs/x.md": ["accepted mid-night"] }, "missing": {} }\n');
+  put("tools/doc-config.mjs", "// a ticket added a doc path mid-night\n");
+  const again = take("run-2");
+  assert.equal(again.reused, true);
+  assert.equal(readFileSync(join(again.dir, "tools/doc-check-baseline.json"), "utf8"), '{ "stale": {}, "missing": {} }\n', "the copy keeps the baseline it was taken with");
+  assert.equal(readFileSync(join(again.dir, "tools/doc-config.mjs"), "utf8"), "// the doc config\n", "and the doc config");
+  put("tools/roadmap-format.mjs", "// changed mid-night\n");
+  put("tools/doc-tools.test.mjs", "// a test change is not doc-check's code\n");
+  assert.deepEqual(runnerChanges(root, again.dir), ["tools/roadmap-format.mjs"]);
+  assert.throws(() => take("run-3"), /tools\/roadmap-format\.mjs/);
+});
+
+test("a copy taken before #31 has no doc tools: its restart is refused, naming them", () => {
+  const { root, take } = snapshotProject();
+  const copy = take("run-1");
+  for (const name of ["doc-check.mjs", "doc-lib.mjs", "doc-config.mjs", "roadmap-format.mjs"]) rmSync(join(copy.dir, "tools", name));
+  assert.deepEqual(runnerChanges(root, copy.dir), ["tools/doc-check.mjs", "tools/doc-lib.mjs", "tools/doc-side.mjs", "tools/roadmap-format.mjs"]);
+  assert.throws(() => take("run-2"), /tools\/doc-check\.mjs, tools\/doc-lib\.mjs/);
+});
+
+/** A project with the real doc tools, its docs clean and committed, and its run's copy taken. */
+function docsProject() {
+  const { root, runDir, put } = snapshotProject();
+  for (const name of ["doc-check.mjs", "doc-index.mjs", "doc-lib.mjs", "roadmap-format.mjs"]) put(`tools/${name}`, readFileSync(join(HERE, "..", name), "utf8"));
+  rmSync(join(root, "tools/doc-rotate.mjs"));
+  put(
+    "tools/doc-config.mjs",
+    [
+      'export const DEVLOG = "docs/devlog.md";',
+      'export const DEVLOG_ARCHIVE = "docs/devlog";',
+      'export const PHASES = "docs/devlog/phases.json";',
+      'export const LIVE_DOCS = ["docs/roadmap.md"];',
+      "export const STATUS_DOCS = /^docs\\/roadmap\\.md$/;",
+      'export const PATH_ROOTS = ["docs", "tools"];',
+      'export const PATH_EXTENSIONS = ["md", "mjs"];',
+      'export const HEADER_REQUIRED = ["docs"];',
+      "export const HEADER_EXEMPT = [];",
+      "export const GENERATED = [];",
+      'export const DEVLOG_TYPES = ["chore"];',
+      "export const DEVLOG_TAGGED_FROM = 1;",
+      "",
+    ].join("\n"),
+  );
+  put("docs/roadmap.md", "---\njob: Where things stand.\nkind: living\nmax-lines: 20\n---\n# Roadmap\n");
+  put("docs/devlog.md", "---\njob: The timeline.\nkind: log\nmax-entry-lines: 15\n---\n# Devlog\n\n## #1 · chore · start\n- the repo\n\n---\n");
+  put(".gitignore", ".phase-run/\n");
+  const git = (...args) => spawnSync("git", args, { cwd: root, encoding: "utf8" });
+  git("init", "-q");
+  git("config", "user.email", "t@example.com");
+  git("config", "user.name", "T");
+  git("add", "-A");
+  git("commit", "-q", "-m", "chore: start — devlog #1");
+  const copy = takeSnapshot({ root, runDir, runId: "run-1", commit: "abc123", at: AT, brigade: "0.7.0" });
+  const outsideRun = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^PHASE_RUN/.test(key)));
+  return { root, put, copy: copy.dir, check: (runner, ...args) => docCheck(runner, root, args, outsideRun) };
+}
+
+test("inside a run the gates' doc-check is the copy's: a live doc-check or baseline changed mid-night changes no verdict", () => {
+  const { root, put, copy, check } = docsProject();
+  assert.equal(check(copy).ok, true, check(copy).stderr);
+  put("tools/doc-check.mjs", 'console.error("the live doc-check, broken mid-night"); process.exit(1);\n');
+  assert.equal(check(copy).ok, true, "the copy judges, not the live file");
+  assert.match(check(null).stderr, /broken mid-night/, "with no copy (outside a run), the live doc-check, as today");
+  // The copy reads the repo's docs, against its own baseline: a phrase the live baseline took mid-night still fails.
+  put("docs/roadmap.md", "---\njob: Where things stand.\nkind: living\nmax-lines: 20\n---\n# Roadmap\nnot yet pushed\n");
+  put("tools/doc-check-baseline.json", JSON.stringify({ stale: { "docs/roadmap.md": ["not yet pushed"] }, missing: {} }));
+  const verdict = check(copy);
+  assert.equal(verdict.ok, false);
+  assert.match(verdict.stderr, /docs\/roadmap\.md:7 reads as stale: not yet pushed/);
+});
+
+test("the copy's doc-check refuses a budget raise at the gate, though the runner's process has no PHASE_RUN", () => {
+  const { put, copy, check } = docsProject();
+  put("docs/roadmap.md", "---\njob: Where things stand.\nkind: living\nmax-lines: 30\n---\n# Roadmap\n");
+  const gate = check(copy);
+  assert.equal(gate.ok, false);
+  assert.match(gate.stderr, /max-lines raised from 20 to 30\. A phase run never raises a budget/);
+  const attended = check(null);
+  assert.equal(attended.ok, true, attended.stderr);
+  assert.match(attended.stdout, /Raising a budget is the owner's call/, "outside a run, a note, as today");
+});
+
+test("inside a run --update-baseline is refused, naming why, and the copy's baseline is untouched", () => {
+  const { copy, check } = docsProject();
+  const before = readFileSync(join(copy, "tools/doc-check-baseline.json"), "utf8");
+  for (const flag of ["--update-baseline", "--adopt"]) {
+    const refused = check(copy, flag);
+    assert.equal(refused.ok, false, flag);
+    assert.match(refused.stderr, /never updated inside a phase run[\s\S]*the baseline the run's copy took at run start/, flag);
+  }
+  assert.equal(readFileSync(join(copy, "tools/doc-check-baseline.json"), "utf8"), before);
+});
+
+test("the gate and the report run doc-check through docCheck, never the live path", () => {
+  const source = readFileSync(join(HERE, "run.mjs"), "utf8");
+  assert.doesNotMatch(source, /exec\("node", \["tools\/doc-check\.mjs"/);
+  // `work`: the session's root, the lane's worktree in a lane (ADR 0007), else the repo, as before.
+  assert.match(source, /docCheck\(run\.runner, work, \["--head"\]/);
+  assert.match(source, /docCheck\(run\.runner, work, \["--report"\]\)/);
 });
 
 // D16 (#21): trim. A per-machine list switches off what the owner's nights don't need, and a
@@ -1319,4 +1568,680 @@ test("a night reads its base settings and its prompts from the run's copy, never
   }
   const source = readFileSync(join(here, "run.mjs"), "utf8");
   assert.doesNotMatch(source, /join\(HERE, "(settings\.json|ticket-prompt\.md|fix-prompt\.md)"\)/, "every read goes through runnerFile");
+});
+
+// ------------------------------------------------------------------- the lane (#33)
+
+const refusal = (fn) => {
+  try {
+    fn();
+  } catch (error) {
+    return error.message;
+  }
+  assert.fail("expected a refusal");
+};
+
+const MAKE_TOOL = `node -e "const fs=require('fs');fs.mkdirSync('node_modules/.bin',{recursive:true});fs.writeFileSync('node_modules/.bin/tool','')"`;
+const LANES = {
+  qa: { name: "app_qa", url: "postgresql://qa:pw@localhost:5432/app_qa?schema=public" },
+  lanes: {
+    rows: [
+      // Lane 1 names every lane value lane 2 does (config.mjs parseLanes): its QA port, test prefix and env key.
+      { id: 1, takes: "any", worktree: "../app-lanes/lane-1", ports: [{ port: 4401, what: "its QA server", name: "qa" }], testDbPrefix: "lane1_", env: { CACHE_DB: "1" } },
+      { id: 2, takes: "walk", worktree: "../app-lanes/lane-2", qa: "app_qa_2", ports: [{ port: 4402, what: "its QA server", name: "qa" }, { port: 4403, what: "its mail catcher" }], testDbPrefix: "lane2_", env: { CACHE_DB: "2" } },
+    ],
+    worktreeSetup: { copy: [".env"], commands: [MAKE_TOOL], leaves: ["node_modules/.bin/tool"] },
+  },
+};
+
+/** A throwaway repo at `<parent>/app` with a phase branch, an ignored `.env` and the lane rows above. */
+function laneProject(phaseRun = LANES) {
+  const parent = mkdtempSync(join(tmpdir(), "phase-run-lane-"));
+  const root = join(parent, "app");
+  mkdirSync(root);
+  const git = (cwd, ...args) => {
+    const result = spawnSync("git", args, { cwd, encoding: "utf8" });
+    if (result.status !== 0) throw new Error(`git ${args.join(" ")}: ${result.stderr}`);
+    return result.stdout.trim();
+  };
+  const put = (dir, files) => {
+    for (const [rel, text] of Object.entries(files)) {
+      mkdirSync(dirname(join(dir, rel)), { recursive: true });
+      writeFileSync(join(dir, rel), text);
+    }
+  };
+  git(root, "init", "-q", "-b", "main");
+  git(root, "config", "user.email", "t@example.com");
+  git(root, "config", "user.name", "T");
+  put(root, { ".gitignore": ".env\nnode_modules/\n.phase-run/\ngenerated/\n", "README.md": "# app\n" });
+  git(root, "add", "-A");
+  git(root, "commit", "-q", "-m", "start");
+  git(root, "branch", "phase-x");
+  put(root, { ".env": "SECRET=primary\n" });
+  const config = runConfig(phaseRun);
+  const lane = laneRow(config, "2");
+  const roots = laneRoots({ root, branch: "phase-x", lane });
+  const shell = (command, cwd) => {
+    const result = spawnSync(command, { cwd, shell: true, encoding: "utf8" });
+    return { ok: result.status === 0, output: `${result.stdout}${result.stderr}` };
+  };
+  const start = () => {
+    const made = prepareWorktree({ root, tree: roots.tree, branch: "phase-x", ownBranch: roots.branch });
+    setupWorktree({ root, tree: roots.tree, setup: config.lanes.worktreeSetup, shell });
+    return made;
+  };
+  return { parent, root, git, put, config, lane, roots, shell, start };
+}
+
+test("--lane 2 makes the worktree at the row's path on its own branch, and runs worktreeSetup there", () => {
+  const { parent, root, git, roots, start } = laneProject();
+  assert.equal(roots.tree, join(parent, "app-lanes", "lane-2"), "the row's path, from the primary checkout");
+  assert.equal(roots.branch, "phase-x-lane-2", "a phase-* branch: the guard lets a session commit only on one");
+  const made = start();
+  assert.equal(made.reused, false);
+  assert.equal(git(roots.tree, "branch", "--show-current"), "phase-x-lane-2");
+  assert.equal(git(roots.tree, "rev-parse", "HEAD"), git(root, "rev-parse", "phase-x"), "cut from the phase branch's tip");
+  assert.equal(readFileSync(join(roots.tree, ".env"), "utf8"), "SECRET=primary\n", "copy brought the untracked file in");
+  assert.ok(existsSync(join(roots.tree, "node_modules/.bin/tool")), "the commands ran in the worktree");
+  assert.equal(existsSync(join(root, "node_modules")), false, "and never in the primary checkout");
+});
+
+test("the lane refuses to start when a leaves file is missing, or a copy file or a command fails, naming it", () => {
+  const leaves = laneProject({ ...LANES, lanes: { ...LANES.lanes, worktreeSetup: { ...LANES.lanes.worktreeSetup, leaves: ["node_modules/.bin/tool", "generated/client.mjs"] } } });
+  const missing = refusal(leaves.start);
+  assert.match(missing, /worktreeSetup\.leaves: generated\/client\.mjs is missing/);
+  assert.doesNotMatch(missing, /node_modules\/\.bin\/tool/, "only the missing one is named");
+
+  const copy = laneProject({ ...LANES, lanes: { ...LANES.lanes, worktreeSetup: { copy: [".env", ".claude/settings.local.json"] } } });
+  assert.match(refusal(copy.start), /worktreeSetup\.copy names \.claude\/settings\.local\.json, which the primary checkout/);
+
+  const command = laneProject({ ...LANES, lanes: { ...LANES.lanes, worktreeSetup: { commands: ['node -e "process.exit(3)"'] } } });
+  assert.match(refusal(command.start), /worktreeSetup\.commands: `node -e "process\.exit\(3\)"` failed/);
+});
+
+test("a second start reuses the worktree, reset to the phase branch's tip, its install kept", () => {
+  const { root, git, put, roots, start } = laneProject();
+  start();
+  put(roots.tree, { "README.md": "an edit a dead session left\n", "stray.txt": "an untracked file\n" });
+  put(root, { "later.md": "landed by the other lane\n" });
+  git(root, "add", "later.md");
+  git(root, "commit", "-q", "-m", "later");
+  git(root, "branch", "-f", "phase-x", "HEAD");
+  const again = start();
+  assert.equal(again.reused, true);
+  assert.equal(git(roots.tree, "rev-parse", "HEAD"), git(root, "rev-parse", "phase-x"), "at the new tip");
+  assert.equal(git(roots.tree, "status", "--porcelain"), "", "the edit and the stray file are gone");
+  assert.ok(existsSync(join(roots.tree, "later.md")));
+  assert.ok(existsSync(join(roots.tree, "node_modules/.bin/tool")), "ignored files (an install) are kept");
+  // A worktree folder deleted by hand is still registered with git: it is pruned and made again.
+  rmSync(roots.tree, { recursive: true, force: true });
+  const remade = start();
+  assert.equal(remade.reused, false);
+  assert.equal(git(roots.tree, "rev-parse", "HEAD"), git(root, "rev-parse", "phase-x"));
+});
+
+test("a passing ticket's commit stays on the lane's branch: the phase branch doesn't move, nothing is pushed or migrated", () => {
+  const { root, git, put, roots, start } = laneProject();
+  start();
+  const tip = git(root, "rev-parse", "phase-x");
+  put(roots.tree, { "feature.md": "the ticket\n" });
+  git(roots.tree, "add", "feature.md");
+  git(roots.tree, "commit", "-q", "-m", "feat: the ticket — Closes #7");
+  assert.equal(git(root, "rev-parse", "phase-x"), tip, "the phase branch is where it was");
+  assert.match(git(root, "log", "-1", "--format=%s", "phase-x-lane-2"), /Closes #7/);
+  assert.deepEqual(afterPass(laneRow(runConfig(LANES), "2")), { push: false, migrate: false }, "Landing pushes and migrates (ADR 0008)");
+  assert.deepEqual(afterPass(null), { push: true, migrate: true }, "a run without --lane, as before");
+  // The gates and finishBuilt call git and gh, so the seam is pinned in the source, as docCheck's is.
+  const source = readFileSync(join(HERE, "run.mjs"), "utf8").replace(/\r\n/g, "\n"); // a Windows checkout may have CRLF
+  const body = (name) => source.slice(source.indexOf(`async function ${name}(`), source.indexOf("\n}\n", source.indexOf(`async function ${name}(`)));
+  assert.match(body("runGates"), /if \(!afterPass\(lane\)\.migrate\) \{[\s\S]*?return \{ ok: true, fingerprint \};/, "the migration is skipped before it is applied");
+  assert.match(body("finishBuilt"), /const pushing = afterPass\(lane\)\.push;[\s\S]*const push = pushing \? gitTry\("push"/, "the push waits on afterPass");
+  // A restart would reset over it: it is refused, naming the commit, until Landing lands it.
+  assert.match(refusal(start), /phase-x-lane-2 holds commits phase-x does not have[\s\S]*feat: the ticket — Closes #7/);
+});
+
+test("a folder at the row's path that is not one of the repo's worktrees is refused, never reused", () => {
+  const { put, roots, start } = laneProject();
+  put(roots.tree, { "notes.txt": "someone's folder\n" });
+  assert.match(refusal(start), /exists and is not one of this repo's worktrees/);
+});
+
+test("a tracked script that imports an ignored file is refused at start, naming both", () => {
+  const { root, git, put } = laneProject();
+  put(root, {
+    "scripts/seed.mjs": 'import { client } from "../generated/client.mjs";\nconst x = await import("./local-only.mjs");\n',
+    "src/app.ts": 'import { helper } from "./helper.js";\nimport "./styles";\nconst cfg = require("./missing-and-not-ignored");\n',
+    "src/helper.ts": "export const helper = 1;\n",
+    "src/styles.ts": "export {};\n",
+    "scripts/local-only.mjs": "export {};\n",
+    "generated/client.mjs": "export const client = 1;\n",
+  });
+  put(root, { ".gitignore": ".env\nnode_modules/\n.phase-run/\ngenerated/\nscripts/local-only.mjs\n" });
+  git(root, "add", "-A");
+  git(root, "commit", "-q", "-m", "scripts");
+  const found = ignoredImports(root);
+  assert.deepEqual(found, [
+    { script: "scripts/seed.mjs", imports: "generated/client.mjs" },
+    { script: "scripts/seed.mjs", imports: "scripts/local-only.mjs" },
+  ]);
+  const problem = ignoredImportsProblem(found);
+  assert.match(problem, /scripts\/seed\.mjs imports generated\/client\.mjs/);
+  assert.match(problem, /scripts\/seed\.mjs imports scripts\/local-only\.mjs/);
+  // A file worktreeSetup accounts for (made by a command and checked in leaves, or copied in) passes.
+  assert.deepEqual(ignoredImports(root, ["generated", "scripts/local-only.mjs"]), []);
+  assert.equal(ignoredImportsProblem([]), null);
+});
+
+test("each of the lane's ports is checked free at start, and only the lane's", async () => {
+  const lane = laneRow(runConfig(LANES), "2");
+  const busy = async (port) => port === 4403;
+  assert.deepEqual(await lanePortProblems(lane, busy), ["Something is listening on :4403 (its mail catcher, lane 2). Stop it before the lane starts."]);
+  assert.deepEqual(await lanePortProblems(lane, async () => false), []);
+});
+
+test("a lane started without --branch on a detached checkout joins the branch a live lane's lock names", () => {
+  const state = mkdtempSync(join(tmpdir(), "phase-run-locks-"));
+  const alive = (pid) => pid !== 999;
+  assert.equal(joinBranch(state, alive), null, "no live lane: nothing to join");
+  writeLaneLock(state, { id: 1, pid: 101, branch: "phase-x", at: AT });
+  writeLaneLock(state, { id: 3, pid: 999, branch: "phase-old", at: AT }); // its process died
+  assert.equal(laneLockPath(state, 1), join(state, "lane-1.lock"), "under .phase-run/ itself, found before the branch is known");
+  assert.equal(joinBranch(state, alive), "phase-x");
+  assert.deepEqual(liveLanes(state, alive).map((lock) => [lock.lane, lock.branch]), [["1", "phase-x"]]);
+  writeLaneLock(state, { id: 2, pid: 102, branch: "phase-y", at: AT });
+  assert.match(refusal(() => joinBranch(state, alive)), /two branches \(phase-x, phase-y\)/);
+});
+
+test("both lanes share one runner copy: the second reuses the first's, and is refused when the live runner differs", () => {
+  const { root, put, take } = snapshotProject();
+  const lane = (id, worktree) => laneRoots({ root, branch: "phase-x", lane: { id, worktree } });
+  const one = lane(1, "../lanes/lane-1");
+  const two = lane(2, "../lanes/lane-2");
+  assert.equal(one.copyDir, two.copyDir, "one folder per branch");
+  assert.notEqual(one.runDir, two.runDir);
+  assert.equal(two.runDir, join(root, ".phase-run", "phase-x", "lane-2"), "results in the primary checkout's lane-<id>/");
+  const first = takeSnapshot({ root, runDir: one.copyDir, runId: "lane-1", commit: "abc", at: AT, brigade: "0.6.0" });
+  const second = takeSnapshot({ root, runDir: two.copyDir, runId: "lane-2", commit: "abc", at: AT + 60_000, brigade: "0.6.0" });
+  assert.deepEqual([second.reused, second.dir, second.manifest.runId], [true, first.dir, "lane-1"]);
+  put("tools/phase-run/run.mjs", "// changed after lane 1 started\n");
+  assert.match(refusal(() => take("lane-2")), /tools\/phase-run\/run\.mjs/);
+  // The copy is marked finished only by the last lane out, or the other's night is judged by a fresh one.
+  const state = mkdtempSync(join(tmpdir(), "phase-run-locks-"));
+  writeLaneLock(state, { id: 1, pid: 101, branch: "phase-x", at: AT });
+  writeLaneLock(state, { id: 2, pid: 102, branch: "phase-x", at: AT });
+  assert.equal(mayFinishCopy(state, { id: 2, branch: "phase-x" }, () => true), false, "lane 1 still runs");
+  assert.equal(mayFinishCopy(state, { id: 2, branch: "phase-x" }, (pid) => pid !== 101), true, "lane 1 is gone");
+});
+
+test("a lane session's env holds the lane's PHASE_RUN_* values and its row's env; its root is the worktree", () => {
+  const config = runConfig(LANES);
+  const lane = laneRow(config, "2");
+  const roots = laneRoots({ root: "/repo", branch: "phase-x", lane });
+  const env = runVariables({ ticket: 7, base: "abc", spec: 5, runner: "/repo/.phase-run/phase-x/runner", root: roots.tree, lane: laneValues(lane, config) });
+  assert.deepEqual(env, {
+    CACHE_DB: "2",
+    PHASE_RUN: "1",
+    PHASE_RUN_TICKET: "7",
+    PHASE_RUN_BASE: "abc",
+    PHASE_RUN_SPEC: "5",
+    PHASE_RUN_RUNNER: "/repo/.phase-run/phase-x/runner",
+    PHASE_RUN_ROOT: resolve("/repo", "../app-lanes/lane-2"),
+    PHASE_RUN_LANE: "2",
+    PHASE_RUN_QA_PORT: "4402",
+    PHASE_RUN_QA_DATABASE: "app_qa_2",
+    PHASE_RUN_TEST_DB_PREFIX: "lane2_",
+  });
+  assert.equal("PHASE_RUN_FAKE_NOW" in env, false, "reserved, set by no runner code");
+  // Lane 1's row has no qa of its own: its database is qa.name's. It names its own port, prefix and env key, as lane 2 does,
+  // so nothing lane 1 inherits can stand in for one (config.mjs parseLanes, the source's later fix).
+  const one = runVariables({ ticket: 7, base: "abc", spec: null, runner: "r", root: "/w", lane: laneValues(laneRow(config, "1"), config) });
+  assert.deepEqual([one.PHASE_RUN_LANE, one.PHASE_RUN_QA_DATABASE, one.PHASE_RUN_QA_PORT, one.PHASE_RUN_TEST_DB_PREFIX, one.CACHE_DB], ["1", "app_qa", "4401", "lane1_", "1"]);
+  // A row's env never names a runner variable.
+  const reserved = { ...LANES, lanes: { rows: [{ id: 2, takes: "any", worktree: "../w", env: { PHASE_RUN_ROOT: "/elsewhere" } }] } };
+  assert.match(refusal(() => runConfig(reserved)), /env names PHASE_RUN_ROOT: PHASE_RUN_\* names are the runner's own/);
+});
+
+test("the lane's QA url takes its database, by the loader's rule; a url with no place for it is refused", () => {
+  const config = runConfig({ ...LANES, sessionEnv: { DATABASE_URL: "{qaUrl}" } });
+  const lookup = () => undefined;
+  const two = laneRow(config, "2");
+  assert.equal(laneQaUrl(config, two, lookup), "postgresql://qa:pw@localhost:5432/app_qa_2?schema=public", "the path's database, never the user name's text");
+  assert.equal(laneQaUrl(config, laneRow(config, "1"), lookup), qaUrl(config, lookup), "lane 1 rides on qa.name");
+  assert.equal(laneQaUrl(config, null, lookup), qaUrl(config, lookup), "a run without --lane, as before");
+  assert.deepEqual(sessionEnv(config, lookup, two), { DATABASE_URL: "postgresql://qa:pw@localhost:5432/app_qa_2?schema=public" });
+  assert.deepEqual(sessionEnv(config, lookup), { DATABASE_URL: qaUrl(config, lookup) });
+  const odd = runConfig({ ...LANES, qa: { name: "app_qa", url: "postgresql://localhost:5432/other" } });
+  assert.match(refusal(() => laneQaUrl(odd, laneRow(odd, "2"), lookup)), /does not end in phaseRun\.qa\.name "app_qa"/);
+});
+
+test("--lane names a row the config has; with no lanes section it is refused", () => {
+  assert.match(refusal(() => laneRow(runConfig({}), "2")), /has no phaseRun\.lanes/);
+  assert.match(refusal(() => laneRow(runConfig(LANES), "9")), /no lane "9" \(its lanes: 1, 2\)/);
+});
+
+test("a lane's settings also deny edits to the run's folder by its absolute path: the shared copy sits outside the worktree", () => {
+  const runFolder = process.platform === "win32" ? "D:\\work\\app\\.phase-run\\phase-x" : "/work/app/.phase-run/phase-x";
+  const rule = process.platform === "win32" ? "Edit(//d/work/app/.phase-run/phase-x/**)" : "Edit(//work/app/.phase-run/phase-x/**)";
+  const lane = sessionSettings({}, { allow: [], deny: [] }, { branch: "phase-x", env: {}, background: true, prompt: null, runFolder });
+  assert.ok(lane.permissions.deny.includes(rule), lane.permissions.deny.join("\n"));
+  assert.ok(lane.permissions.deny.includes("Edit(./.phase-run/phase-x/**)"), "the worktree's own run folder too");
+  const plain = sessionSettings({}, { allow: [], deny: [] }, { branch: "phase-x", env: {}, background: true, prompt: null });
+  assert.deepEqual(plain.permissions.deny.filter((r) => r.startsWith("Edit(//")), [], "a run without --lane, as before");
+});
+
+test("in a lane the docs gate takes the number token for the implementation log's number", () => {
+  assert.equal(implementationLogAdded("docs/history/implementation-log/019-the-worktree.md\n", null), true);
+  assert.equal(implementationLogAdded("docs/history/implementation-log/NNN-the-worktree.md\n", null), false, "one lane: a number, as before");
+  assert.equal(implementationLogAdded("docs/history/implementation-log/NNN-the-worktree.md\n", "NNN"), true);
+  assert.equal(implementationLogAdded("docs/history/devlog.md\n", "NNN"), false);
+});
+
+// ---------------------------------------------------------- the claim and the frontier (#34)
+
+/** A fake clock and pause: `pause(ms)` moves `now()` on, so a lock's wait runs out without waiting. */
+const fakeClock = (start = 1_000) => {
+  let t = start;
+  return { now: () => t, pause: (ms) => (t += ms) };
+};
+/** A process check that answers from a set: a pid outside it is gone. */
+const livePids = (...pids) => {
+  const set = new Set(pids);
+  return Object.assign((pid) => set.has(pid), { kill: (pid) => set.delete(pid) });
+};
+const claimDir = () => join(mkdtempSync(join(tmpdir(), "phase-run-claims-")), ".phase-run", "phase-x");
+const firstFree = (numbers) => (claims) => numbers.find((n) => !claims.some((claim) => claim.ticket === n)) ?? null;
+/** A ticket as loadTickets shapes it. */
+const ticketOf = (number, { labels = ["run-ready"], blockers = [] } = {}) => ({ number, title: `t${number}`, state: "open", labels, blockers: blockers.map((n) => ({ number: n, state: "open" })) });
+/** holdReason's order, with "built" a set: done, then not run-ready, then the first unbuilt blocker. */
+const holdFrom = (built) => (ticket) => (built.has(ticket.number) ? "done" : !ticket.labels.includes("run-ready") ? "not labelled run-ready" : (ticket.blockers.find((b) => !built.has(b.number)) ? `waiting on #${ticket.blockers.find((b) => !built.has(b.number)).number}` : null));
+
+async function until(check, what, ms = 20_000) {
+  const deadline = Date.now() + ms;
+  while (!check()) {
+    if (Date.now() > deadline) assert.fail(`timed out waiting for ${what}`);
+    await new Promise((done) => setTimeout(done, 10));
+  }
+}
+
+/** Two real processes take a claim at the same moment: each starts, waits for "go", takes, reports, and lives until "end", so its claim stays live. */
+async function claimAtOnce(dir, tickets) {
+  const sync = mkdtempSync(join(tmpdir(), "phase-run-race-"));
+  const at = (name) => join(sync, name);
+  const script = (i) =>
+    [
+      `import { takeClaim } from ${JSON.stringify(pathToFileURL(join(HERE, "claim.mjs")).href)};`,
+      `import { existsSync, writeFileSync } from "node:fs";`,
+      `const pause = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);`,
+      `writeFileSync(${JSON.stringify(at(`ready-${i}`))}, "");`,
+      `while (!existsSync(${JSON.stringify(at("go"))})) pause(2);`,
+      `const tickets = ${JSON.stringify(tickets)};`,
+      `const { ticket } = takeClaim({ dir: ${JSON.stringify(dir)}, lane: "${i}", at: 0, choose: (claims) => tickets.find((n) => !claims.some((c) => c.ticket === n)) ?? null });`,
+      `writeFileSync(${JSON.stringify(at(`result-${i}`))}, JSON.stringify(ticket));`,
+      `while (!existsSync(${JSON.stringify(at("end"))})) pause(5);`,
+    ].join("\n");
+  const children = [1, 2].map((i) => {
+    const child = spawn(process.execPath, ["--input-type=module", "-e", script(i)], { stdio: ["ignore", "ignore", "pipe"] });
+    let stderr = "";
+    child.stderr.on("data", (chunk) => (stderr += chunk));
+    return { child, exited: new Promise((done) => child.on("close", (code) => done({ code, stderr }))) };
+  });
+  try {
+    await until(() => existsSync(at("ready-1")) && existsSync(at("ready-2")), "both lanes to start");
+    writeFileSync(at("go"), "");
+    await until(() => existsSync(at("result-1")) && existsSync(at("result-2")), "both claims");
+    return [1, 2].map((i) => JSON.parse(readFileSync(at(`result-${i}`), "utf8")));
+  } finally {
+    writeFileSync(at("end"), "");
+    for (const { exited } of children) {
+      const { code, stderr } = await exited;
+      assert.equal(code, 0, stderr);
+    }
+  }
+}
+
+test("two lanes claiming at once: exactly one wins a ticket, and the other takes another, or none", { timeout: 60_000 }, async () => {
+  const two = await claimAtOnce(claimDir(), [5, 6]);
+  assert.deepEqual([...two].sort(), [5, 6], `each ticket claimed once (got ${JSON.stringify(two)})`);
+  const one = await claimAtOnce(claimDir(), [5]);
+  assert.deepEqual([...one].sort(), [5, null], `one lane wins #5, the other gets nothing (got ${JSON.stringify(one)})`);
+});
+
+test("the claim file sits in the primary checkout's branch folder, and a take writes the lane, its pid and the clock's time", () => {
+  const roots = laneRoots({ root: join(tmpdir(), "app"), branch: "phase-x", lane: { id: "2", worktree: "../app-lanes/lane-2" } });
+  assert.equal(claimsPath(roots.copyDir), join(tmpdir(), "app", ".phase-run", "phase-x", "claims.json"), "shared by both lanes (ADR 0007), never the worktree");
+  const dir = claimDir();
+  const { now } = fakeClock(Date.UTC(2026, 10, 10, 1, 2, 3));
+  const taken = takeClaim({ dir, lane: "2", pid: 222, at: now(), alive: livePids(222), choose: firstFree([5]) });
+  assert.equal(taken.ticket, 5);
+  assert.deepEqual(readClaims(dir), [{ ticket: 5, lane: "2", pid: 222, at: "2026-11-10T01:02:03.000Z" }]);
+  assert.equal(existsSync(join(dir, CLAIMS_LOCK)), false, "the lock is gone once the take is done");
+  const none = takeClaim({ dir, lane: "2", pid: 222, at: now(), alive: livePids(222), choose: () => null });
+  assert.equal(none.ticket, null);
+  assert.equal(readClaims(dir).length, 1, "choosing nothing claims nothing and keeps the live claims");
+});
+
+test("a claim held by a process that is gone lapses, and the ticket can be claimed again", () => {
+  const dir = claimDir();
+  const alive = livePids(111, 222);
+  assert.equal(takeClaim({ dir, lane: "1", pid: 111, at: 0, alive, choose: firstFree([5]) }).ticket, 5);
+  assert.equal(takeClaim({ dir, lane: "2", pid: 222, at: 0, alive, choose: firstFree([5]) }).ticket, null, "held while lane 1 lives");
+  alive.kill(111);
+  const again = takeClaim({ dir, lane: "2", pid: 222, at: 0, alive, choose: firstFree([5]) });
+  assert.equal(again.ticket, 5, "lane 1 died: its claim lapsed");
+  assert.deepEqual(readClaims(dir).map(({ ticket, lane }) => ({ ticket, lane })), [{ ticket: 5, lane: "2" }], "the lapsed claim is dropped from the file");
+  assert.deepEqual(liveClaims(readClaims(dir), livePids()), [], "and a claim lapses for every reader, not only on a take");
+});
+
+test("the claim file changes only under the lock: a dead holder's lock is broken, a live holder's is waited on and then refused", () => {
+  const dir = claimDir();
+  mkdirSync(dir, { recursive: true });
+  const lock = join(dir, CLAIMS_LOCK);
+  writeFileSync(lock, `${JSON.stringify({ pid: 333, token: "dead" })}\n`);
+  const clock = fakeClock();
+  assert.equal(withClaimLock(dir, () => "ran", { pid: 222, alive: livePids(222), ...clock }), "ran", "pid 333 is gone: its lock is broken");
+  assert.equal(existsSync(lock), false);
+
+  writeFileSync(lock, `${JSON.stringify({ pid: 333, token: "live" })}\n`);
+  let ran = false;
+  const message = refusal(() => withClaimLock(dir, () => (ran = true), { pid: 222, alive: livePids(222, 333), ...fakeClock(), waitMs: 1_000 }));
+  assert.equal(ran, false, "nothing runs without the lock");
+  assert.match(message, /claims\.lock/, "the refusal names the lock");
+  assert.match(message, /333/, "and its holder");
+  assert.equal(JSON.parse(readFileSync(lock, "utf8")).token, "live", "a live holder's lock is never broken");
+
+  rmSync(lock);
+  assert.throws(() => withClaimLock(dir, () => assert.fail("a failing take"), { pid: 222, alive: livePids(222), ...fakeClock() }));
+  assert.equal(existsSync(lock), false, "released when the take throws");
+
+  // A lock its maker died before writing is empty: waited on for the grace, then broken, never spun on.
+  writeFileSync(lock, "");
+  let pauses = 0;
+  const empty = fakeClock();
+  assert.equal(withClaimLock(dir, () => "ran", { pid: 222, alive: livePids(222), now: empty.now, pause: (ms) => (pauses += 1, empty.pause(ms)) }), "ran");
+  assert.equal(pauses, UNREADABLE_GRACE_MS / 50, "it paused until the grace ran out, then broke the lock");
+  // A lock naming this very process is a leftover: a take never nests.
+  writeFileSync(lock, `${JSON.stringify({ pid: 222, token: "old" })}\n`);
+  assert.equal(withClaimLock(dir, () => "ran", { pid: 222, alive: livePids(222), ...fakeClock() }), "ran");
+});
+
+test("two lanes never wait on each other: a waiting lane is listed, and the other lane, looking next, stops", async () => {
+  const dir = claimDir();
+  const alive = livePids(111, 222);
+  // Each lane holds a built, unlanded ticket (nothing releases a claim before #37), and each one's
+  // next ticket waits on the other's: #6 (core) on lane 2's #7, #8 (walk) on lane 1's #5.
+  const core = ["run-ready", "core"];
+  const tickets = [ticketOf(5, { labels: core }), ticketOf(6, { labels: core, blockers: [7] }), ticketOf(7, { labels: ["run-ready", "walk"] }), ticketOf(8, { labels: ["run-ready", "walk"], blockers: [5] })];
+  const byNumber = new Map(tickets.map((t) => [t.number, t]));
+  takeClaim({ dir, lane: "1", pid: 111, at: 0, alive, choose: firstFree([5]) });
+  takeClaim({ dir, lane: "2", pid: 222, at: 0, alive, choose: firstFree([7]) });
+  const rows = { 1: { id: "1", takes: "core" }, 2: { id: "2", takes: "walk" } };
+  const pids = { 1: 111, 2: 222 };
+  const look = (self, sleep) =>
+    claimNext({
+      dir,
+      lane: self,
+      pid: pids[self],
+      alive,
+      now: () => 0,
+      sleep,
+      pollMs: 1,
+      choose: (claims, idle) => laneChoice({ tickets, byNumber, hold: holdFrom(new Set()), done: () => false, takes: rows[self].takes, claims, self, idle, others: Object.values(rows).filter((row) => row.id !== self && alive(pids[row.id])) }),
+    });
+  let lane2 = null;
+  const lane1 = await look("1", async () => {
+    assert.deepEqual(JSON.parse(readFileSync(claimsPath(dir), "utf8")).waiting, [{ lane: "1", pid: 111 }], "lane 1 waits, and says so");
+    lane2 = await look("2", async () => assert.fail("lane 2 never waits on a lane that is waiting"));
+    alive.kill(222); // lane 2 stops and exits
+  });
+  assert.equal(lane2.ticket, null, "lane 2 stopped at once");
+  assert.equal(lane1.ticket, null, "then lane 1, as no live lane can land #7");
+  assert.deepEqual(JSON.parse(readFileSync(claimsPath(dir), "utf8")).waiting, [], "a lane that stops is no longer listed");
+});
+
+test("a ticket whose commit is on the phase branch is built; an unlanded one on a lane's branch is not, whichever worktree asks", () => {
+  const { root, git, put, roots, start } = laneProject();
+  start();
+  put(roots.tree, { "feature.md": "the ticket\n" });
+  git(roots.tree, "add", "feature.md");
+  git(roots.tree, "commit", "-q", "-m", "feat: the ticket — Closes #7");
+  const gitIn = (cwd) => (...args) => {
+    const result = spawnSync("git", args, { cwd, encoding: "utf8" });
+    return { ok: result.status === 0, stdout: (result.stdout ?? "").trim() };
+  };
+  assert.equal(builtOn(gitIn(roots.tree), "HEAD", 7), true, "today's reading, HEAD, would count the lane's own unlanded pass");
+  assert.equal(builtOn(gitIn(roots.tree), "phase-x", 7), false, "asked from the lane's worktree");
+  assert.equal(builtOn(gitIn(root), "phase-x", 7), false, "asked from the primary checkout");
+  git(root, "branch", "-f", "phase-x", "phase-x-lane-2"); // landed
+  assert.equal(builtOn(gitIn(roots.tree), "phase-x", 7), true);
+  assert.equal(builtOn(gitIn(root), "phase-x", 7), true);
+  assert.equal(builtOn(gitIn(root), "phase-x", 70), false, "#7's commit never counts for #70");
+});
+
+test("a lane whose row takes a label never claims a ticket without it; a row that takes any claims any ready ticket", () => {
+  const plain = ticketOf(5);
+  const walk = ticketOf(6, { labels: ["run-ready", "walk"] });
+  const tickets = [plain, walk];
+  const byNumber = new Map(tickets.map((t) => [t.number, t]));
+  const choose = (takes, claims = []) => laneChoice({ tickets, byNumber, hold: holdFrom(new Set()), done: () => false, takes, claims, self: "2" });
+  assert.equal(takesTicket("walk", plain), false);
+  assert.equal(takesTicket("any", plain), true);
+  assert.equal(choose("walk").ticket.number, 6, "the walk lane passes over #5");
+  assert.equal(choose("walk", [{ ticket: 6, lane: "1", pid: 1 }]).ticket, null, "and never falls back to it");
+  assert.equal(choose("any").ticket.number, 5, "any: the first ready ticket, in order");
+  assert.equal(choose("any", [{ ticket: 5, lane: "1", pid: 1 }]).ticket.number, 6, "a claimed ticket is passed over, a label ticket taken");
+  assert.equal(laneChoice({ tickets: [ticketOf(8, { labels: ["walk"] })], byNumber, hold: holdFrom(new Set()), done: () => false, takes: "walk", claims: [], self: "2" }).ticket, null, "the label alone is not ready: run-ready still holds");
+});
+
+test("a lane with nothing ready waits while a live lane holds a claim that could unblock it, and stops when none can", async () => {
+  const dir = claimDir();
+  const alive = livePids(111, 222);
+  // Lane 1 has #5. #7 (walk) waits on #6, which waits on #5: lane 1's #5 could unblock it.
+  const tickets = [ticketOf(5), ticketOf(6, { blockers: [5] }), ticketOf(7, { labels: ["run-ready", "walk"], blockers: [6] }), ticketOf(9)];
+  const byNumber = new Map(tickets.map((t) => [t.number, t]));
+  assert.equal(takeClaim({ dir, lane: "1", pid: 111, at: 0, alive, choose: firstFree([5]) }).ticket, 5);
+  const built = new Set();
+  // The other lanes still running, as their rows: lane 1 takes any ticket while pid 111 lives.
+  const lane1 = (takes = "any") => (alive(111) ? [{ id: "1", takes }] : []);
+  const chooser = (others) => (claims) => laneChoice({ tickets, byNumber, hold: holdFrom(built), done: (b) => built.has(b.number), takes: "walk", claims, self: "2", others: others() });
+  const lane2 = ({ dir: at = dir, sleep, waits = [], others = () => lane1() }) =>
+    claimNext({ dir: at, lane: "2", pid: 222, alive, now: () => 0, sleep, pollMs: 30_000, onWait: (waitOn) => waits.push(waitOn.map((w) => `${w.lane}:#${w.ticket}${w.claimed ? "" : "?"}`).join(",")), choose: chooser(others) });
+
+  // #5 lands, then #6 (which lane 1 may still take), while lane 2 waits: #7 is ready, and lane 2 claims it.
+  const waits = [];
+  let slept = 0;
+  const landed = await lane2({
+    waits,
+    sleep: async (ms) => {
+      assert.equal(ms, 30_000, "the injected pause, never a real one");
+      slept += 1;
+      if (slept === 1) built.add(5);
+      if (slept === 2) built.add(6);
+    },
+  });
+  assert.equal(landed.ticket, 7);
+  assert.equal(slept, 2);
+  assert.deepEqual(waits, ["1:#6?,1:#5", "1:#6?"], "#6, which lane 1 takes and may still land, and lane 1's claim on #5; then #6 alone");
+  assert.ok(readClaims(dir).some((claim) => claim.ticket === 7 && claim.lane === "2"));
+
+  // Lane 1 lives, but its claim is on #9 and it takes only "docs": nothing on #7's chain can land. It stops at once.
+  const dir2 = claimDir();
+  built.clear();
+  takeClaim({ dir: dir2, lane: "1", pid: 111, at: 0, alive, choose: firstFree([9]) });
+  const unrelated = await lane2({ dir: dir2, others: () => lane1("docs"), sleep: async () => assert.fail("never waits") });
+  assert.equal(unrelated.ticket, null);
+
+  // Lane 1 dies while lane 2 waits: its claim lapses, no live lane can land #5, and lane 2 stops.
+  const dir3 = claimDir();
+  takeClaim({ dir: dir3, lane: "1", pid: 111, at: 0, alive, choose: firstFree([5]) });
+  let deaths = 0;
+  const stopped = await lane2({ dir: dir3, sleep: async () => (deaths += 1, alive.kill(111)) });
+  assert.equal(stopped.ticket, null);
+  assert.equal(deaths, 1, "one wait, then the stop");
+
+  // A lane never waits on its own claim: it cannot land it while it waits.
+  const own = laneChoice({ tickets, byNumber, hold: holdFrom(new Set()), done: () => false, takes: "any", claims: [{ ticket: 5, lane: "2", pid: 222 }], self: "2", others: [] });
+  assert.equal(own.ticket.number, 9, "any: #9 is ready");
+  const ownOnly = laneChoice({ tickets: tickets.slice(0, 3), byNumber, hold: holdFrom(new Set()), done: () => false, takes: "any", claims: [{ ticket: 5, lane: "2", pid: 222 }], self: "2", others: [] });
+  assert.deepEqual(ownOnly, { ticket: null, waitOn: [] });
+  // A parked ticket on the chain is no one's to land: no wait for it.
+  const parked = ticketOf(6, { labels: ["needs-info"], blockers: [] });
+  const chain = [ticketOf(5, { labels: [] }), parked, ticketOf(7, { labels: ["run-ready", "walk"], blockers: [6] })];
+  const parkedChoice = laneChoice({ tickets: chain, byNumber: new Map(chain.map((t) => [t.number, t])), hold: holdFrom(new Set()), done: () => false, takes: "walk", claims: [], self: "2", others: [{ id: "1", takes: "any" }] });
+  assert.deepEqual(parkedChoice, { ticket: null, waitOn: [] });
+});
+
+// The source's later fix: lane 2 waited on one blocker while another could never be built tonight,
+// and the night's count included such tickets. One rule, canBeBuilt, for the wait and the count.
+test("a lane never waits for a ticket that can't be built tonight: a blocker parked, or one waiting on a parked one", () => {
+  const others = [{ id: "1", takes: "any" }];
+  const choose = (tickets, claims = []) => laneChoice({ tickets, byNumber: new Map(tickets.map((t) => [t.number, t])), hold: holdFrom(new Set()), done: () => false, takes: "walk", claims, self: "2", others });
+  const walk = (n, blockers) => ticketOf(n, { labels: ["run-ready", "walk"], blockers });
+  // #7 waits on #5, which lane 1 is building, and on #6, parked: #5's landing can't free #7.
+  const parked = ticketOf(6, { labels: ["needs-info"] });
+  assert.deepEqual(choose([ticketOf(5), parked, walk(7, [5, 6])], [{ ticket: 5, lane: "1", pid: 111 }]), { ticket: null, waitOn: [] });
+  // #7 waits on #5, unclaimed, which itself waits on #4, parked: no lane can build #5 tonight.
+  assert.deepEqual(choose([ticketOf(4, { labels: ["needs-info"] }), ticketOf(5, { blockers: [4] }), walk(7, [5])]), { ticket: null, waitOn: [] });
+  // A diamond: #7 waits on #5 and #6, both on #4, which lane 1 is building. One wait on each, never read as a loop.
+  const diamond = choose([ticketOf(4), ticketOf(5, { blockers: [4] }), ticketOf(6, { blockers: [4] }), walk(7, [5, 6])], [{ ticket: 4, lane: "1", pid: 111 }]);
+  assert.deepEqual(diamond.waitOn.map((w) => `${w.lane}:#${w.ticket}${w.claimed ? "" : "?"}`).sort(), ["1:#4", "1:#5?", "1:#6?"]);
+  // A real loop of blockers can never be built.
+  const loop = [walk(5, [6]), walk(6, [5])];
+  const tonight = buildableTonight({ byNumber: new Map(loop.map((t) => [t.number, t])), hold: holdFrom(new Set()), done: () => false });
+  assert.deepEqual(loop.map(tonight), [false, false]);
+});
+
+// Next to the source's "a park let go of its claim" fix: a ticket the runner's own error failed was
+// never listed as parked, so once its lane exited the other lane, still live, could build it again.
+test("a ticket the runner's own error failed is released as parked, in a lane, so the other lane never builds it tonight", () => {
+  const source = readFileSync(join(HERE, "run.mjs"), "utf8").replace(/\r\n/g, "\n");
+  const at = source.indexOf("the runner itself hit an error and stopped");
+  const catchBlock = source.slice(at, source.indexOf('outcome = "stop";', at));
+  assert.match(catchBlock, /if \(lane\) releaseParked\(run, next\.number\);/);
+  assert.match(source, /function releaseParked\(run, n\) \{\n {2}try \{\n {4}releaseClaim\(\{ dir: run\.claims, ticket: n, lane: lane\.id, parked: true \}\);/);
+  assert.equal(source.match(/releaseParked\(run, n\)/g)?.length, 2, "park() uses it too: one way to let go of a parked claim");
+});
+
+test("a lane's count is the tickets it takes that can be built tonight; a run without lanes counts as before", () => {
+  const tickets = [ticketOf(4, { labels: ["needs-info"] }), ticketOf(5, { blockers: [4] }), ticketOf(6), ticketOf(7, { blockers: [6] })];
+  const tonight = buildableTonight({ byNumber: new Map(tickets.map((t) => [t.number, t])), hold: holdFrom(new Set()), done: () => false });
+  assert.deepEqual(tickets.map(tonight), [false, false, true, true], "#5 waits on a parked ticket; #7 on one that can still be built");
+  const source = readFileSync(join(HERE, "run.mjs"), "utf8").replace(/\r\n/g, "\n");
+  assert.match(
+    source,
+    /const reachable = inScope\.filter\(\(ticket\) => \{\n {4}const reason = holdReason\(ticket, byNumber\);\n {4}\/\/ A lane counts what its row takes and can be built tonight \(claim\.mjs buildableTonight\): never a ticket behind a park\.\n {4}if \(lane\) return takesTicket\(lane\.takes, ticket\) && tonight\(ticket\);\n {4}return reason === null \|\| reason\.startsWith\("waiting on #"\);\n {2}\}\);/,
+    "one lane: today's count, byte for byte",
+  );
+});
+
+test("a run without lanes picks tickets as today: the first ready one in order, built read off HEAD; a lane reads the phase branch", () => {
+  const source = readFileSync(join(HERE, "run.mjs"), "utf8").replace(/\r\n/g, "\n"); // a Windows checkout may have CRLF
+  const body = (name) => source.slice(source.indexOf(`function ${name}(`), source.indexOf("\n}\n", source.indexOf(`function ${name}(`)));
+  assert.match(body("nextTicket"), /^function nextTicket\([^)]*\) \{\n {2}if \(!lane\) return inScope\.find\(\(ticket\) => holdReason\(ticket, byNumber\) === null\);/, "one lane: today's pick, before any claim");
+  assert.match(source, /let builtRef = "HEAD";/, "one lane: main..HEAD, as before");
+  assert.match(source, /if \(lane\) builtRef = branch;/, "a lane: the phase branch, never its own");
+  assert.match(body("builtOnBranch"), /builtOn\(gitTry, builtRef, number\)/);
+  // The claim file is run state: the primary checkout's, never the worktree's (ADR 0007).
+  assert.match(source, /claims: roots \? roots\.copyDir : null/);
+});
+
+// ------------------------------------------------------------------ the fingerprint (#35)
+
+const SHA_X = "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881"; // sha256("x")
+const SHA_SHOT = "8dccea5217902053b636f0e105c590eb30db4280b8a7a51806110f7ff7b5177e"; // sha256("shot")
+/** A project whose screens live in `app/`, not `src/`: the browser check's own paths decide what is source. */
+const appCheck = () => runConfig({ browserCheck: { screenFiles: "^app/", sourceFiles: "^app/", screenshots: "shots/{N}", minimum: 1, redo: "walk it" } }).browserCheck;
+
+/**
+ * A ticket's tree after a pass: app/page.tsx changed, app/gone.tsx deleted, a devlog edit, one
+ * screenshot from before the last source edit, and one after it, in a subfolder. Fixed times only.
+ */
+function passedTree() {
+  const root = mkdtempSync(join(tmpdir(), "phase-run-print-"));
+  const put = (rel, body, at) => {
+    mkdirSync(dirname(join(root, rel)), { recursive: true });
+    writeFileSync(join(root, rel), body);
+    utimesSync(join(root, rel), new Date(at), new Date(at));
+  };
+  put("shots/35/old.png", "stale", 1000_000);
+  put("app/page.tsx", "x", 2000_000);
+  put("docs/history/devlog.md", "notes", 2500_000);
+  put("shots/35/wide/1280.png", "shot", 3000_000);
+  return { root, put, changed: ["app/page.tsx", "app/gone.tsx", "docs/history/devlog.md"] };
+}
+const ticket35 = (labels = ["run-ready"]) => ({ number: 35, labels });
+
+test("a browser-check pass records a hash of each changed source file under the check's paths, and of each counted screenshot", () => {
+  const { root, changed } = passedTree();
+  const verdict = browserCheckVerdict({ check: appCheck(), ticket: ticket35(), changed, startedAt: 0, root });
+  assert.equal(verdict.problem, null);
+  assert.deepEqual(verdict.fingerprint, {
+    // A file the ticket deleted is recorded as gone; the devlog is not source; the stale shot does not count.
+    sources: { "app/page.tsx": SHA_X, "app/gone.tsx": null },
+    screenshots: { "shots/35/wide/1280.png": SHA_SHOT },
+  });
+});
+
+test("a fingerprint carries on a tree where all its files are unchanged, and says re-check, naming the file, when one changed or a counted screenshot is gone", () => {
+  const { root, put, changed } = passedTree();
+  const { fingerprint } = browserCheckVerdict({ check: appCheck(), ticket: ticket35(), changed, startedAt: 0, root });
+  assert.deepEqual(compareFingerprint(fingerprint, root), { verdict: "carry" });
+  // Files the fingerprint never judged may change: the devlog, the stale screenshot.
+  put("docs/history/devlog.md", "more notes", 4000_000);
+  put("shots/35/old.png", "other", 4000_000);
+  assert.deepEqual(compareFingerprint(fingerprint, root), { verdict: "carry" });
+
+  put("app/page.tsx", "y", 5000_000);
+  assert.deepEqual(compareFingerprint(fingerprint, root), { verdict: "re-check", file: "app/page.tsx", why: "changed" });
+  put("app/page.tsx", "x", 5000_000);
+
+  put("app/gone.tsx", "back", 5000_000);
+  assert.deepEqual(compareFingerprint(fingerprint, root), { verdict: "re-check", file: "app/gone.tsx", why: "changed" });
+  rmSync(join(root, "app/gone.tsx"));
+
+  rmSync(join(root, "shots/35/wide/1280.png"));
+  assert.deepEqual(compareFingerprint(fingerprint, root), { verdict: "re-check", file: "shots/35/wide/1280.png", why: "gone" });
+  put("shots/35/wide/1280.png", "another walk", 5000_000);
+  assert.deepEqual(compareFingerprint(fingerprint, root), { verdict: "re-check", file: "shots/35/wide/1280.png", why: "changed" });
+});
+
+test("which files count as source is the browser check's sourceFiles, never a fixed src/", () => {
+  const { root, put } = passedTree();
+  put("src/legacy.ts", "x", 2000_000);
+  const changed = ["app/page.tsx", "src/legacy.ts"];
+  const { fingerprint } = browserCheckVerdict({ check: appCheck(), ticket: ticket35(), changed, startedAt: 0, root });
+  assert.deepEqual(Object.keys(fingerprint.sources), ["app/page.tsx"]);
+  const srcCheck = runConfig({ browserCheck: { screenFiles: "^app/", sourceFiles: "^src/", screenshots: "shots/{N}", minimum: 1, redo: "walk it" } }).browserCheck;
+  assert.deepEqual(browserCheckVerdict({ check: srcCheck, ticket: ticket35(), changed, startedAt: 0, root }).fingerprint.sources, { "src/legacy.ts": SHA_X });
+});
+
+test("a ticket with no browser check records no fingerprint, and a failed check records none", () => {
+  const { root } = passedTree();
+  // No screen file changed and no frontend label: the check does not apply.
+  assert.deepEqual(browserCheckVerdict({ check: appCheck(), ticket: ticket35(), changed: ["docs/history/devlog.md"], startedAt: 0, root }), { problem: null, fingerprint: null });
+  // A project with no browser check at all.
+  assert.deepEqual(browserCheckVerdict({ check: null, ticket: ticket35(["frontend"]), changed: ["app/page.tsx"], startedAt: 0, root }), { problem: null, fingerprint: null });
+  // A failed check: today's problem text, and no fingerprint.
+  const failed = browserCheckVerdict({ check: appCheck(), ticket: ticket35(["frontend"]), changed: ["app/page.tsx"], startedAt: 9000_000, root });
+  assert.equal(failed.fingerprint, null);
+  assert.match(failed.problem, /^This ticket changes what a screen shows, and shots\/35\/ holds 0 screenshot\(s\) saved after your last edit/);
+
+  // The result gains the key only with a fingerprint: a ticket without one has a result as before.
+  // Both of runGates' passing returns (a lane's, and the one after the migration) carry it.
+  const source = readFileSync(join(HERE, "run.mjs"), "utf8").replace(/\r\n/g, "\n");
+  const body = (name) => source.slice(source.indexOf(`async function ${name}(`), source.indexOf("\n}\n", source.indexOf(`async function ${name}(`)));
+  assert.match(body("finishBuilt"), /\.\.\.\(fingerprint \? \{ fingerprint \} : \{\}\)/);
+  assert.equal(body("runGates").match(/return \{ ok: true, fingerprint \};/g)?.length, 2);
+  assert.doesNotMatch(body("runGates"), /return \{ ok: true \}/);
+});
+
+test("a fingerprint's paths keep one separator, and a changed path that is a folder is recorded as no file, never a crash", () => {
+  const { root, put } = passedTree();
+  mkdirSync(join(root, "app", "vendor"), { recursive: true }); // a submodule's folder
+  utimesSync(join(root, "app", "vendor"), new Date(2000_000), new Date(2000_000)); // fixed, before the shot
+  const slash = runConfig({ browserCheck: { screenFiles: "^app/", sourceFiles: "^app/", screenshots: "shots/{N}/", minimum: 1, redo: "walk it" } }).browserCheck;
+  const { fingerprint } = browserCheckVerdict({ check: slash, ticket: ticket35(), changed: ["app/page.tsx", "app/vendor"], startedAt: 0, root });
+  assert.deepEqual(fingerprint, { sources: { "app/page.tsx": SHA_X, "app/vendor": null }, screenshots: { "shots/35/wide/1280.png": SHA_SHOT } });
+  assert.deepEqual(compareFingerprint(fingerprint, root), { verdict: "carry" });
+  put("app/page.tsx", "y", 5000_000);
+  assert.equal(compareFingerprint(fingerprint, root).file, "app/page.tsx");
 });
