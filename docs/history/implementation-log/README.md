@@ -10,6 +10,7 @@ what was built, why it works that way, and how to say it out loud. The index bel
 <!-- generated:start implementation-log -->
 ### Current phase
 
+- [027](027-a-new-gotchas-file-judged-in-the-lane.md) · `#27` · 2026-11-13 · A phase's new gotchas file, judged in the lane
 - [026](026-setups-lane-checklist.md) · `#40` · 2026-11-10 · Setup's lane checklist and the guide's examples
 - [025](025-the-listed-code-rule.md) · `#39` · 2026-11-10 · The listed-code rule
 - [024](024-findings-and-the-reports-lane-reading.md) · `#38` · 2026-11-10 · Findings and the reports' lane reading

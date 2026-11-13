@@ -115,3 +115,9 @@ listed in the gotchas index, `docs/agents/gotchas/README.md`.
 - A lane row's `qa`, `ports` and `testDbPrefix` are never proposed (D2). With `phaseRun.qa` set, two rows without their own `qa` are refused, so the walk's values go in `answers.workflow` and are kept there. pinned: the same file (both loaders).
 - `worktreeSetup.copy` proposes only untracked files that exist, because `lane.mjs` refuses an absent one at a lane's start.
 - The template guide is at 647 of 760 lines. Its examples are sketches with `<…>` for every port and database, and they cite no file path a project's own `PATH_ROOTS` could turn into a missing-path failure.
+
+**`#27`, attended (devlog #42) — a phase's new gotchas file and a lane's block, `template/tools/doc-lib.mjs` `foldBlock` / `LANE_DIR`, `numbering.mjs` `numberLane`, `doc-check.mjs` `laneBlocks` (built 2026-11-13):**
+- One fold rule, `foldBlock`, which Landing and doc-check both call. Never give either its own copy: the check would pass a file that Landing writes another way. It sits in doc-lib because doc-check imports doc-lib, so the run's copy carries it (`snapshot.mjs` `docTools`).
+- With no file on the tip, the base is the lane's own copy (`files[target]`); the tip's copy wins whenever it has one. pinned: `tests/phase-run-numbering.test.mjs`, `tests/phase-run-landing.test.mjs` (both lanes make the file).
+- doc-check reads `.lane/` only while `PHASE_RUN_LANE` is set; outside a lane the tree is judged byte for byte as before. pinned: `template/tools/doc-tools.test.mjs`.
+- doc-check's own `read` and `exists` shadow doc-lib's, so every check sees a block's file as it will land. A new check that reads docs must call them, not `readFile` or `existsSync`.

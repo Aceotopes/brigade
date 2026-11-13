@@ -121,7 +121,7 @@ const gitIn = (dir) => (...args) => execFileSync("git", args, { cwd: dir, encodi
 function twoLanes({ base: baseFiles = {}, lane = {}, other = {}, laneMessage = "feat(app): the lane's work — devlog #NNN, Closes #7\n" } = {}) {
   const { dir, git } = repo("brigade-landing-");
   git("config", "core.autocrlf", "false");
-  write(dir, {
+  const baseTree = {
     [DEVLOG]: BASE_DEVLOG,
     [`${LOGS}/005-base.md`]: "# #005 — base\n",
     [INDEX]: "- 005-base.md\n",
@@ -129,7 +129,9 @@ function twoLanes({ base: baseFiles = {}, lane = {}, other = {}, laneMessage = "
     "src/shared.mjs": SHARED,
     "tools/index.mjs": INDEX_JOB,
     ...baseFiles,
-  });
+  };
+  // A base file given as null is left out of the base (a phase with no gotchas file yet).
+  write(dir, Object.fromEntries(Object.entries(baseTree).filter(([, text]) => text !== null)));
   git("add", "-A");
   git("commit", "-q", "-m", "base — devlog #5");
   git("branch", BRANCH);
@@ -142,6 +144,7 @@ function twoLanes({ base: baseFiles = {}, lane = {}, other = {}, laneMessage = "
   const commitOn = (branch, files, message) => {
     git("checkout", "-q", branch);
     for (const [path, text] of Object.entries(files)) {
+      if (text === undefined) continue; // left out of this side's commit
       if (text === null) git("rm", "-q", path);
       else write(dir, { [path]: text });
     }
@@ -245,6 +248,29 @@ test("the other lane landed first: the lane's commit is replayed, numbered N+1, 
   assert.match(tree, /^src\/other\.mjs$/m);
   assert.equal(git("rev-parse", "--abbrev-ref", "HEAD"), "main", "the primary checkout is never touched");
   onlyPrimary(setup);
+});
+
+// The source's later fix: two lanes each made the phase's new gotchas file, and Landing met an
+// add/add conflict. Here the conflict falls on the own-file row, so Landing settles it: the tip's
+// copy, with the lane's block from its scratch file.
+const HEAD_COPY = "---\njob: Phase two-lanes: the traps.\nkind: living\nmax-lines: 800\n---\n# Gotchas — Phase two-lanes\n\n## The blocks\n";
+
+test("a phase's new gotchas file: the first landing keeps the lane's head, the second lands on the first's copy", async () => {
+  // Neither side's base has the file. The other lane landed #6, which made it (its head, its block).
+  const both = twoLanes({
+    base: { [GOTCHAS]: null },
+    lane: { [GOTCHAS]: HEAD_COPY },
+    other: { [GOTCHAS]: `${HEAD_COPY}\n**\`#6\` — theirs:**\n- one\n` },
+  });
+  const second = await landIt(both);
+  assert.equal(second.status, "landed", JSON.stringify(second));
+  assert.equal(both.git("show", `${BRANCH}:${GOTCHAS}`), `${HEAD_COPY}\n**\`#6\` — theirs:**\n- one\n\n**\`#7\` — the lane's block:**\n- see devlog #7`);
+
+  // The tip has no file at all: the lane's own copy starts it, its head kept.
+  const first = twoLanes({ base: { [GOTCHAS]: null }, lane: { [GOTCHAS]: HEAD_COPY }, other: { [GOTCHAS]: undefined } });
+  const landed = await landIt(first);
+  assert.equal(landed.status, "landed", JSON.stringify(landed));
+  assert.equal(first.git("show", `${BRANCH}:${GOTCHAS}`), `${HEAD_COPY}\n**\`#7\` — the lane's block:**\n- see devlog #7`);
 });
 
 test("a conflict in a file on no hotspot row parks the ticket on -parked-<N>, the phase branch unmoved", async () => {

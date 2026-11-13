@@ -33,6 +33,23 @@ export function read(rel) {
   return readFileSync(join(ROOT, rel), "utf8").replace(/\r\n/g, "\n");
 }
 
+/**
+ * Where a lane (0.7.0, ADR 0006) writes a block it may not write in place: `.lane/<the file's path>`,
+ * a file each ticket adds a block to (the phase's gotchas file). Landing folds it in (foldBlock).
+ */
+export const LANE_DIR = ".lane";
+
+/**
+ * An own file with a lane's block added, the one rule Landing writes it by and doc-check judges a
+ * lane's block by: `base` (the file's text, or null when there is none yet) with `block` appended,
+ * in `base`'s line endings; the block alone when there is no base.
+ */
+export function foldBlock(base, block) {
+  if (base == null || !base.trim()) return block;
+  const eol = base.includes("\r\n") ? "\r\n" : "\n";
+  return `${base.trimEnd()}${eol}${eol}${block.trim().replace(/\r\n/g, "\n").replace(/\n/g, eol)}${eol}`;
+}
+
 /** Writes LF text back in the line endings the file already had. */
 export function write(rel, text) {
   const abs = join(ROOT, rel);

@@ -560,6 +560,61 @@ test("a lane's entry still needs its type tag; an older doc-config without the t
   assert.match(lane("--message", "x — devlog #NNN").stderr, /type "party"/);
 });
 
+// A lane's gotchas block (the source's later fix): it waits in `.lane/<file>` until Landing folds it
+// into `<file>`, so doc-check in the lane judges the file as it will land, not after.
+
+/** withLog's repo, with a live gotchas folder whose files are read for stale phrases and paths. */
+function withGotchas() {
+  const repository = withLog();
+  const { dir } = repository;
+  const config = readFileSync(join(dir, "tools", "doc-config.mjs"), "utf8")
+    .replace('export const LIVE_DOCS = ["docs/roadmap.md"];', 'export const LIVE_DOCS = ["docs/roadmap.md", "docs/gotchas"];')
+    .replace("export const STATUS_DOCS = /^docs\\/roadmap\\.md$/;", "export const STATUS_DOCS = /^docs\\/(roadmap\\.md|gotchas\\/.+)$/;");
+  writeFileSync(join(dir, "tools", "doc-config.mjs"), config);
+  const head = "---\njob: Phase p: the traps.\nkind: living\nmax-lines: 40\n---\n# Gotchas — Phase p\n\n## The blocks\n";
+  const block = (line) => {
+    mkdirSync(join(dir, ".lane", "docs", "gotchas"), { recursive: true });
+    writeFileSync(join(dir, ".lane", "docs", "gotchas", "p.md"), `**\`#5\` — the lane's block:**\n- ${line}\n`);
+  };
+  const file = (text) => {
+    mkdirSync(join(dir, "docs", "gotchas"), { recursive: true });
+    writeFileSync(join(dir, "docs", "gotchas", "p.md"), text);
+  };
+  return { ...repository, head, block, file };
+}
+
+test("in a lane, a gotchas block in .lane/ is judged as the file it lands in: a stale phrase, a missing path", () => {
+  const { lane, block, file, head } = withGotchas();
+  file(head);
+  block("the fix is not yet pushed");
+  const stale = lane();
+  assert.equal(stale.status, 1);
+  assert.match(stale.stderr, /docs\/gotchas\/p\.md:\d+ reads as stale: - the fix is not yet pushed/);
+  assert.match(stale.stderr, /\.lane\/docs\/gotchas\/p\.md/, "the problem says where the block is");
+  block("see docs/nowhere.md");
+  assert.match(lane().stderr, /docs\/gotchas\/p\.md:\d+ names a file that does not exist: docs\/nowhere\.md/);
+  block("a plain trap");
+  const clean = lane();
+  assert.equal(clean.status, 0, clean.stderr);
+});
+
+test("in a lane, a block whose file is new needs the lane's own copy, made from the template, for its header", () => {
+  const { lane, block, file, head } = withGotchas();
+  block("a plain trap");
+  assert.match(lane().stderr, /docs\/gotchas\/p\.md: has no header/, "no file yet: the block alone would land");
+  file(head);
+  const copied = lane();
+  assert.equal(copied.status, 0, copied.stderr);
+});
+
+test("outside a lane, .lane/ is never read: the tree is judged as before", () => {
+  const { node, block, file, head } = withGotchas();
+  file(head);
+  block("the fix is not yet pushed");
+  const outside = node("doc-check.mjs");
+  assert.equal(outside.status, 0, outside.stderr);
+});
+
 // D10 (#31): inside a run doc-check runs from the run's copy of tools/, and checks the repo.
 
 /** The repo's doc tools copied to its run's copy, `.phase-run/phase-x/runner/tools/`, and a way to run that copy. */

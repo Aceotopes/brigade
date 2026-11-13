@@ -285,6 +285,10 @@ export async function fixClock(page) {
 - **Hotspots** are the files every ticket writes at one spot. Landing numbers a `log` entry and
   rebuilds a `generated` index, and it adds an `own-file` block to the end of the file. Any other
   file is left to git. Setup's refresh offers a row when `tools/doc-config.mjs` gains a path.
+- **The gotchas file.** A lane writes its block to `.lane/<the file>`. A lane in a phase with no
+  gotchas file yet makes the file from the template, without its block. Whichever lane lands first
+  keeps its copy. In a lane, doc-check judges the file with the block folded in, so a fault fails
+  there, not at Landing.
 
 A mistake in that section stops the run before it starts (dry runs too), and says what is wrong.
 

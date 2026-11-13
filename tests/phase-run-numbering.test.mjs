@@ -91,9 +91,21 @@ test("a lane's gotchas block in .lane/ is folded into the phase's gotchas file b
   const out = landing();
   assert.equal(out.files["docs/agents/gotchas/two-lanes.md"], `${TIP_GOTCHAS}\n**\`#7\` — the lane's block (built 2026-11-09):**\n- see devlog #42\n`);
   assert.equal(out.files[scratchFor("docs/agents/gotchas/two-lanes.md")], null, "the scratch file goes");
-  // No gotchas file on the tip yet: the block starts it.
+  // No gotchas file on the tip, and no copy of the lane's own: the block alone, which doc-check in the lane refuses (no header).
   const first = landing({ tip: { "docs/history/devlog.md": TIP_DEVLOG } });
   assert.equal(first.files["docs/agents/gotchas/two-lanes.md"], "**`#7` — the lane's block (built 2026-11-09):**\n- see devlog #42\n");
+});
+
+// The source's later fix: two lanes each made a phase's new gotchas file. Here a lane makes it from
+// the template, without its block, and its block rides in .lane/ as always.
+const LANE_COPY = "---\njob: Phase two-lanes: the traps.\nkind: living\nmax-lines: 800\n---\n# Gotchas — Phase two-lanes\n\n## The blocks\n";
+
+test("a phase's new gotchas file: the lane's own copy keeps its head, and the tip's copy wins once it has one", () => {
+  const files = { "docs/agents/gotchas/two-lanes.md": LANE_COPY, [scratchFor("docs/agents/gotchas/two-lanes.md")]: BLOCK };
+  const fresh = landing({ files, tip: { "docs/history/devlog.md": TIP_DEVLOG } });
+  assert.equal(fresh.files["docs/agents/gotchas/two-lanes.md"], `${LANE_COPY}\n**\`#7\` — the lane's block (built 2026-11-09):**\n- see devlog #42\n`, "the lane's head, then its block");
+  const onTip = landing({ files });
+  assert.equal(onTip.files["docs/agents/gotchas/two-lanes.md"], `${TIP_GOTCHAS}\n**\`#7\` — the lane's block (built 2026-11-09):**\n- see devlog #42\n`, "the other lane's file, already landed, is kept");
 });
 
 test("a row may name its files by a pattern, and keeps the tip's line endings", () => {
@@ -147,6 +159,7 @@ test("a lane session's prompt tells it to write NNN where a number goes; a one-l
   assert.match(lane, /`NNN-<slug>\.md`/);
   assert.match(lane, /`devlog #NNN`/);
   assert.match(lane, /`\.lane\/docs\/agents\/gotchas\/two-lanes\.md`/);
+  assert.match(lane, /does not exist yet, make it from the template with no block of yours/, "a phase's new file lands with its header");
   assert.equal(render("a.{{LANE_NUMBERS}}\nb", { LANE_NUMBERS: "" }), "a.\nb");
   // A token doc-check would refuse is never handed to a lane.
   const custom = parseRunConfig({ version: 1, phaseRun: { hotspots: { token: "XX", rows: [] } } });

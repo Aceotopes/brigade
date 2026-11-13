@@ -55,7 +55,7 @@ import {
 import * as docConfig from "./doc-config.mjs";
 import { staleIndexes } from "./doc-index.mjs";
 import { parseRoadmap } from "./roadmap-format.mjs";
-import { IN_COPY, ROOT, TOOLS_ROOT, budgetProblems, citedDevlogNumbers, devlogEntries, escapeRegExp, git, isMain, parseFrontmatter, read } from "./doc-lib.mjs";
+import { IN_COPY, LANE_DIR, ROOT, TOOLS_ROOT, budgetProblems, citedDevlogNumbers, devlogEntries, escapeRegExp, foldBlock, git, isMain, parseFrontmatter, read as readFile } from "./doc-lib.mjs";
 
 // Beside this file: the repo's, or inside a run the copy's, which the run took at its start (D10).
 const BASELINE_PATH = join(TOOLS_ROOT, "tools", "doc-check-baseline.json");
@@ -76,6 +76,50 @@ const IN_LANE = Boolean(process.env.PHASE_RUN_LANE);
 const LOG_DIR = (docConfig.GENERATED ?? []).find((index) => index.name === "implementation-log")?.dir ?? null;
 /** A log file a lane named with the token, `<LOG_DIR>/NNN-<slug>.md`. */
 const isUnnumberedLog = (file) => LOG_DIR !== null && file.startsWith(`${LOG_DIR}/${TOKEN}-`) && file.endsWith(".md");
+
+/**
+ * A lane's blocks: each `.lane/<file>.md` it wrote, as `<file>` with the block folded in, the way
+ * Landing writes it (doc-lib.mjs foldBlock). Read only in a lane, so a block's stale phrase, missing
+ * path or missing header fails in the lane's own rounds, not at Landing's re-gate. Elsewhere none.
+ */
+function laneBlocks() {
+  const blocks = new Map();
+  const visit = (rel) => {
+    const abs = join(ROOT, rel);
+    if (!existsSync(abs)) return;
+    if (statSync(abs).isDirectory()) {
+      for (const name of readdirSync(abs)) visit(`${rel}/${name}`);
+      return;
+    }
+    if (!rel.endsWith(".md")) return;
+    const target = rel.slice(LANE_DIR.length + 1);
+    blocks.set(target, foldBlock(existsSync(join(ROOT, target)) ? readFile(target) : null, readFile(rel)));
+  };
+  if (IN_LANE) visit(LANE_DIR);
+  return blocks;
+}
+const LANE_BLOCKS = laneBlocks();
+
+/** A doc's text as doc-check judges it: in a lane, a file with a block waiting in `.lane/` has it folded in. */
+function read(rel) {
+  return LANE_BLOCKS.get(rel) ?? readFile(rel);
+}
+
+/** Whether a repo path is there to judge: on disk, or a lane block's file that its landing will make. */
+function exists(rel) {
+  return LANE_BLOCKS.has(rel) || existsSync(join(ROOT, rel));
+}
+
+/** Where a problem with a lane block's file comes from: the file as it will land, with the block from `.lane/`. */
+function laneNote(failure) {
+  const target = [...LANE_BLOCKS.keys()].find((path) => failure.startsWith(`${path}:`));
+  return target ? ` (judged with the lane's block, ${LANE_DIR}/${target}, folded in as Landing will add it)` : "";
+}
+
+/** The lane blocks' files under a doc-config entry (a file or a folder), for the lists walk() builds from disk. */
+function laneTargetsUnder(entry, out) {
+  for (const target of LANE_BLOCKS.keys()) if (target === entry || target.startsWith(`${entry}/`)) out.push(target);
+}
 
 const STALE_PHRASES = [
   "not yet committed",
@@ -119,14 +163,20 @@ function walk(rel, out) {
 
 function liveFiles() {
   const out = [];
-  for (const entry of LIVE_DOCS) walk(entry, out);
+  for (const entry of LIVE_DOCS) {
+    walk(entry, out);
+    laneTargetsUnder(entry, out);
+  }
   return [...new Set(out)].sort();
 }
 
 /** HEADER_REQUIRED entries are files or folders; a folder covers every .md under it. */
 function requiredHeaderFiles() {
   const out = [];
-  for (const entry of HEADER_REQUIRED) walk(entry, out);
+  for (const entry of HEADER_REQUIRED) {
+    walk(entry, out);
+    laneTargetsUnder(entry, out);
+  }
   return out.filter((file) => file.endsWith(".md"));
 }
 
@@ -156,7 +206,7 @@ function scan() {
         const path = match[0];
         // A pattern, not a path: `docs/guides/module-N.md`, `NNN-*.md`, `001-...md`.
         if (/(^|[/_-])N([-_.]|$)|NNN|\.\.\./.test(path)) continue;
-        if (existsSync(join(ROOT, path))) {
+        if (exists(path)) {
           present.push({ file, line: index + 1, text: path, repoPath: path });
           continue;
         }
@@ -168,7 +218,7 @@ function scan() {
         const target = match[1];
         if (/^([a-z][a-z0-9+.-]*:|\/|<)/i.test(target)) continue;
         const repoPath = posix.normalize(posix.join(posix.dirname(file), decodeURI(target)));
-        if (existsSync(join(ROOT, repoPath))) {
+        if (exists(repoPath)) {
           present.push({ file, line: index + 1, text: `](${target})`, repoPath });
           continue;
         }
@@ -250,7 +300,7 @@ function machineOnly(present) {
 function headeredFiles() {
   const required = new Set(requiredHeaderFiles());
   const files = [...new Set([...liveFiles(), ...required, DEVLOG])]
-    .filter((f) => f.endsWith(".md") && existsSync(join(ROOT, f)))
+    .filter((f) => f.endsWith(".md") && exists(f))
     .filter((f) => !HEADER_EXEMPT.some((pattern) => pattern.test(f)))
     // A lane's log is exempt as its numbered name will be; outside a lane, unnumberedProblems names it.
     .filter((f) => !isUnnumberedLog(f))
@@ -581,7 +631,7 @@ function main() {
     return;
   }
   console.error(`doc-check: ${failures.length} problem(s).\n`);
-  for (const failure of failures) console.error(`  - ${failure}`);
+  for (const failure of failures) console.error(`  - ${failure}${laneNote(failure)}`);
   console.error(
     "\nFix each line. If a stale phrase or a missing path is correct as written (it quotes the phrase, or says the " +
       "file is gone), an attended session records it with: node tools/doc-check.mjs --update-baseline",

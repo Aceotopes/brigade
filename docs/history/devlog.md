@@ -9,6 +9,16 @@ Each commit's entry goes on top, in the shape of `docs/_templates/devlog-entry.m
 message cites it (`devlog #N`). At each phase end, `node tools/doc-rotate.mjs` moves the closed
 entries into `docs/history/devlog/`.
 
+## #42 · fix · a phase's new gotchas file, judged in the lane
+
+**Built:** (attended, before #41) the first of the source's later two-lane fixes, checked by symptom against this branch (discovery 05's 2026-11-13 addendum, with the owner's calls).
+- With no gotchas file on the tip, Landing wrote the lane's block alone, so the file had no header and the re-gate parked the ticket. #41's two tickets would both have parked. Now the block folds onto the tip's copy, or else onto the lane's own copy made from the template (`numberLane`). An add/add from two lanes lands as the tip's copy plus the block.
+- One fold rule, `foldBlock` in `doc-lib.mjs`, shared by Landing and doc-check.
+- In a lane, doc-check judges each `.lane/<file>` folded onto its file, so a stale word, a missing path or a missing header fails in the lane's own rounds, not at Landing. Outside a lane, `.lane/` is unread.
+- The lane prompt tells a lane to make a phase's missing gotchas file from the template, with no block of its own.
+**Verified:** 5 tests written first (red, then green): numbering, Landing on throwaway repos (both lanes make the file; the tip has none), and doc-check in a lane. The full test command passes (468), and doc-check is clean. Addresses #27.
+**Next:** the lanes' values reach their gates. **Record:** implementation log 027.
+
 ## #41 · feat · setup's lane checklist and the guide's examples
 
 **Built:** #40. Setup proposes two lanes, writes them only on a yes, and asks what a lane needs of the project's tools (D4, D7, D8, D15, D16).

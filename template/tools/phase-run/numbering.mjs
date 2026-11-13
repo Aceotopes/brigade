@@ -18,10 +18,11 @@
 // token stands decides which it takes: a log's file name, its `# #NNN` title and a bare `NNN` (as in
 // "implementation log NNN") take the log's; every other `#NNN` (`## #NNN ·`, `devlog #NNN`,
 // `**Devlog:** \`#NNN\``) takes the devlog's.
+import { LANE_DIR, foldBlock } from "../doc-lib.mjs";
 import { HOTSPOT_TOKEN } from "./config.mjs";
 
-/** Where a lane writes what it may not write in place: an own-file block. */
-export const LANE_DIR = ".lane";
+/** Where a lane writes what it may not write in place: an own-file block (doc-lib.mjs, which doc-check shares). */
+export { LANE_DIR };
 
 /** The scratch file a lane writes its block for an own-file `path` into. */
 export function scratchFor(path) {
@@ -85,13 +86,6 @@ function withEntry(path, lane, tip, token, numbers) {
   return tip.slice(0, where) + inEol(`${entry.replace(/\r\n/g, "\n")}\n`, eolOf(tip)) + tip.slice(where);
 }
 
-/** An own file: the tip's text with the lane's block appended, or the block alone when the tip has none. */
-function fold(tip, block) {
-  if (tip == null || !tip.trim()) return block;
-  const eol = eolOf(tip);
-  return `${tip.trimEnd()}${eol}${eol}${inEol(block.trim(), eol)}${eol}`;
-}
-
 /**
  * A lane's commit, numbered for the tip.
  *   files     the lane commit's changed files, `{ path: text }`, a deleted one `null`
@@ -113,13 +107,15 @@ export function numberLane({ files, message = "", tip = {}, last, hotspots, phas
   const rows = (hotspots?.rows ?? []).map((row) => rowMatcher(row, phase));
   const out = {};
 
-  // An own-file block, from its scratch file; it replaces any edit the lane made to the file itself.
+  // An own-file block, from its scratch file, folded onto the tip's file. A file the tip lacks (a
+  // phase's first) starts from the lane's own copy, made from the template, so its header lands;
+  // otherwise the lane's edit to the file itself gives way to the tip's.
   for (const [path, text] of Object.entries(files)) {
     if (!path.startsWith(`${LANE_DIR}/`)) continue;
     const target = path.slice(LANE_DIR.length + 1);
     if (rowFor(target, rows)?.kind !== "own-file") continue;
     out[path] = null;
-    if (text !== null) out[target] = fold(tip[target], fill(text, token, numbers));
+    if (text !== null) out[target] = foldBlock(tip[target] ?? files[target] ?? null, fill(text, token, numbers));
   }
 
   const named = new RegExp(`^${escapeRegExp(token)}-.+\\.md$`);

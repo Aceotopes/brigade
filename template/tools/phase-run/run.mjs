@@ -900,7 +900,9 @@ function laneNumbers(lane, token, gotchasFile) {
     `\`${token}\` stood for "your number"; here it is the text you write: the devlog heading \`## #${token} · <type> · <title>\`, ` +
     `the log's file name \`${token}-<slug>.md\`, its title \`# #${token} — …\` and its Devlog line's \`#${token}\`, ` +
     `the devlog entry's \`implementation log ${token}\`, and \`devlog #${token}\` in the commit message. Your gotchas block goes in \`${scratchFor(gotchasFile)}\`, ` +
-    `not in \`${gotchasFile}\`: it is added to that file when your commit lands. doc-check accepts \`${token}\` only in a lane.`
+    `not in \`${gotchasFile}\`: it is added to that file when your commit lands. If \`${gotchasFile}\` does not exist yet, make it from the template with no block of yours ` +
+    `(its header and opening only), in this commit: the other lane may make it too, and Landing keeps whichever lands first. ` +
+    `doc-check, in a lane, judges the file with your block folded in. doc-check accepts \`${token}\` only in a lane.`
   );
 }
 
