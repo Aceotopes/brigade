@@ -6,6 +6,8 @@
 //   "phaseRun": {
 //     "prompt": "docs/agents/phase-run-prompt.md",   the project's prose for a session (## Read, ## Build,
 //                                                   ## Browser check, ## Review, ## Fix sections)
+//     "codeReview": "<plugin>:code-review",           the review skill the prompts call, by its full id;
+//                                                   unset, a bare `code-review`, as before
 //     "preflight": [{ "label", "run", "hint"? }],    must pass before a run starts
 //     "ports": [{ "port", "what", "freeAfterEachTicket"?, "name"? }],   must be free at the start; a lane's
 //                                                   port named "qa" is its QA server's
@@ -68,7 +70,7 @@ export const WEEK_DAYS = ["sunday", "monday", "tuesday", "wednesday", "thursday"
 export const DEFAULT_LEDGER = { attended: true, weekStarts: "monday" };
 
 const KEYS = {
-  phaseRun: ["prompt", "preflight", "ports", "qa", "sessionEnv", "strayProcess", "gates", "browserCheck", "migrations", "alwaysInScope", "permissions", "steps", "ticketSize", "tampering", "keep", "lanes", "hotspots"],
+  phaseRun: ["prompt", "codeReview", "preflight", "ports", "qa", "sessionEnv", "strayProcess", "gates", "browserCheck", "migrations", "alwaysInScope", "permissions", "steps", "ticketSize", "tampering", "keep", "lanes", "hotspots"],
   preflight: ["label", "run", "hint"],
   port: ["port", "what", "freeAfterEachTicket", "name"],
   lanes: ["rows", "claims", "worktreeSetup", "landing"],
@@ -158,6 +160,7 @@ export function parseRunConfig(data) {
   gateOrder(gates, `${where}.gates`);
   const config = {
     prompt: optionalText(run.prompt, `${where}.prompt`),
+    codeReview: run.codeReview === undefined ? null : skillName(run.codeReview, `${where}.codeReview`),
     preflight: list(run.preflight, `${where}.preflight`).map((row, i) => {
       const at = `${where}.preflight[${i}]`;
       keys(row, KEYS.preflight, at);
@@ -767,6 +770,12 @@ function list(value, at) {
 function text(value, at) {
   if (typeof value !== "string" || !value.trim()) throw new Error(`${at} is missing.`);
   return value;
+}
+
+/** A skill's name as a session lists it: `name`, or `plugin:name` (a bare name can start Claude Code's built-in skill of that name). */
+function skillName(value, at) {
+  if (typeof value === "string" && /^[A-Za-z0-9][\w.-]*(:[A-Za-z0-9][\w.-]*)?$/.test(value)) return value;
+  throw new Error(`${at} must be a skill's name, with its plugin's, such as "<plugin>:code-review" (it is ${JSON.stringify(value)}).`);
 }
 
 function optionalText(value, at) {

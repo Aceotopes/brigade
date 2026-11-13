@@ -447,6 +447,27 @@ test("Steak To Juan's example holds exactly what run.mjs hardcoded", () => {
   assert.equal(stj.stopChecks.length, 3);
 });
 
+// The source's later fix: a bare `code-review` in a prompt can start Claude Code's built-in review
+// instead of the project's. Which skill reviews a ticket is the project's, by its full id.
+test("phaseRun.codeReview names the review skill the prompts call; unset, the prompts read as today", () => {
+  const values = { N: 7, TITLE: "t", BRANCH: "phase-x", PHASE: "x", GOTCHAS_FILE: "docs/agents/gotchas/x.md", SPEC: "#5", BASE: "abc", FRONTEND: "no", GATE: "lint", OUTPUT: "x", ROUND: 1, ROUNDS: 3 };
+  const prompt = (data) => render(readFileSync(join(PLUGIN, "template", "tools", "phase-run", "ticket-prompt.md"), "utf8"), { ...values, ...promptValues(parseRunConfig(data), "", values) });
+  const named = prompt({ version: 1, phaseRun: { codeReview: "review-kit:code-review" } });
+  assert.match(named, /The `review-kit:code-review` skill reads committed work/);
+  assert.match(named, /the `review-kit:code-review` skill's reviewers/);
+  assert.doesNotMatch(named, /`code-review`/);
+  const unset = prompt({ version: 1 });
+  assert.match(unset, /The `code-review` skill reads committed work/, "today's words, byte for byte");
+  assert.match(unset, /the `code-review` skill's reviewers/);
+  assert.equal(parseRunConfig({ version: 1 }).codeReview, null);
+  // A skill's name, with its plugin's: never a sentence, a path or empty.
+  for (const bad of ["", "run the review", "skills/code-review", 7]) {
+    assert.throws(() => parseRunConfig({ version: 1, phaseRun: { codeReview: bad } }), /^Error: phaseRun\.codeReview must be a skill's name/);
+  }
+  // The hooks read nothing inside phaseRun: the key passes them by.
+  assert.doesNotThrow(() => parseWorkflowConfig({ version: 1, phaseRun: { codeReview: "review-kit:code-review" } }));
+});
+
 test("Steak To Juan's prompt, rendered from the example, still says everything its old prompt did", () => {
   const stj = parseRunConfig(STJ);
   const prose = readFileSync(join(PLUGIN, "examples", "steak-to-juan", "phase-run-prompt.md"), "utf8");

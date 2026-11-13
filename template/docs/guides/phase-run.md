@@ -196,6 +196,9 @@ The runner knows only the workflow. Everything about your project is in `.claude
 - `phaseRun.prompt`: your project's own instructions to each session (how to build, how to walk a
   screen, how to review it), a markdown file in `docs/agents/` with `## Read`, `## Build`,
   `## Browser check`, `## Review` and `## Fix` sections.
+- `phaseRun.codeReview`: the review skill each session runs on its commit, by its full id
+  (`"<plugin>:code-review"`). Unset, the prompt names a bare `code-review`, which can start Claude
+  Code's built-in review instead of yours, and setup's verify warns of it.
 
 **Worked examples, never defaults.** Setup writes no tool's rows (`propose` gives only what your
 `package.json` scripts name); it asks about your tools, and Claude writes their rows. The project

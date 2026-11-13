@@ -136,3 +136,7 @@ listed in the gotchas index, `docs/agents/gotchas/README.md`.
 - Its memo is per call: `laneChoice` builds a new one on every look, as the claims change between looks. Never hoist it to module level.
 - The one-lane count is today's byte for byte: only the `if (lane)` line changed. pinned: `run.test.mjs` (a source pin).
 - Every lane release of a parked claim goes through `releaseParked`: a park and the runner-error catch. pinned: `tests/phase-run-landing-lock.test.mjs`, `run.test.mjs`.
+
+**`#27`, attended (devlog #46) — the code review's skill, `config.mjs` `skillName`, `run.mjs` `promptValues` `CODE_REVIEW`, `scripts/setup.mjs` `verify` (built 2026-11-13):**
+- Unset, `CODE_REVIEW` is `` `code-review` `` with its backticks, so the prompt is today's byte for byte. Never drop the backticks from the value: the template has none around `{{CODE_REVIEW}}`. pinned: `tests/phase-run-config.test.mjs`.
+- This repo's own `.claude/workflow.json` may set `phaseRun.codeReview` only once its root `tools/` runner is 0.7.0: the pinned 0.6.2 loader refuses unknown keys.

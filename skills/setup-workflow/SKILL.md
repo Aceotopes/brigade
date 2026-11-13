@@ -64,6 +64,10 @@ silently: show the owner what was detected and the proposed gates, and ask in on
   it must be a shared development database, never production; if named, fill `phaseRun.migrations`
   from `template/docs/guides/phase-run.md`'s "What your config sets";
 - **a browser check** for a frontend: off unless the owner wants it (`phaseRun.browserCheck`);
+- **the code review's skill**: which skill reviews a ticket's commit, by its full id
+  (`"<plugin>:code-review"`, as the session's skill list shows it), written to
+  `phaseRun.codeReview`. A bare `code-review` can start Claude Code's built-in review; verify warns
+  while it is unset;
 - **does it have screens?** (default: yes when `frontend` is not empty; ask on an empty repo). A
   project with screens gets the design rung (`docs/agents/workflow.md`): the prompt file with its
   design review (`docs/agents/phase-run-prompt.md`, named by `phaseRun.prompt`) and

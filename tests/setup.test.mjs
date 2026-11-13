@@ -1075,6 +1075,13 @@ test("the command line: plan previews the changed files, apply writes, verify pa
   const bare = cli("verify", dir);
   assert.equal(bare.status, 0, bare.stdout);
   assert.match(bare.stdout, /^warn +the unread lists \(the listed-code rule\)\nno listed-code rule: /m);
+  // No review skill named: the prompts call a bare `code-review`, which can start Claude Code's own. A warning.
+  assert.match(bare.stdout, /^warn +the code review's skill\nphaseRun\.codeReview is not set, so a session's prompt calls a bare `code-review`/m);
+  config.phaseRun.codeReview = "review-kit:code-review";
+  writeFileSync(join(dir, ".claude/workflow.json"), `${JSON.stringify(config, null, 2)}\n`);
+  const named = cli("verify", dir);
+  assert.equal(named.status, 0, named.stdout);
+  assert.match(named.stdout, /^ok +the code review's skill$/m);
 });
 
 test("overwrite works on its own branch and archives the old docs, CLAUDE.md and settings instead of deleting them", () => {

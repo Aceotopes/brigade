@@ -873,6 +873,8 @@ function promptValues(project, prose, ticket) {
       ? `The runner checks this itself: a ticket labelled \`frontend\`, or one that changes a screen's file, does not pass without at least ${check.minimum} screenshots saved to \`${fill(check.screenshots, { N })}/\` **after your last edit to a source file**. A fix you make after the walk (the code review's, a fix round's) means walking again.`
       : "The runner has no screenshot gate for this project; say in the implementation log what you checked.",
     LANE_NUMBERS: ticket.LANE ? laneNumbers(ticket.LANE, laneToken(project.hotspots), ticket.GOTCHAS_FILE) : "",
+    // The review skill, by the project's full id (phaseRun.codeReview); unset, today's bare name.
+    CODE_REVIEW: `\`${project.codeReview ?? "code-review"}\``,
   };
 }
 

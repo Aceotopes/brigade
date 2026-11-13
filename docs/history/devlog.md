@@ -9,6 +9,15 @@ Each commit's entry goes on top, in the shape of `docs/_templates/devlog-entry.m
 message cites it (`devlog #N`). At each phase end, `node tools/doc-rotate.mjs` moves the closed
 entries into `docs/history/devlog/`.
 
+## #46 · feat · the code review's skill is config
+
+**Built:** (attended, before #41) the source's later fix "a bare `code-review` started Claude Code's built-in review", which predates 0.7.0 here.
+- `phaseRun.codeReview`: the review skill by its full id (`"<plugin>:code-review"`); the runner's loader refuses anything but a skill's name.
+- The ticket prompt reads `{{CODE_REVIEW}}`; unset, it is today's `code-review`, byte for byte.
+- Setup's skill asks for it as a checklist item, and `verify` warns while it is unset; the guide lists it.
+**Verified:** the prompt both ways, the refusals and verify's warning written first (red, then green). The full test command passes (474), and doc-check is clean. Addresses #27.
+**Next:** the guard reads a message piped to `git commit -F -`. **Record:** implementation log 031.
+
 ## #45 · fix · what can be built tonight
 
 **Built:** (attended, before #41) the source's later frontier fix, checked here: a lane waited on one blocker while another could never be built tonight.

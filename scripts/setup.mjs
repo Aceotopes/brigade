@@ -1542,6 +1542,14 @@ export async function verify(dir) {
   }
   const warnings = config ? unreadWarnings(dir, config) : [];
   results.push({ label: "the unread lists (the listed-code rule)", ok: true, warn: warnings.length > 0, output: warnings.join("\n") });
+  // A bare `code-review` can start Claude Code's built-in review, not the project's: a warning, never a failure.
+  const review = config?.phaseRun?.codeReview;
+  results.push({
+    label: "the code review's skill",
+    ok: true,
+    warn: !review,
+    output: review ? "" : "phaseRun.codeReview is not set, so a session's prompt calls a bare `code-review`, which can start Claude Code's built-in review instead of yours. Name the skill with its plugin's (\"<plugin>:code-review\").",
+  });
   return results;
 }
 
