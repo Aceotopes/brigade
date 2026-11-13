@@ -10,6 +10,7 @@ what was built, why it works that way, and how to say it out loud. The index bel
 <!-- generated:start implementation-log -->
 ### Current phase
 
+- [032](032-a-piped-commit-message-is-checked.md) · `#27` · 2026-11-13 · A piped commit message is checked
 - [031](031-the-code-reviews-skill.md) · `#27` · 2026-11-13 · The code review's skill is config
 - [030](030-what-can-be-built-tonight.md) · `#27` · 2026-11-13 · What can be built tonight
 - [029](029-landings-minutes.md) · `#27` · 2026-11-13 · Landing's minutes

@@ -9,6 +9,13 @@ Each commit's entry goes on top, in the shape of `docs/_templates/devlog-entry.m
 message cites it (`devlog #N`). At each phase end, `node tools/doc-rotate.mjs` moves the closed
 entries into `docs/history/devlog/`.
 
+## #47 · fix · the guard checks a message piped to git commit -F -
+
+**Built:** (attended, found building #27's fixes) the guard hook handed doc-check no message for `git commit -F -` with a heredoc, so a commit citing no devlog entry passed. Devlog #44's commit went in that way, and was amended before any push.
+- `hooks/guard-shell.mjs`: `-F -` is read as an inline message is, from the command's own text; `-F <file>` is still read from the file.
+**Verified:** the test written first (red, then green). The full test command passes (475), and doc-check is clean. Addresses #27.
+**Next:** the release night, #41. **Record:** implementation log 032.
+
 ## #46 · feat · the code review's skill is config
 
 **Built:** (attended, before #41) the source's later fix "a bare `code-review` started Claude Code's built-in review", which predates 0.7.0 here.

@@ -2,6 +2,7 @@
 // Run: node --test tests/*.test.mjs
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
@@ -38,6 +39,21 @@ test("the project is CLAUDE_PROJECT_DIR: its own doc-check runs before a commit 
   const result = guard(dir, 'git commit -m "feat: x"');
   assert.equal(result.status, 2);
   assert.match(result.stderr, /Blocked by Brigade's guard-shell hook: doc-check failed[\s\S]*doc-check stub ran/);
+});
+
+// Found on 2026-11-13: `git commit -F -` with a heredoc reached doc-check with no message at all, so a
+// commit citing no devlog entry passed. Its text is in the command, as an inline -m's is.
+test("a message piped to git commit -F - is checked from the command's own text, heredoc and all", () => {
+  const recorder = { "tools/doc-check.mjs": 'import { writeFileSync } from "node:fs";\nwriteFileSync("args.json", JSON.stringify(process.argv.slice(2)));\n' };
+  const { dir } = repo("brigade-project-", recorder);
+  const seen = () => JSON.parse(readFileSync(join(dir, "args.json"), "utf8"));
+  const piped = "git commit -q -F - <<'EOF'\nfeat: x — devlog #9\nEOF";
+  assert.equal(guard(dir, piped).status, 0);
+  assert.deepEqual(seen(), ["--message", piped]);
+  // A message file is still read as a file.
+  write(dir, { "msg.txt": "feat: y — devlog #9\n" });
+  assert.equal(guard(dir, "git commit -F msg.txt").status, 0);
+  assert.deepEqual(seen(), ["--message-file", join(dir, "msg.txt")]);
 });
 
 // D10 (#31): inside a run the commit's doc-check is the copy's, as the runner's gate is.

@@ -274,8 +274,8 @@ function main() {
     const file = messageFile(command, find(mine, COMMIT).dir, String.raw`\s-F|\s--file`);
     if (file) {
       args.push("--message-file", file);
-    } else if (/\s(-m|--message)[=\s]/.test(command)) {
-      // An inline message: the command's own text holds it, heredoc and all.
+    } else if (/\s(-m|--message)[=\s]/.test(command) || /\s(-F|--file)[=\s]+-(?=\s|$)/.test(command)) {
+      // An inline message, or one piped in (`-F -`): the command's own text holds it, heredoc and all.
       args.push("--message", command);
     }
     if (amend && args.length > 1) args.push("--amend");
