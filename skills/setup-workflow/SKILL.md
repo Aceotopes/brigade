@@ -147,11 +147,13 @@ proposed" in its summary). Show the owner what it proposes and ask yes or no; a 
 On a yes, ask which label lane 2 takes (`docs`, say, or the project's walk label; never `any`), and
 make sure §6 creates it. Then walk the stack for lanes. Ask these three only with lanes on:
 - **the test prefix**: how do the project's tests name their test databases, and how will they read
-  `PHASE_RUN_TEST_DB_PREFIX`? Lane 2's row gets a `testDbPrefix` (`lane2_`, say); lane 1's may leave
-  it out.
+  `PHASE_RUN_TEST_DB_PREFIX`? Each lane's row gets its own `testDbPrefix`: lane 1's can be the
+  project's own test names' prefix, lane 2's another (`lane2_`, say). Once one lane names a value
+  (a prefix, a port named `qa`, an `env` key), every lane must, or the loader refuses the table: a
+  lane that names nothing would run on what it inherits.
 - **the browser scripts' QA address**: how do they read `PHASE_RUN_QA_PORT` and
-  `PHASE_RUN_QA_DATABASE`? With `phaseRun.qa` set, lane 2's row gets its own `qa` database and a port
-  named `qa` in its `ports`.
+  `PHASE_RUN_QA_DATABASE`? With `phaseRun.qa` set, lane 2's row gets its own `qa` database, and each
+  lane's `ports` gets its own port named `qa`.
 - **the date**: do the browser scripts depend on today's date? Brigade reserves `PHASE_RUN_FAKE_NOW`
   for a project's own fake clock, and the runner never sets it.
 

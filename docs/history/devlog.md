@@ -9,6 +9,16 @@ Each commit's entry goes on top, in the shape of `docs/_templates/devlog-entry.m
 message cites it (`devlog #N`). At each phase end, `node tools/doc-rotate.mjs` moves the closed
 entries into `docs/history/devlog/`.
 
+## #43 · fix · every lane names its values, and its gates get them
+
+**Built:** (attended, before #41) the source's later fix "lane 1 ran on lane 2's test databases", checked by symptom here.
+- The runner's own gates and Landing's re-gate got only each gate's `env`, never the lane's test prefix, QA port and database or row `env`. So lane 2's suite ran on lane 1's databases. Now `laneVariables` is the one list: the session and every gate job take it, the lane's value over the gate's own. A run without lanes is today's.
+- `parseLanes`: once any lane names a test prefix, a port named `qa` or an `env` key, every lane must. A lane naming nothing has nothing to replace what it inherits, which is how the source's leak happened (its cause never traced).
+- Setup's skill and the guide's sketch give each lane its own values; setup's plan refuses a walk that gives only lane 2's.
+- A pin for the source's "older row" fix: the newest of two rows for one commit decides a restart.
+**Verified:** the gates' env and the loader's rule written first (red, then green); older fixtures now give lane 1 its own values. The full test command passes (469), and doc-check is clean. Addresses #27.
+**Next:** Landing's minutes. **Record:** implementation log 028.
+
 ## #42 · fix · a phase's new gotchas file, judged in the lane
 
 **Built:** (attended, before #41) the first of the source's later two-lane fixes, checked by symptom against this branch (discovery 05's 2026-11-13 addendum, with the owner's calls).

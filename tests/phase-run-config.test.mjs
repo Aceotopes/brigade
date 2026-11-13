@@ -260,7 +260,8 @@ test("the two loaders' tamperingRules are one text, word for word", () => {
 // hook reads lane config (owner, 2026-11-09). No `lanes` section is today's run.
 const LANES = {
   rows: [
-    { id: 1, takes: "any", worktree: "../shop-lanes/lane-1", ports: [{ port: 4100, what: "the QA server", name: "qa" }] },
+    // Lane 1 names every lane value lane 2 names (the source's later fix): its test prefix and its env key.
+    { id: 1, takes: "any", worktree: "../shop-lanes/lane-1", ports: [{ port: 4100, what: "the QA server", name: "qa" }], testDbPrefix: "lane1_", env: { CACHE_DB: "1" } },
     {
       id: 2,
       takes: "walk",
@@ -298,16 +299,16 @@ const refusal = (load) => {
 
 test("the runner's loader reads a two-lane config and its hotspots as written", () => {
   const config = parseRunConfig(withLanes(LANES, { hotspots: HOTSPOTS }));
-  // Lane 1 leaves qa and testDbPrefix out: they stay unset, with no value made up for them.
+  // Lane 1 leaves qa out: its QA database is phaseRun.qa's, with no value made up for its row.
   assert.deepEqual(
     config.lanes.rows.map((r) => [r.id, r.takes, r.worktree, r.qa, r.testDbPrefix]),
-    [["1", "any", "../shop-lanes/lane-1", null, null], ["2", "walk", "../shop-lanes/lane-2", "shop_qa_2", "lane2_"]],
+    [["1", "any", "../shop-lanes/lane-1", null, "lane1_"], ["2", "walk", "../shop-lanes/lane-2", "shop_qa_2", "lane2_"]],
   );
   assert.deepEqual(config.lanes.rows[1].ports, [
     { port: 4200, what: "the QA server", freeAfterEachTicket: true, name: "qa" },
     { port: 4201, what: "the dev server", freeAfterEachTicket: false, name: null },
   ]);
-  assert.deepEqual([config.lanes.rows[0].env, config.lanes.rows[1].env], [{}, { CACHE_DB: "2" }]);
+  assert.deepEqual([config.lanes.rows[0].env, config.lanes.rows[1].env], [{ CACHE_DB: "1" }, { CACHE_DB: "2" }]);
   assert.deepEqual(config.lanes.worktreeSetup, LANES.worktreeSetup);
   assert.deepEqual([config.lanes.claims, config.lanes.landing], [{}, {}]);
   assert.deepEqual(config.hotspots, HOTSPOTS);
@@ -315,9 +316,10 @@ test("the runner's loader reads a two-lane config and its hotspots as written", 
   const bare = parseRunConfig(withLanes({ rows: LANES.rows })).lanes;
   assert.deepEqual([bare.claims, bare.worktreeSetup, bare.landing], [{}, { copy: [], commands: [], leaves: [] }, {}]);
   assert.deepEqual(parseRunConfig({ version: 1, phaseRun: { hotspots: { rows: [] } } }).hotspots, { token: null, rows: [] });
-  // Prefixes that don't start each other load side by side.
-  const prefixes = parseRunConfig(withLanes({ rows: [{ ...LANES.rows[0], testDbPrefix: "lane1_" }, LANES.rows[1]] })).lanes.rows;
-  assert.deepEqual(prefixes.map((r) => r.testDbPrefix), ["lane1_", "lane2_"]);
+  // A lane value no lane names is left out of every row: a project without test databases names none.
+  const none = ({ testDbPrefix: _p, env: _e, ...row }) => row;
+  const bareRows = parseRunConfig(withLanes({ rows: LANES.rows.map(none) })).lanes.rows;
+  assert.deepEqual(bareRows.map((r) => [r.testDbPrefix, r.env]), [[null, {}], [null, {}]]);
   // A port row's name, in phaseRun.ports' own rows too.
   assert.deepEqual(parseRunConfig({ version: 1, phaseRun: { ports: [{ port: 4100, what: "the QA server", name: "qa" }] } }).ports, [
     { port: 4100, what: "the QA server", freeAfterEachTicket: false, name: "qa" },
@@ -343,6 +345,7 @@ test("the hooks' loader passes over lanes, hotspots and a port's name, which no 
 
 test("the runner's loader refuses a bad lane table, naming the field", () => {
   const [one, two] = LANES.rows;
+  const withoutKey = (row, key) => Object.fromEntries(Object.entries(row).filter(([name]) => name !== key));
   const { qa: _qa, ...twoWithoutQa } = two;
   const third = { id: 3, takes: "docs", worktree: "../shop-lanes/lane-3", qa: "shop_qa_3", ports: [{ port: 4300, what: "the QA server", name: "qa" }] };
   const rows = (...list) => ({ rows: list });
@@ -357,7 +360,12 @@ test("the runner's loader refuses a bad lane table, naming the field", () => {
     [rows(one, twoWithoutQa), /^phaseRun\.lanes\.rows\[1\] has no "qa", so its QA database is phaseRun\.qa\.name "shop_qa", which is also phaseRun\.lanes\.rows\[0\]'s/],
     // A qa database and no port named qa: its browser check would reach another lane's server.
     [rows(one, { ...two, ports: [{ port: 4200, what: "the QA server" }] }), /^phaseRun\.lanes\.rows\[1\]\.qa is set, but phaseRun\.lanes\.rows\[1\]\.ports has no port named "qa"/],
-    // testDbPrefix: optional, never empty, never unsafe.
+    // Every lane names every lane value another lane names (the source's later fix), or a lane that names
+    // none has nothing to replace whatever it inherits: lane 1 ran on lane 2's test databases there.
+    [rows(withoutKey(one, "testDbPrefix"), two), /^phaseRun\.lanes\.rows\[0\] has no testDbPrefix, but phaseRun\.lanes\.rows\[1\] sets one: every lane names its own test prefix once any lane does/],
+    [rows({ ...one, ports: [] }, two), /^phaseRun\.lanes\.rows\[0\] has no port named "qa", but phaseRun\.lanes\.rows\[1\] has one: every lane names its own QA port once any lane does/],
+    [rows({ ...one, env: {} }, two), /^phaseRun\.lanes\.rows\[0\]\.env has no CACHE_DB, but phaseRun\.lanes\.rows\[1\]\.env sets it: every lane names each env key any lane sets/],
+    // testDbPrefix: never empty, never unsafe.
     [rows(one, { ...two, testDbPrefix: "" }), /^phaseRun\.lanes\.rows\[1\]\.testDbPrefix is set but empty: leave it out/],
     ...["lane-2", "Lane2_", "2lane", "lane 2", "lane%", 2].map((testDbPrefix) => [rows(one, { ...two, testDbPrefix }), /^phaseRun\.lanes\.rows\[1\]\.testDbPrefix .* is unsafe: /]),
     // Each lane its own prefix: one that starts the other's would match its databases too.

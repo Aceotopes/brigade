@@ -811,7 +811,7 @@ export function buildPlan(dir, det, answers, plugin = PLUGIN) {
     try {
       parseRunConfig(workflow);
     } catch (error) {
-      problems.push(`The lanes do not load yet: ${error.message} (the stack walk's values for lane 2 go in answers.workflow's phaseRun.lanes).`);
+      problems.push(`The lanes do not load yet: ${error.message} (the stack walk's values for each lane go in answers.workflow's phaseRun.lanes).`);
     }
   }
   const date = answers.date ?? new Date().toISOString().slice(0, 10);

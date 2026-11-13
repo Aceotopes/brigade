@@ -925,7 +925,12 @@ test("with a QA database, the stack walk's values for lane 2 (its database, its 
   // The walk's answers are the owner's, never defaults (D2): the script proposes no database, port or prefix.
   assert.ok(proposed.lanes.rows.every((row) => !("qa" in row) && !("ports" in row) && !("testDbPrefix" in row)));
   const lane2 = { ...proposed.lanes.rows[1], qa: "desk_qa_lane2", ports: [{ port: 4102, what: "lane 2's QA server", name: "qa" }], testDbPrefix: "lane2_" };
+  // Lane 2's values alone are refused before anything is written: every lane names what another lane names.
   workflow.phaseRun.lanes = { ...proposed.lanes, rows: [proposed.lanes.rows[0], lane2] };
+  const refused = buildPlan(dir, detect(dir), { ...ANSWERS, mode: "merge", workflow, lanes: true });
+  assert.match(refused.problems.join("\n"), /The lanes do not load yet: phaseRun\.lanes\.rows\[0\] has no testDbPrefix, but phaseRun\.lanes\.rows\[1\] sets one/);
+  const lane1 = { ...proposed.lanes.rows[0], ports: [{ port: 4101, what: "lane 1's QA server", name: "qa" }], testDbPrefix: "desk_test_" };
+  workflow.phaseRun.lanes = { ...proposed.lanes, rows: [lane1, lane2] };
   apply(dir, plan(dir, { ...ANSWERS, mode: "merge", workflow, lanes: true }));
   const written = JSON.parse(read(dir, ".claude/workflow.json"));
   assert.deepEqual(written.phaseRun.lanes.rows[1], lane2);

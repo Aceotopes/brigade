@@ -14,7 +14,7 @@ import { CLAIMS_LOCK, UNREADABLE_GRACE_MS, builtOn, claimNext, claimsPath, laneC
 import { compareFingerprint } from "./fingerprint.mjs";
 import { brigadeCatalog, installedBrigade, parsePluginList, readInstalledBrigade, versionStop } from "./brigade.mjs";
 import { readLedger } from "./ledger.mjs";
-import { QUIET_MS, SETTLE_MS, applyMigrations, backgroundArgs, browserCheckVerdict, docCheck, folderTrusted, gatePlan, gotchasFile, holdReason, implementationLogAdded, loadResults, outsideAreas, printArgs, projectGates, promptValues, pullRequestBody, recordResult, render, report, runSession, runVariables, runnerFile, screenshotsSince, sessionSettings, trimmedSettings, turnOver } from "./run.mjs";
+import { QUIET_MS, SETTLE_MS, applyMigrations, backgroundArgs, browserCheckVerdict, docCheck, folderTrusted, gatePlan, gotchasFile, holdReason, implementationLogAdded, laneVariables, loadResults, outsideAreas, printArgs, projectGates, promptValues, pullRequestBody, recordResult, render, report, runSession, runVariables, runnerFile, screenshotsSince, sessionSettings, trimmedSettings, turnOver } from "./run.mjs";
 import { finishSnapshot, readManifest, runnerChanges, takeSnapshot } from "./snapshot.mjs";
 import { PATCH_ARGS } from "./tampering.mjs";
 import { TRIM_FLAGS, readTrim, trimPath } from "./trim.mjs";
@@ -457,6 +457,24 @@ test("the project's gates start with their env and {base} filled in, the alone g
   assert.deepEqual(fake.ran.map((r) => r.line), ["npm run lint", "npm run build", "npm test -- --changed abc123"]);
   assert.deepEqual(fake.ran[1].env, { DATABASE_URL: "postgresql://pg@localhost/cast" });
   assert.deepEqual(jobs, ["freed ports", "stray before the tests gate"], "the group's ports are freed once, before it starts");
+});
+
+// The source's later fix: a lane's suite ran on the other lane's test databases. Here the runner's
+// own gates, and Landing's re-gate (the same projectGates), got only each gate's env.
+test("in a lane, every gate starts with the lane's variables over its own env; without a lane its env is today's", async () => {
+  const laneEnv = laneVariables({ id: "2", qaPort: "4402", qaDatabase: "app_qa_2", testDbPrefix: "lane2_", env: { CACHE_DB: "2" } });
+  assert.deepEqual(laneEnv, { CACHE_DB: "2", PHASE_RUN_LANE: "2", PHASE_RUN_QA_PORT: "4402", PHASE_RUN_QA_DATABASE: "app_qa_2", PHASE_RUN_TEST_DB_PREFIX: "lane2_" });
+  assert.deepEqual(laneVariables(null), {}, "no lane, no variables");
+  const config = runConfig({ gates: [{ label: "tests", run: "npm test", env: { PHASE_RUN_TEST_DB_PREFIX: "a gate's own", OTHER: "x" } }] });
+  const inLane = fakeStart();
+  await projectGates(gatePlan({ base: "b", diff: modified("src/a.ts"), config }), { values: { base: "b" }, browserCheck: () => null, start: inLane.start, tickMs: 5, laneEnv });
+  assert.deepEqual(inLane.ran[0].env, { OTHER: "x", ...laneEnv }, "the lane's value wins over a gate's own");
+  const alone = fakeStart();
+  await projectGates(gatePlan({ base: "b", diff: modified("src/a.ts"), config }), { values: { base: "b" }, browserCheck: () => null, start: alone.start, tickMs: 5 });
+  assert.deepEqual(alone.ran[0].env, { PHASE_RUN_TEST_DB_PREFIX: "a gate's own", OTHER: "x" });
+  // Both of the runner's gate runs pass the lane's variables: the ticket's gates and Landing's re-gate.
+  const source = readFileSync(join(HERE, "run.mjs"), "utf8").replace(/\r\n/g, "\n");
+  assert.equal(source.match(/await projectGates\(plan, \{\n    values: [^\n]+\n    laneEnv: laneVariables\(lane \? laneValues\(lane, config\) : null\),/g)?.length, 2);
 });
 
 test("a gate whose when matches no changed file is skipped, and a failure in the group keeps the alone gates from starting", async () => {
@@ -1558,7 +1576,8 @@ const LANES = {
   qa: { name: "app_qa", url: "postgresql://qa:pw@localhost:5432/app_qa?schema=public" },
   lanes: {
     rows: [
-      { id: 1, takes: "any", worktree: "../app-lanes/lane-1" },
+      // Lane 1 names every lane value lane 2 does (config.mjs parseLanes): its QA port, test prefix and env key.
+      { id: 1, takes: "any", worktree: "../app-lanes/lane-1", ports: [{ port: 4401, what: "its QA server", name: "qa" }], testDbPrefix: "lane1_", env: { CACHE_DB: "1" } },
       { id: 2, takes: "walk", worktree: "../app-lanes/lane-2", qa: "app_qa_2", ports: [{ port: 4402, what: "its QA server", name: "qa" }, { port: 4403, what: "its mail catcher" }], testDbPrefix: "lane2_", env: { CACHE_DB: "2" } },
     ],
     worktreeSetup: { copy: [".env"], commands: [MAKE_TOOL], leaves: ["node_modules/.bin/tool"] },
@@ -1763,9 +1782,10 @@ test("a lane session's env holds the lane's PHASE_RUN_* values and its row's env
     PHASE_RUN_TEST_DB_PREFIX: "lane2_",
   });
   assert.equal("PHASE_RUN_FAKE_NOW" in env, false, "reserved, set by no runner code");
-  // Lane 1's row has no qa port and no prefix: its database is qa.name's, and the project's own test names apply.
+  // Lane 1's row has no qa of its own: its database is qa.name's. It names its own port, prefix and env key, as lane 2 does,
+  // so nothing lane 1 inherits can stand in for one (config.mjs parseLanes, the source's later fix).
   const one = runVariables({ ticket: 7, base: "abc", spec: null, runner: "r", root: "/w", lane: laneValues(laneRow(config, "1"), config) });
-  assert.deepEqual([one.PHASE_RUN_LANE, one.PHASE_RUN_QA_DATABASE, "PHASE_RUN_QA_PORT" in one, "PHASE_RUN_TEST_DB_PREFIX" in one], ["1", "app_qa", false, false]);
+  assert.deepEqual([one.PHASE_RUN_LANE, one.PHASE_RUN_QA_DATABASE, one.PHASE_RUN_QA_PORT, one.PHASE_RUN_TEST_DB_PREFIX, one.CACHE_DB], ["1", "app_qa", "4401", "lane1_", "1"]);
   // A row's env never names a runner variable.
   const reserved = { ...LANES, lanes: { rows: [{ id: 2, takes: "any", worktree: "../w", env: { PHASE_RUN_ROOT: "/elsewhere" } }] } };
   assert.match(refusal(() => runConfig(reserved)), /env names PHASE_RUN_ROOT: PHASE_RUN_\* names are the runner's own/);

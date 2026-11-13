@@ -551,6 +551,21 @@ function parseLanes(section, where, qa) {
       }
     });
   });
+  // Every lane names every lane value another lane names. A lane whose row leaves one out gets no
+  // variable for it, so nothing replaces what its session or a gate inherits; at the source, lane 1
+  // ran on lane 2's test databases that way, its cause never traced. A value no lane names is fine.
+  const named = (j, has) => lanes.findIndex((other, k) => k !== j && has(other));
+  lanes.forEach((lane, i) => {
+    let j = lane.testDbPrefix === null ? named(i, (other) => other.testDbPrefix !== null) : -1;
+    if (j !== -1) throw new Error(`${at(i)} has no testDbPrefix, but ${at(j)} sets one: every lane names its own test prefix once any lane does (lane 1's can be the project's own test names' prefix).`);
+    const qaPort = (row) => row.ports.some((port) => port.name === "qa");
+    j = qaPort(lane) ? -1 : named(i, qaPort);
+    if (j !== -1) throw new Error(`${at(i)} has no port named "qa", but ${at(j)} has one: every lane names its own QA port once any lane does.`);
+    for (const [k, other] of lanes.entries()) {
+      const missing = k === i ? undefined : Object.keys(other.env).find((key) => !(key in lane.env));
+      if (missing) throw new Error(`${at(i)}.env has no ${missing}, but ${at(k)}.env sets it: every lane names each env key any lane sets.`);
+    }
+  });
   return {
     rows: lanes,
     claims: noKeysYet(section.claims, `${where}.claims`, KEYS.claims),
@@ -567,7 +582,7 @@ export function laneDatabase(lane, qa) {
   return lane.qa ?? qa?.name ?? null;
 }
 
-/** One lane row. `takes` is "any" or a label the project picks; `testDbPrefix` may be left out, never set empty. */
+/** One lane row. `takes` is "any" or a label the project picks; `testDbPrefix` may be left out (by every lane, parseLanes), never set empty. */
 function parseLane(row, at, qa) {
   keys(row, KEYS.lane, at);
   const lane = {

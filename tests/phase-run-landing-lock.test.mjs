@@ -307,6 +307,13 @@ test("a restart's action for each kept commit: land a recorded pass, keep one ne
   assert.equal(died[0].action, "record-landed", "landed, but its result still says unlanded");
   const other = restartSteps({ found: [{ commit: a, ticket: 6, state: "unlanded" }], results: [{ ...results[0], commit: b, hash: "bbbbbbb" }], lane: "1" });
   assert.equal(other[0].action, "keep", "a result for another commit of the ticket is not this commit's pass");
+  // The source's later fix: "built, not landed" was read off an older row of the same ticket. Two rows
+  // for one commit (a pass, then its park at Landing): the newest says what the commit is.
+  const older = { ...results[0] };
+  const newer = { ...results[0], status: "failed", landed: false, keptOn: `${BRANCH}-parked-6` };
+  const twice = restartSteps({ found: [{ commit: a, ticket: 6, state: "unlanded" }], results: [older, newer], lane: "1" });
+  assert.equal(twice[0].result, newer, "the newest row for that very commit");
+  assert.equal(twice[0].action, "keep", "its newest row is no pending pass, so it is never landed off the older one");
 });
 
 test("a dead landing's record is undone only while the checkout is still where it left it", async () => {

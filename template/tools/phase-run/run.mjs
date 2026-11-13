@@ -1720,7 +1720,7 @@ const SKIP_REASONS = {
  * up). Finished jobs are collected each tick; on a failure, every failure of that tick is reported,
  * the jobs still running are killed and waited for, and the ones not started never start.
  */
-async function gateGroup(gates, { values, start, tickMs }) {
+async function gateGroup(gates, { values, start, tickMs, laneEnv = {} }) {
   const labels = new Set(gates.map((gate) => gate.label));
   const passed = new Set();
   const running = new Map();
@@ -1728,7 +1728,8 @@ async function gateGroup(gates, { values, start, tickMs }) {
   const startReady = () => {
     const ready = (gate) => !gate.after || !labels.has(gate.after) || passed.has(gate.after);
     for (const gate of waiting.filter(ready)) {
-      const entry = { job: start(fill(gate.run, values), fillEnv(gate.env, values)), result: null };
+      // A lane's variables over the gate's own env: a lane's suite names its own test databases.
+      const entry = { job: start(fill(gate.run, values), { ...fillEnv(gate.env, values), ...laneEnv }), result: null };
       entry.job.done.then((result) => (entry.result = result));
       running.set(gate, entry);
     }
@@ -1765,10 +1766,10 @@ async function gateGroup(gates, { values, start, tickMs }) {
  * The project's gates (phaseRun.gates), as `gatePlan` decided them: the tampering verdict first (D12),
  * then the parallel group, then each `alone` gate by itself (strays stopped first), then the browser
  * check, wherever the config places it. The first failure is returned as `{ gate, output }`, or null.
- * `{cache}` is emptied before any gate starts. The job starter and the side jobs are parameters, so
- * a test can stand in for them.
+ * `{cache}` is emptied before any gate starts. `laneEnv` is a lane's variables (laneVariables), none
+ * without a lane. The job starter and the side jobs are parameters, so a test can stand in for them.
  */
-async function projectGates(plan, { values, browserCheck, start = startJob, tickMs = GATE_TICK_MS, freePorts = freeTicketPorts, stopStray: stop = () => 0 }) {
+async function projectGates(plan, { values, browserCheck, start = startJob, tickMs = GATE_TICK_MS, freePorts = freeTicketPorts, stopStray: stop = () => 0, laneEnv = {} }) {
   if (plan.tampering && !plan.tampering.ok) return { gate: "tampering", output: plan.tampering.output };
   if (values.cache) {
     rmSync(values.cache, { recursive: true, force: true });
@@ -1777,12 +1778,12 @@ async function projectGates(plan, { values, browserCheck, start = startJob, tick
   const live = plan.gates.filter(({ gate, skip }) => !gate.builtin && !skip).map(({ gate }) => gate);
   const group = live.filter((gate) => !gate.alone);
   if (group.some((gate) => gate.freePorts)) await freePorts();
-  const failed = await gateGroup(group, { values, start, tickMs });
+  const failed = await gateGroup(group, { values, start, tickMs, laneEnv });
   if (failed) return failed;
   for (const gate of live.filter((g) => g.alone)) {
     if (gate.freePorts) await freePorts();
     stop(`before the ${gate.label} gate`);
-    const alone = await gateGroup([gate], { values, start, tickMs });
+    const alone = await gateGroup([gate], { values, start, tickMs, laneEnv });
     if (alone) return alone;
   }
   if (plan.gates.some(({ gate }) => gate.builtin === BROWSER_CHECK)) {
@@ -1858,6 +1859,7 @@ async function runGates(ticket, base, options, run, startedAt) {
   let fingerprint = null;
   const failed = await projectGates(plan, {
     values: { base, N: n, qaUrl: runQaUrl(), cache: gateCache() },
+    laneEnv: laneVariables(lane ? laneValues(lane, config) : null),
     browserCheck: () => {
       const verdict = browserCheckVerdict({ check: config.browserCheck, ticket, changed, startedAt, root: work });
       fingerprint = verdict.fingerprint;
@@ -2243,6 +2245,7 @@ async function regateLanded(ticket, { base, head }, run) {
   });
   const failed = await projectGates(plan, {
     values: { base, N: n, qaUrl: runQaUrl(), cache: gateCache() },
+    laneEnv: laneVariables(lane ? laneValues(lane, config) : null),
     browserCheck: () => null,
     stopStray: (when) => stopStray(`${when} for #${n}'s landing`),
   });
@@ -2448,21 +2451,32 @@ function sessionFacts(result, previous) {
  */
 function runVariables({ ticket, base, spec, runner, root, lane = null }) {
   return {
-    // A lane row's own env (D4) first, so no row can replace a runner variable (the loader refuses one too).
-    ...(lane?.env ?? {}),
     PHASE_RUN: "1",
     PHASE_RUN_TICKET: String(ticket),
     PHASE_RUN_BASE: base,
     ...(spec ? { PHASE_RUN_SPEC: String(spec) } : {}),
     PHASE_RUN_RUNNER: runner,
     PHASE_RUN_ROOT: root,
-    // A lane's session only (0.7.0, lane.mjs laneValues): doc-check then accepts the number token
-    // (ADR 0006), and the project's tools read the lane's QA port, QA database and test prefix (D2).
-    // A value the row leaves out is left unset: lane 1 then keeps the project's own test names.
-    ...(lane ? { PHASE_RUN_LANE: lane.id } : {}),
-    ...(lane?.qaPort ? { PHASE_RUN_QA_PORT: lane.qaPort } : {}),
-    ...(lane?.qaDatabase ? { PHASE_RUN_QA_DATABASE: lane.qaDatabase } : {}),
-    ...(lane?.testDbPrefix ? { PHASE_RUN_TEST_DB_PREFIX: lane.testDbPrefix } : {}),
+    ...laneVariables(lane),
+  };
+}
+
+/**
+ * A lane's own variables (0.7.0, D2, D4), from lane.mjs laneValues: its row's env, then
+ * PHASE_RUN_LANE (doc-check then accepts the number token, ADR 0006) and the QA port, QA database
+ * and test prefix the project's tools read. Empty without a lane. The session gets them
+ * (runVariables), and so does every gate the runner runs for the lane, Landing's re-gate included
+ * (projectGates). Every lane names every value another lane names (config.mjs parseLanes), so none
+ * is left to what a lane inherits. A row's env never names a PHASE_RUN_* variable (the loader).
+ */
+function laneVariables(lane) {
+  if (!lane) return {};
+  return {
+    ...(lane.env ?? {}),
+    PHASE_RUN_LANE: lane.id,
+    ...(lane.qaPort ? { PHASE_RUN_QA_PORT: lane.qaPort } : {}),
+    ...(lane.qaDatabase ? { PHASE_RUN_QA_DATABASE: lane.qaDatabase } : {}),
+    ...(lane.testDbPrefix ? { PHASE_RUN_TEST_DB_PREFIX: lane.testDbPrefix } : {}),
   };
 }
 
@@ -3120,6 +3134,7 @@ export {
   report,
   runSession,
   runVariables,
+  laneVariables,
   runnerFile,
   screenshotsSince,
   sessionEnv,

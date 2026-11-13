@@ -247,7 +247,8 @@ reads. Your project's own code reads them. In the sketch below, each `<…>` is 
 ```json
 "lanes": {
   "rows": [
-    { "id": 1, "takes": "any", "worktree": "../<repo>-lanes/lane-1" },
+    { "id": 1, "takes": "any", "worktree": "../<repo>-lanes/lane-1",
+      "ports": [{ "port": <your QA port>, "what": "lane 1's QA server", "name": "qa" }], "testDbPrefix": "<your test names' prefix>" },
     { "id": 2, "takes": "<lane 2's label>", "worktree": "../<repo>-lanes/lane-2", "qa": "<lane 2's QA database>",
       "ports": [{ "port": <a free port>, "what": "lane 2's QA server", "name": "qa" }], "testDbPrefix": "lane2_" }
   ],
@@ -277,6 +278,9 @@ export async function fixClock(page) {
 }
 ```
 
+- **Every lane names its own values.** Once one row sets a test prefix, a port named `qa` or an
+  `env` key, every row must, or the run refuses to start. The runner hands a lane's values to its
+  session and to every gate it runs for that lane, Landing's re-gate included.
 - **The helper** is the only place that reads the lane's variables. A test or a script asks it for
   a name or an address, so lane 2 never touches lane 1's databases or server.
 - **The lint rule** keeps it that way. It refuses a hard-coded address in a browser script.
